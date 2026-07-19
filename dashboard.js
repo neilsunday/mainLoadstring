@@ -30,6 +30,7 @@ let currentUser = null;
 
 // ---------- Init ----------
 (async function init() {
+  await handleOAuthCallback();
   const user = await requireAuth();
   if (!user) return;
 
