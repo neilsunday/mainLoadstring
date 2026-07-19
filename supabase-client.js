@@ -11,13 +11,37 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: true,
-    flowType: "implicit",
+    flowType: "pkce",
   },
 });
 
+async function processOAuthHash() {
+  if (!window.location.hash.includes("access_token")) return null;
+  if (typeof sb.auth.getSessionFromUrl !== "function") return null;
+
+  try {
+    const { data, error } = await sb.auth.getSessionFromUrl({
+      storeSession: true,
+    });
+    if (error) {
+      console.warn("Failed to process OAuth session from URL:", error);
+      return null;
+    }
+    return data?.session ?? null;
+  } catch (err) {
+    console.warn("OAuth session processing error:", err);
+    return null;
+  }
+}
+
 // Wait for OAuth session using onAuthStateChange event
-async function waitForSession(maxWaitMs = 5000) {
+async function waitForSession(maxWaitMs = 8000) {
   const hasOAuthHash = window.location.hash.includes("access_token");
+
+  if (hasOAuthHash) {
+    const processedSession = await processOAuthHash();
+    if (processedSession) return processedSession;
+  }
 
   const {
     data: { session: existingSession },
