@@ -2,8 +2,7 @@
 // Supabase Client - Shared across all pages
 // ==========================================
 
-const SUPABASE_URL =
-  "[uwxsgijolhlpnihdelrq.supabase.co](https://uwxsgijolhlpnihdelrq.supabase.co)";
+const SUPABASE_URL = "https://uwxsgijolhlpnihdelrq.supabase.co";
 const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV3eHNnaWpvbGhscG5paGRlbHJxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ0NTUyNTEsImV4cCI6MjEwMDAzMTI1MX0.CMNhOEN5Ll03ezQRND7w6Ji5NFvG5gzI1j8bf0wu_GI";
 
