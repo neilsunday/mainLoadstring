@@ -119,5 +119,17 @@
         }
       })();
     </script>
+    <script>
+      setTimeout(async () => {
+        console.log("URL hash:", window.location.hash);
+        const result = await sb.auth.getSession();
+        console.log("Session after 5s:", result);
+        if (result.data.session) {
+          alert("SESSION WORKS! User: " + result.data.session.user.email);
+        } else {
+          alert("NO SESSION after 5s. Hash: " + window.location.hash);
+        }
+      }, 5000);
+    </script>
   </body>
 </html>
