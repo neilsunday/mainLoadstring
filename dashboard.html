@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard · Loadstring Gen</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <nav class="app-nav">
+      <div class="brand">Dashboard</div>
+
+      <div class="nav-links">
+        <a href="dashboard.html" class="active">Dashboard</a>
+        <a href="saved.html">Saved Scripts</a>
+        <a href="admin.html" id="adminLink" class="hidden">Admin</a>
+      </div>
+
+      <div class="user-info">
+        <span id="userEmail">Loading...</span>
+        <button id="logoutBtn" class="secondary small">Logout</button>
+      </div>
+    </nav>
+
+    <div class="app-container">
+      <div class="page-header">
+        <h1>Loadstring Generator</h1>
+        <p>Paste your Lua code below or upload a file.</p>
+      </div>
+
+      <div class="card">
+        <label for="scriptName">Script Name</label>
+        <input
+          type="text"
+          id="scriptName"
+          placeholder="Enter script name: "
+          maxlength="100"
+        />
+
+        <label for="scriptCode" style="margin-top: 18px">
+          Lua Code
+          <span
+            id="charCount"
+            style="
+              float: right;
+              color: var(--muted);
+              font-weight: normal;
+              font-size: 0.82rem;
+            "
+            >0 characters</span
+          >
+        </label>
+        <textarea
+          id="scriptCode"
+          placeholder="Your Lua code here: "
+          spellcheck="false"
+        ></textarea>
+
+        <!-- Upload file option -->
+        <div class="row" style="justify-content: flex-start; margin-top: 12px">
+          <input
+            type="file"
+            id="fileUpload"
+            accept=".lua,.txt"
+            style="display: none"
+          />
+          <button type="button" id="uploadBtn" class="secondary small">
+            Upload File
+          </button>
+          <button type="button" id="clearBtn" class="secondary small">
+            Clear
+          </button>
+          <span id="fileName" class="muted" style="margin-left: 8px"></span>
+        </div>
+
+        <div class="row">
+          <button type="button" id="saveBtn" class="primary" disabled>
+            Save Script
+          </button>
+        </div>
+
+        <div id="message" class="message hidden"></div>
+      </div>
+
+      <!-- Result Card (hidden by default) -->
+      <div id="resultCard" class="card hidden">
+        <h2>Script Saved!</h2>
+        <p style="color: var(--text-dim); margin-top: 8px; font-size: 0.9rem">
+          Your loadstring — paste this sa Roblox executor mo:
+        </p>
+        <div class="output-box" style="margin-top: 12px">
+          <code id="loadstringOutput"></code>
+        </div>
+        <div class="row">
+          <button type="button" id="copyBtn" class="secondary small">
+            Copy Loadstring
+          </button>
+          <a href="saved.html" class="muted" style="font-size: 0.88rem">
+            View all saved scripts →
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="supabase-client.js"></script>
+    <script src="dashboard.js"></script>
+    <script>
+      (function () {
+        try {
+          console.info("DIAG dashboard.html loaded", {
+            path: location.pathname,
+            appContainers: document.querySelectorAll(".app-container").length,
+            hasSearchInput: !!document.getElementById("searchInput"),
+            hasScriptName: !!document.getElementById("scriptName"),
+          });
+        } catch (e) {
+          console.error("diag error", e);
+        }
+      })();
+    </script>
+  </body>
+</html>

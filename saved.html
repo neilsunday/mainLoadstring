@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Saved Scripts - Loadstring Gen</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <nav class="app-nav">
+      <div class="brand">Loadstring Gen</div>
+
+      <div class="nav-links">
+        <a href="dashboard.html">Dashboard</a>
+        <a href="saved.html" class="active">Saved Scripts</a>
+        <a href="admin.html" id="adminLink" class="hidden">Admin</a>
+      </div>
+
+      <div class="user-info">
+        <span id="userEmail">Loading...</span>
+        <button id="logoutBtn" class="secondary small">Logout</button>
+      </div>
+    </nav>
+
+    <div class="app-container">
+      <div class="page-header">
+        <h1>Saved Scripts</h1>
+        <p>
+          Lahat ng scripts mo dito. Pwede mong i-edit, i-copy loadstring, o
+          i-delete.
+        </p>
+      </div>
+
+      <!-- Search bar -->
+      <div class="card" style="padding: 16px 20px">
+        <input
+          type="text"
+          id="searchInput"
+          placeholder="Search scripts by name..."
+          style="margin: 0"
+        />
+      </div>
+
+      <!-- Loading state -->
+      <div id="loadingState" class="card text-center" style="padding: 40px">
+        <div
+          class="spinner"
+          style="
+            width: 24px;
+            height: 24px;
+            border-color: var(--muted);
+            border-top-color: var(--primary);
+            margin: 0 auto 12px;
+          "
+        ></div>
+        <p class="muted">Loading your scripts...</p>
+      </div>
+
+      <!-- Empty state (hidden by default) -->
+      <div id="emptyState" class="card empty-state hidden">
+        <div class="icon">📝</div>
+        <p>Wala ka pang saved scripts.</p>
+        <a href="dashboard.html">
+          <button class="primary">Create your first script</button>
+        </a>
+      </div>
+
+      <!-- Script list (hidden by default) -->
+      <div id="scriptList" class="script-list hidden"></div>
+    </div>
+
+    <!-- Edit Modal (hidden by default) -->
+    <div id="editModal" class="modal-backdrop hidden">
+      <div class="modal">
+        <div class="modal-header">
+          <h2>Edit Script</h2>
+          <button type="button" id="closeModalBtn" class="icon-btn">✕</button>
+        </div>
+
+        <label for="editName">Script Name</label>
+        <input type="text" id="editName" maxlength="100" />
+
+        <label for="editCode" style="margin-top: 14px">
+          Lua Code
+          <span
+            id="editCharCount"
+            style="
+              float: right;
+              color: var(--muted);
+              font-weight: normal;
+              font-size: 0.82rem;
+            "
+            >0 characters</span
+          >
+        </label>
+        <textarea id="editCode" spellcheck="false"></textarea>
+
+        <div id="editMessage" class="message hidden"></div>
+
+        <div class="row">
+          <button type="button" id="cancelEditBtn" class="secondary">
+            Cancel
+          </button>
+          <button type="button" id="saveEditBtn" class="primary">
+            Save Changes
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      id="notificationContainer"
+      class="notification-container"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="supabase-client.js"></script>
+    <script src="saved.js"></script>
+    <script>
+      (function () {
+        try {
+          console.info("DIAG saved.html loaded", {
+            path: location.pathname,
+            appContainers: document.querySelectorAll(".app-container").length,
+            hasScriptName: !!document.getElementById("scriptName"),
+            hasSearchInput: !!document.getElementById("searchInput"),
+          });
+        } catch (e) {
+          console.error("diag error", e);
+        }
+      })();
+    </script>
+  </body>
+</html>
