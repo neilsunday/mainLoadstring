@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Dashboard · Loadstring Gen</title>
+    <title>Dashboard Â· Loadstring Gen</title>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -73,7 +73,38 @@
           <span id="fileName" class="muted" style="margin-left: 8px"></span>
         </div>
 
-        <div class="row">
+        <!-- Obfuscation Level Selector -->
+        <div style="margin-top: 20px">
+          <label for="obfuscationLevel">
+            Obfuscation Level
+            <span
+              class="muted"
+              style="font-weight: normal; font-size: 0.82rem; margin-left: 6px"
+              >(Luraph-inspired protection)</span
+            >
+          </label>
+          <select
+            id="obfuscationLevel"
+            style="
+              width: 100%;
+              padding: 10px 12px;
+              margin-top: 6px;
+              background: var(--card, #1a1a2e);
+              color: var(--text, #fff);
+              border: 1px solid var(--border, #2a2a3e);
+              border-radius: 6px;
+              font-size: 0.95rem;
+              cursor: pointer;
+            "
+          >
+            <option value="none">None â€” save as plain text (no protection)</option>
+            <option value="basic">Basic â€” remove comments and minify</option>
+            <option value="medium" selected>Medium â€” string encryption + number encoding (recommended)</option>
+            <option value="maximum">Maximum â€” all protections (slower, strongest)</option>
+          </select>
+        </div>
+
+        <div class="row" style="margin-top: 18px">
           <button type="button" id="saveBtn" class="primary" disabled>
             Save Script
           </button>
@@ -96,7 +127,7 @@
             Copy Loadstring
           </button>
           <a href="saved.html" class="muted" style="font-size: 0.88rem">
-            View all saved scripts →
+            View all saved scripts â†’
           </a>
         </div>
       </div>
@@ -105,32 +136,6 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="supabase-client.js"></script>
     <script src="dashboard.js"></script>
-    <script>
-      (function () {
-        try {
-          console.info("DIAG dashboard.html loaded", {
-            path: location.pathname,
-            appContainers: document.querySelectorAll(".app-container").length,
-            hasSearchInput: !!document.getElementById("searchInput"),
-            hasScriptName: !!document.getElementById("scriptName"),
-          });
-        } catch (e) {
-          console.error("diag error", e);
-        }
-      })();
-    </script>
-    <script>
-      setTimeout(async () => {
-        console.log("URL hash:", window.location.hash);
-        const result = await sb.auth.getSession();
-        console.log("Session after 5s:", result);
-        if (result.data.session) {
-          console.log("SESSION WORKS! User:", result.data.session.user.email);
-        } else {
-          console.log("NO SESSION after 5s. Hash:", window.location.hash);
-        }
-      }, 5000);
-    </script>
     <script src="anti-tamper.js"></script>
   </body>
 </html>
