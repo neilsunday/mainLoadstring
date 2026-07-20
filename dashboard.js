@@ -1,9 +1,36 @@
-// ==========================================
-// Dashboard - Script Editor Logic
-// ==========================================
+async function handleOAuthCallback() {
+  const hasHash =
+    window.location.hash.includes("access_token") ||
+    window.location.hash.includes("error");
+  const hasCode = window.location.search.includes("code=");
+  if (!hasHash && !hasCode) return;
 
-// ---------- CONFIG ----------
-// Edge Function URL that serves the raw Lua script for Roblox game:HttpGet()
+  console.log("[Dashboard] OAuth callback detected, waiting for session...");
+  await new Promise((resolve) => {
+    let done = false;
+    const {
+      data: { subscription },
+    } = sb.auth.onAuthStateChange((event, session) => {
+      console.log("[Dashboard] Auth event:", event);
+      if (session && !done) {
+        done = true;
+        subscription.unsubscribe();
+        history.replaceState(null, "", window.location.pathname);
+        console.log("[Dashboard] Session established");
+        resolve();
+      }
+    });
+    setTimeout(() => {
+      if (!done) {
+        done = true;
+        subscription.unsubscribe();
+        console.warn("[Dashboard] OAuth wait timeout");
+        resolve();
+      }
+    }, 10000);
+  });
+}
+
 const RAW_ENDPOINT =
   "https://uwxsgijolhlpnihdelrq.supabase.co/functions/v1/raw";
 
