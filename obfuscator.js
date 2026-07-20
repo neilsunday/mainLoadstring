@@ -257,12 +257,71 @@ function wrapOpaquePredicate(code) {
     "((\"a\"..\"b\")==\"ab\")",
     "(type(1)==\"number\")",
     "(math.floor(1.5)==1)",
-    "(string.len(\"x\")==1)"
+    "(string.len(\"x\")==1)",
+    "(bit32.band(15,15)==15)",
+    "(math.max(1,2)==2)"
   ];
   const cond = randChoice(trueConds);
-  const junkVar = randHexName(5);
-  const junk = `local ${junkVar}=${randInt(1, 999)}*${randInt(1, 999)} local ${randHexName(5)}=${randInt(0, 999)}+${randInt(0, 999)}`;
+  const junkVar1 = randHexName(5);
+  const junkVar2 = randHexName(5);
+  const junkVar3 = randHexName(5);
+  const junk = `local ${junkVar1}=${randInt(1, 999)}*${randInt(1, 999)} local ${junkVar2}=${randInt(0, 999)}+${randInt(0, 999)} local ${junkVar3}=math.floor(${junkVar1}/${randInt(2, 9)})`;
   return `if ${cond} then\n${code}\nelse\n${junk}\nend`;
+}
+
+function generateJunkFunctions(count = 3) {
+  const junks = [];
+  for (let i = 0; i < count; i++) {
+    const fn = randHexName(6);
+    const p1 = randHexName(3);
+    const p2 = randHexName(3);
+    const junkOps = [
+      `return ${p1}+${p2}`,
+      `return ${p1}*${p2}-${randInt(1, 100)}`,
+      `return math.floor(${p1}/${randInt(2, 9)})`,
+      `return bit32.bxor(${p1},${p2})`,
+      `if ${p1}>${p2} then return ${p1} else return ${p2} end`,
+    ];
+    junks.push(`local function ${fn}(${p1},${p2}) ${randChoice(junkOps)} end`);
+  }
+  return junks.join(" ");
+}
+
+function generateAntiDebug() {
+  const wrapper = randHexName(6);
+  const checkFn = randHexName(5);
+  const okVar = randHexName(4);
+  return [
+    `local ${wrapper}=function()`,
+    `local ${checkFn}=function()`,
+    `if debug and debug.getinfo then`,
+    `local ${okVar}=pcall(function() return debug.getinfo(1,"S") end)`,
+    `if not ${okVar} then return true end`,
+    `end`,
+    `if debug and debug.sethook then`,
+    `local h=debug.gethook and debug.gethook()`,
+    `if h then return true end`,
+    `end`,
+    `return false`,
+    `end`,
+    `if ${checkFn}() then`,
+    `while true do end`,
+    `end`,
+    `end`,
+    `${wrapper}()`
+  ].join(" ");
+}
+
+function generateIntegrityCheck(payloadLength) {
+  const varName = randHexName(5);
+  const expectedLen = payloadLength;
+  const dummy1 = randHexName(4);
+  const dummy2 = randHexName(4);
+  return [
+    `local ${varName}=${expectedLen}`,
+    `local ${dummy1}=math.floor(${varName}/${randInt(2, 9)})`,
+    `local ${dummy2}=bit32.bxor(${varName},${randInt(1, 255)})`
+  ].join(" ");
 }
 
 function bytesToBase64(bytes) {
@@ -309,6 +368,29 @@ function makePayloadDecoder(varName, xorKey) {
   ].join(" ");
 }
 
+function makeVmDispatcher(payloadVar, decoderVar, execFnVar) {
+  const stateVar = randHexName(4);
+  const opsTable = randHexName(4);
+  const initState = randInt(1, 4);
+  const stateA = initState;
+  const stateB = initState + 1;
+  const stateC = initState + 2;
+  const stateEnd = initState + 3;
+  return [
+    `local ${stateVar}=${stateA}`,
+    `local ${opsTable}={}`,
+    `${opsTable}[${stateA}]=function() return ${stateB} end`,
+    `${opsTable}[${stateB}]=function() return ${stateC} end`,
+    `${opsTable}[${stateC}]=function()`,
+    `local _L=loadstring or load`,
+    `local ${execFnVar}=_L(${decoderVar}(${payloadVar}))`,
+    `if ${execFnVar} then ${execFnVar}() end`,
+    `return ${stateEnd}`,
+    `end`,
+    `while ${stateVar}~=${stateEnd} do ${stateVar}=${opsTable}[${stateVar}]() end`
+  ].join(" ");
+}
+
 async function obfuscate(luaCode, level = "medium") {
   try {
     let code = preprocess(luaCode);
@@ -341,18 +423,24 @@ async function obfuscate(luaCode, level = "medium") {
     combined = wrapOpaquePredicate(combined);
     combined = wrapOpaquePredicate(combined);
 
+    const junkFns = generateJunkFunctions(randInt(2, 5));
+    combined = `${junkFns}\n${combined}`;
+
     const payloadXor = randInt(40, 240);
     const encPayload = encryptPayload(combined, payloadXor);
     const payloadDec = makePayloadDecoder("_P", payloadXor);
     const strVar = randHexName(7);
-    const fnVar = randHexName(6);
+    const execVar = randHexName(6);
+    const antiDebug = generateAntiDebug();
+    const integrity = generateIntegrityCheck(encPayload.length);
+    const vmDispatch = makeVmDispatcher(strVar, "_P", execVar);
 
     const finalCode = [
+      antiDebug,
       payloadDec,
+      integrity,
       `local ${strVar}="${encPayload}"`,
-      `local _L=loadstring or load`,
-      `local ${fnVar}=_L(_P(${strVar}))`,
-      `if ${fnVar} then ${fnVar}() end`
+      vmDispatch
     ].join("\n");
 
     return minify(finalCode);
