@@ -1,11 +1,12 @@
 // ==========================================
 // Loadstring Gen - Node.js Server (Render Web Service)
-// Serves static frontend + proxies loadstring endpoint
+// Serves static frontend + proxies loadstring endpoint + obfuscation API
 // ==========================================
 
 const express = require("express");
 const path = require("path");
 const https = require("https");
+const { obfuscate } = require("./obfuscator");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -14,20 +15,63 @@ const PORT = process.env.PORT || 10000;
 const SUPABASE_RAW_URL =
   "https://uwxsgijolhlpnihdelrq.supabase.co/functions/v1/raw";
 
+// ---------- JSON body parser (for /obfuscate endpoint) ----------
+// 12MB limit to support up to 10MB scripts + overhead
+app.use(express.json({ limit: "12mb" }));
+
 // ---------- Static file serving ----------
-// Serves index.html, dashboard.html, saved.html, style.css, all .js files, etc.
 app.use(
   express.static(path.join(__dirname), {
     extensions: ["html"],
   }),
 );
 
-// ---------- Loadstring proxy: /s/:id ----------
-// Roblox calls this URL, we proxy it to Supabase Edge Function
+// ==========================================
+// POST /obfuscate - Backend Obfuscator API
+// ==========================================
+app.post("/obfuscate", (req, res) => {
+  try {
+    const { code, level } = req.body || {};
+
+    if (!code || typeof code !== "string") {
+      res.status(400).json({ error: "Missing or invalid 'code' field" });
+      return;
+    }
+
+    if (code.length > 10 * 1024 * 1024) {
+      res.status(413).json({ error: "Code too large (max 10MB)" });
+      return;
+    }
+
+    const validLevels = ["none", "basic", "medium", "maximum"];
+    const obfLevel = validLevels.includes(level) ? level : "medium";
+
+    const start = Date.now();
+    const obfuscated = obfuscate(code, obfLevel);
+    const elapsed = Date.now() - start;
+
+    res.json({
+      success: true,
+      level: obfLevel,
+      original_size: code.length,
+      obfuscated_size: obfuscated.length,
+      elapsed_ms: elapsed,
+      code: obfuscated,
+    });
+  } catch (err) {
+    console.error("Obfuscate endpoint error:", err.message);
+    res.status(500).json({
+      error: err.message || "Obfuscation failed",
+    });
+  }
+});
+
+// ==========================================
+// GET /s/:id - Loadstring proxy
+// ==========================================
 app.get("/s/:id", (req, res) => {
   const scriptId = req.params.id;
 
-  // Validate ID format
   if (!/^[a-zA-Z0-9]{4,32}$/.test(scriptId)) {
     res.status(400).type("text/plain").send("-- Invalid script ID");
     return;
@@ -35,32 +79,24 @@ app.get("/s/:id", (req, res) => {
 
   const supabaseUrl = `${SUPABASE_RAW_URL}?id=${encodeURIComponent(scriptId)}`;
   const userAgent = req.headers["user-agent"] || "";
-
-  // Detect if this is a Roblox request
   const isRoblox = userAgent.toLowerCase().includes("roblox");
 
-  // If NOT Roblox (i.e., browser opening the URL) -> redirect to restricted page
   if (!isRoblox) {
     res.redirect(302, "/restricted.html");
     return;
   }
 
-  // Roblox request -> proxy to Supabase
   const request = https.get(
     supabaseUrl,
     {
       headers: {
-        // Pass Roblox User-Agent through so Supabase Edge Function serves script
         "User-Agent": userAgent,
       },
     },
     (supabaseRes) => {
-      // Forward status code
       res.status(supabaseRes.statusCode || 500);
       res.type("text/plain; charset=utf-8");
       res.set("Cache-Control", "no-store");
-
-      // Pipe Supabase response body to Roblox
       supabaseRes.pipe(res);
     },
   );
@@ -78,13 +114,12 @@ app.get("/s/:id", (req, res) => {
   });
 });
 
-// ---------- Health check (for uptime monitoring) ----------
+// ---------- Health check ----------
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// ---------- Catch-all for SPA-style routing ----------
-// If someone visits a path na hindi file, serve index.html
+// ---------- Catch-all ----------
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, "index.html"), (err) => {
     if (err) {
