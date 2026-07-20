@@ -1,8 +1,3 @@
-// ==========================================
-// Dashboard - Script Editor Logic - PHASE 2
-// Now with backend obfuscation before save
-// ==========================================
-
 async function handleOAuthCallback() {
   const hasHash =
     window.location.hash.includes("access_token") ||
@@ -10,18 +5,15 @@ async function handleOAuthCallback() {
   const hasCode = window.location.search.includes("code=");
   if (!hasHash && !hasCode) return;
 
-  console.log("[Dashboard] OAuth callback detected, waiting for session...");
   await new Promise((resolve) => {
     let done = false;
     const {
       data: { subscription },
     } = sb.auth.onAuthStateChange((event, session) => {
-      console.log("[Dashboard] Auth event:", event);
       if (session && !done) {
         done = true;
         subscription.unsubscribe();
         history.replaceState(null, "", window.location.pathname);
-        console.log("[Dashboard] Session established");
         resolve();
       }
     });
@@ -29,18 +21,15 @@ async function handleOAuthCallback() {
       if (!done) {
         done = true;
         subscription.unsubscribe();
-        console.warn("[Dashboard] OAuth wait timeout");
         resolve();
       }
     }, 10000);
   });
 }
 
-// ---------- Config ----------
-const MAX_SCRIPT_SIZE = 10 * 1024 * 1024; // 10MB
-const OBFUSCATE_ENDPOINT = "/obfuscate"; // relative to current origin
+const MAX_SCRIPT_SIZE = 10 * 1024 * 1024;
+const OBFUSCATE_ENDPOINT = "/obfuscate";
 
-// ---------- DOM elements ----------
 const userEmailEl = document.getElementById("userEmail");
 const logoutBtn = document.getElementById("logoutBtn");
 
@@ -52,17 +41,23 @@ const fileUpload = document.getElementById("fileUpload");
 const fileNameEl = document.getElementById("fileName");
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
+const previewBtn = document.getElementById("previewBtn");
 const messageDiv = document.getElementById("message");
 const obfuscationLevelSelect = document.getElementById("obfuscationLevel");
+
+const previewCard = document.getElementById("previewCard");
+const previewStats = document.getElementById("previewStats");
+const previewOutput = document.getElementById("previewOutput");
+const closePreviewBtn = document.getElementById("closePreviewBtn");
+const copyPreviewBtn = document.getElementById("copyPreviewBtn");
 
 const resultCard = document.getElementById("resultCard");
 const loadstringOutput = document.getElementById("loadstringOutput");
 const copyBtn = document.getElementById("copyBtn");
 
-// ---------- Store current user ----------
 let currentUser = null;
+let lastPreviewedCode = "";
 
-// ---------- Init ----------
 (async function init() {
   await handleOAuthCallback();
   const user = await requireAuth();
@@ -72,30 +67,27 @@ let currentUser = null;
   if (userEmailEl) userEmailEl.textContent = user.email;
 })();
 
-// ---------- Logout ----------
 logoutBtn?.addEventListener("click", async () => {
   logoutBtn.disabled = true;
   logoutBtn.textContent = "Logging out...";
-
   try {
     await sb.auth.signOut();
-  } catch (err) {
-    console.error(err);
-  } finally {
+  } catch (err) {} 
+  finally {
     window.location.href = "index.html";
   }
 });
 
-// ---------- Character counter + enable/disable Save button ----------
 function updateUI() {
   const len = scriptCodeInput.value.length;
   charCountEl.textContent = `${len.toLocaleString()} characters`;
-  saveBtn.disabled = len === 0;
+  const hasCode = len > 0;
+  saveBtn.disabled = !hasCode;
+  previewBtn.disabled = !hasCode;
 }
 
 scriptCodeInput.addEventListener("input", updateUI);
 
-// ---------- File upload ----------
 uploadBtn.addEventListener("click", () => {
   fileUpload.click();
 });
@@ -135,7 +127,6 @@ fileUpload.addEventListener("change", (e) => {
   reader.readAsText(file);
 });
 
-// ---------- Clear button ----------
 clearBtn.addEventListener("click", () => {
   if (!scriptCodeInput.value && !scriptNameInput.value) return;
 
@@ -146,11 +137,11 @@ clearBtn.addEventListener("click", () => {
     fileUpload.value = "";
     hideMessage();
     resultCard.classList.add("hidden");
+    previewCard.classList.add("hidden");
     updateUI();
   }
 });
 
-// ---------- Generate short random ID ----------
 function generateId(length = 8) {
   const chars =
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -163,16 +154,14 @@ function generateId(length = 8) {
   return id;
 }
 
-// ---------- Build loadstring using PROXY URL ----------
 function buildLoadstring(scriptId) {
   const rawUrl = `${window.location.origin}/s/${scriptId}`;
   return `loadstring(game:HttpGet("${rawUrl}"))()`;
 }
 
-// ---------- Call backend obfuscation API ----------
 async function obfuscateCode(code, level) {
   if (level === "none") {
-    return code;
+    return { code, elapsed: 0, originalSize: code.length, obfuscatedSize: code.length };
   }
 
   const response = await fetch(OBFUSCATE_ENDPOINT, {
@@ -195,14 +184,77 @@ async function obfuscateCode(code, level) {
     throw new Error(data.error || "Obfuscation returned no code");
   }
 
-  console.log(
-    `[Obfuscate] Level: ${data.level} | ${data.original_size.toLocaleString()} â†’ ${data.obfuscated_size.toLocaleString()} chars in ${data.elapsed_ms}ms`,
-  );
-
-  return data.code;
+  return {
+    code: data.code,
+    elapsed: data.elapsed_ms,
+    originalSize: data.original_size,
+    obfuscatedSize: data.obfuscated_size,
+  };
 }
 
-// ---------- Save script ----------
+previewBtn.addEventListener("click", async () => {
+  const code = scriptCodeInput.value;
+  const level = obfuscationLevelSelect.value;
+
+  hideMessage();
+
+  if (!code.trim()) {
+    showMessage("Wala kang na-paste na code.", "error");
+    return;
+  }
+
+  if (code.length > MAX_SCRIPT_SIZE) {
+    showMessage("Script too long. Max 10MB.", "error");
+    return;
+  }
+
+  previewBtn.disabled = true;
+  const originalText = previewBtn.textContent;
+  previewBtn.textContent = "Generating preview...";
+
+  try {
+    const result = await obfuscateCode(code, level);
+    lastPreviewedCode = result.code;
+
+    const ratio = result.obfuscatedSize / result.originalSize;
+    const ratioStr = ratio.toFixed(2);
+    const statsText =
+      level === "none"
+        ? `Level: none | ${result.originalSize.toLocaleString()} chars (no changes)`
+        : `Level: ${level} | ${result.originalSize.toLocaleString()} chars -> ${result.obfuscatedSize.toLocaleString()} chars (${ratioStr}x) | Generated in ${result.elapsed}ms`;
+
+    previewStats.textContent = statsText;
+    previewOutput.textContent = result.code;
+    previewCard.classList.remove("hidden");
+    previewCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+    showMessage(`Preview ready. Review below, then click Save Script.`, "success");
+  } catch (err) {
+    showMessage(err.message || "Failed to preview.", "error");
+  } finally {
+    previewBtn.disabled = false;
+    previewBtn.textContent = originalText;
+    updateUI();
+  }
+});
+
+closePreviewBtn.addEventListener("click", () => {
+  previewCard.classList.add("hidden");
+  lastPreviewedCode = "";
+});
+
+copyPreviewBtn.addEventListener("click", async () => {
+  if (!lastPreviewedCode) return;
+  try {
+    await navigator.clipboard.writeText(lastPreviewedCode);
+    const original = copyPreviewBtn.textContent;
+    copyPreviewBtn.textContent = "Copied!";
+    setTimeout(() => (copyPreviewBtn.textContent = original), 1500);
+  } catch (err) {
+    showMessage("Failed to copy. Select and copy manually.", "error");
+  }
+});
+
 saveBtn.addEventListener("click", async () => {
   const name = scriptNameInput.value.trim();
   const code = scriptCodeInput.value;
@@ -224,15 +276,17 @@ saveBtn.addEventListener("click", async () => {
   const originalText = saveBtn.textContent;
 
   try {
-    // Step 1: Obfuscate (if level != none)
     let finalCode = code;
+    let sizeInfo = "";
+
     if (level !== "none") {
       saveBtn.textContent = "Obfuscating...";
       showMessage(`Obfuscating with level: ${level}...`, "info");
-      finalCode = await obfuscateCode(code, level);
+      const result = await obfuscateCode(code, level);
+      finalCode = result.code;
+      sizeInfo = ` (${result.originalSize.toLocaleString()} -> ${result.obfuscatedSize.toLocaleString()} chars)`;
     }
 
-    // Step 2: Save to Supabase
     saveBtn.textContent = "Saving...";
     showMessage("Saving to database...", "info");
 
@@ -266,16 +320,11 @@ saveBtn.addEventListener("click", async () => {
     resultCard.classList.remove("hidden");
     resultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
-    const sizeInfo =
-      level !== "none"
-        ? ` (${code.length.toLocaleString()} â†’ ${finalCode.length.toLocaleString()} chars)`
-        : "";
     showMessage(
       `Script saved! ID: ${scriptId} | Level: ${level}${sizeInfo}`,
       "success",
     );
   } catch (err) {
-    console.error(err);
     showMessage(err.message || "Failed to save script.", "error");
   } finally {
     saveBtn.disabled = false;
@@ -284,7 +333,6 @@ saveBtn.addEventListener("click", async () => {
   }
 });
 
-// ---------- Copy loadstring ----------
 copyBtn.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(loadstringOutput.textContent);
@@ -298,7 +346,6 @@ copyBtn.addEventListener("click", async () => {
   }
 });
 
-// ---------- Message helpers ----------
 function showMessage(text, type = "info") {
   messageDiv.textContent = text;
   messageDiv.className = `message ${type}`;
