@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ACCESS RESTRICTED</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    min-height: 100vh;
+    background: #000;
+    color: #ff0033;
+    font-family: 'Courier New', 'Consolas', monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255, 0, 51, 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 0, 51, 0.08) 1px, transparent 1px);
+    background-size: 40px 40px;
+    animation: gridMove 15s linear infinite;
+    pointer-events: none;
+  }
+
+  @keyframes gridMove {
+    0% { transform: translate(0, 0); }
+    100% { transform: translate(40px, 40px); }
+  }
+
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(255, 0, 51, 0.03) 0px,
+      rgba(255, 0, 51, 0.03) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    pointer-events: none;
+    animation: scan 6s linear infinite;
+    z-index: 2;
+  }
+
+  @keyframes scan {
+    0% { transform: translateY(-100%); }
+    100% { transform: translateY(100%); }
+  }
+
+  .container {
+    max-width: 720px;
+    width: 100%;
+    padding: 50px 40px;
+    border: 2px solid #ff0033;
+    background: rgba(15, 0, 0, 0.9);
+    box-shadow:
+      0 0 60px rgba(255, 0, 51, 0.6),
+      inset 0 0 40px rgba(255, 0, 51, 0.15);
+    position: relative;
+    z-index: 3;
+    animation: flicker 4s infinite;
+  }
+
+  @keyframes flicker {
+    0%, 100% { opacity: 1; }
+    91% { opacity: 1; }
+    92% { opacity: 0.6; }
+    93% { opacity: 1; }
+    95% { opacity: 0.85; }
+    96% { opacity: 1; }
+  }
+
+  .container::before,
+  .container::after {
+    content: '';
+    position: absolute;
+    width: 30px;
+    height: 30px;
+    border: 3px solid #ff0033;
+  }
+
+  .container::before {
+    top: -3px;
+    left: -3px;
+    border-right: none;
+    border-bottom: none;
+  }
+
+  .container::after {
+    bottom: -3px;
+    right: -3px;
+    border-left: none;
+    border-top: none;
+  }
+
+  .warning-bar {
+    background: #ff0033;
+    color: #000;
+    padding: 8px 15px;
+    font-weight: bold;
+    letter-spacing: 3px;
+    font-size: 12px;
+    text-align: center;
+    margin-bottom: 25px;
+    animation: alertBlink 1.2s ease-in-out infinite;
+  }
+
+  @keyframes alertBlink {
+    0%, 100% { background: #ff0033; }
+    50% { background: #990000; }
+  }
+
+  h1 {
+    font-size: 48px;
+    font-weight: 900;
+    letter-spacing: 6px;
+    color: #ff0033;
+    text-align: center;
+    margin-bottom: 10px;
+    text-shadow:
+      0 0 20px #ff0033,
+      0 0 40px #ff0033,
+      0 0 60px #ff0033;
+    animation: glitch 2.5s infinite;
+    position: relative;
+  }
+
+  @keyframes glitch {
+    0%, 100% {
+      text-shadow: 0 0 20px #ff0033, 0 0 40px #ff0033;
+      transform: translate(0);
+    }
+    15% {
+      transform: translate(-3px, 2px);
+      text-shadow: 3px 0 #00ffff, -3px 0 #ff0033;
+    }
+    30% {
+      transform: translate(3px, -1px);
+      text-shadow: -3px 0 #00ffff, 3px 0 #ff0033;
+    }
+    45% {
+      transform: translate(-1px, 1px);
+      text-shadow: 0 0 20px #ff0033;
+    }
+    60% {
+      transform: translate(0);
+      text-shadow: 0 0 20px #ff0033, 0 0 40px #ff0033;
+    }
+  }
+
+  h2 {
+    font-size: 18px;
+    color: #ff6666;
+    text-align: center;
+    letter-spacing: 4px;
+    margin-bottom: 30px;
+    font-weight: normal;
+  }
+
+  .divider {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #ff0033, transparent);
+    margin: 25px 0;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .divider::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, #ff0033, transparent);
+    animation: dividerSlide 3s linear infinite;
+  }
+
+  @keyframes dividerSlide {
+    0% { left: -100%; }
+    100% { left: 100%; }
+  }
+
+  .message {
+    font-size: 15px;
+    color: #ff9999;
+    line-height: 1.9;
+    margin-bottom: 20px;
+    letter-spacing: 0.5px;
+  }
+
+  .message strong {
+    color: #ff0033;
+    text-shadow: 0 0 10px #ff0033;
+  }
+
+  .callout {
+    background: rgba(255, 204, 0, 0.1);
+    border: 1px solid #ffcc00;
+    padding: 15px 20px;
+    margin: 25px 0;
+    color: #ffcc00;
+    text-align: center;
+    font-weight: bold;
+    letter-spacing: 2px;
+    font-size: 16px;
+    animation: calloutPulse 2s ease-in-out infinite;
+    position: relative;
+  }
+
+  @keyframes calloutPulse {
+    0%, 100% {
+      box-shadow: 0 0 20px rgba(255, 204, 0, 0.4);
+      border-color: #ffcc00;
+    }
+    50% {
+      box-shadow: 0 0 40px rgba(255, 204, 0, 0.8);
+      border-color: #ffdd44;
+    }
+  }
+
+  .callout .arrows {
+    display: inline-block;
+    margin: 0 10px;
+    animation: arrowBlink 1s infinite;
+  }
+
+  @keyframes arrowBlink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .code-block {
+    background: #000;
+    border: 1px solid #660011;
+    padding: 20px;
+    margin: 25px 0;
+    font-family: 'Courier New', monospace;
+    color: #ff3355;
+    font-size: 13px;
+    line-height: 2;
+    text-align: left;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .code-block::before {
+    content: 'SYSTEM_LOG';
+    position: absolute;
+    top: 0;
+    left: 0;
+    background: #ff0033;
+    color: #000;
+    padding: 3px 12px;
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 2px;
+  }
+
+  .code-block .code-content {
+    margin-top: 20px;
+  }
+
+  .code-line {
+    opacity: 0;
+    animation: typeIn 0.5s forwards;
+  }
+
+  .code-line:nth-child(1) { animation-delay: 0.2s; }
+  .code-line:nth-child(2) { animation-delay: 0.7s; }
+  .code-line:nth-child(3) { animation-delay: 1.2s; }
+  .code-line:nth-child(4) { animation-delay: 1.7s; }
+  .code-line:nth-child(5) { animation-delay: 2.2s; }
+
+  @keyframes typeIn {
+    from { opacity: 0; transform: translateX(-10px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  .status-tracking {
+    color: #ff0033;
+    font-weight: bold;
+    animation: blink 1s infinite;
+  }
+
+  @keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+  }
+
+  .footer-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid #330011;
+    font-size: 11px;
+    color: #660011;
+    letter-spacing: 2px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .live-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background: #ff0033;
+    border-radius: 50%;
+    margin-right: 5px;
+    animation: livePulse 1s infinite;
+    vertical-align: middle;
+  }
+
+  @keyframes livePulse {
+    0%, 100% {
+      opacity: 1;
+      box-shadow: 0 0 10px #ff0033;
+    }
+    50% {
+      opacity: 0.3;
+      box-shadow: 0 0 20px #ff0033;
+    }
+  }
+
+  @media (max-width: 600px) {
+    h1 { font-size: 32px; letter-spacing: 3px; }
+    h2 { font-size: 14px; letter-spacing: 2px; }
+    .container { padding: 30px 20px; }
+    .footer-info { justify-content: center; text-align: center; }
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="warning-bar">// SECURITY BREACH ATTEMPT DETECTED //</div>
+
+    <h1>ACCESS RESTRICTED</h1>
+    <h2>UNAUTHORIZED CONNECTION</h2>
+
+    <div class="divider"></div>
+
+    <p class="message">
+      This resource is <strong>PROTECTED</strong> and reserved exclusively
+      for authorized Roblox game execution. Direct browser access is
+      strictly <strong>PROHIBITED</strong>.
+    </p>
+
+    <div class="callout">
+      <span class="arrows">&gt;&gt;&gt;</span>
+      ESPECIALLY IF YOU ARE AN ARGON USER
+      <span class="arrows">&lt;&lt;&lt;</span>
+    </div>
+
+    <p class="message">
+      Your access attempt has been <strong>LOGGED</strong> and
+      <strong>REPORTED</strong>. This incident is now under active review
+      by our automated security systems.
+    </p>
+
+    <div class="code-block">
+      <div class="code-content">
+        <div class="code-line">&gt; INITIATING_TRACE... COMPLETE</div>
+        <div class="code-line">&gt; TAMPERING_DETECTED = TRUE</div>
+        <div class="code-line">&gt; USER_AGENT = UNVERIFIED</div>
+        <div class="code-line">&gt; INCIDENT_ID = <span id="incidentId">GENERATING...</span></div>
+        <div class="code-line">&gt; STATUS = <span class="status-tracking">TRACKING</span></div>
+      </div>
+    </div>
+
+    <p class="message" style="font-size: 13px; color: #ff6666; text-align: center;">
+      Continued unauthorized access may result in permanent access
+      revocation and further security actions.
+    </p>
+
+    <div class="footer-info">
+      <div>SYSTEM_v2.4.7</div>
+      <div>SEC_LEVEL::MAXIMUM</div>
+      <div><span class="live-dot"></span>LIVE_MONITORING</div>
+    </div>
+  </div>
+
+  <script>
+    // Generate random incident ID
+    const incidentId = Math.random().toString(36).substring(2, 15).toUpperCase();
+    document.getElementById('incidentId').textContent = incidentId;
+
+    // Anti-inspection
+    document.addEventListener('contextmenu', e => e.preventDefault());
+    document.addEventListener('keydown', e => {
+      if (e.key === 'F12') e.preventDefault();
+      if (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i')) e.preventDefault();
+      if (e.ctrlKey && (e.key === 'u' || e.key === 'U')) e.preventDefault();
+      if (e.ctrlKey && (e.key === 's' || e.key === 'S')) e.preventDefault();
+    });
+    document.onselectstart = () => false;
+
+    // Console warnings
+    setInterval(() => {
+      console.clear();
+      console.log('%c[SECURITY]', 'color: #ff0033; font-size: 40px; font-weight: bold; text-shadow: 0 0 10px #ff0033;');
+      console.log('%cUnauthorized access is being logged and reported.', 'color: #ff6666; font-size: 14px;');
+      console.log('%cIncident ID: ' + incidentId, 'color: #ffcc00; font-size: 12px;');
+    }, 2000);
+  </script>
+</body>
+</html>
