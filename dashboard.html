@@ -86,7 +86,7 @@
       <div id="resultCard" class="card hidden">
         <h2>Script Saved!</h2>
         <p style="color: var(--text-dim); margin-top: 8px; font-size: 0.9rem">
-          Your loadstring — paste this sa Roblox executor mo:
+          Your loadstring:
         </p>
         <div class="output-box" style="margin-top: 12px">
           <code id="loadstringOutput"></code>
@@ -125,9 +125,9 @@
         const result = await sb.auth.getSession();
         console.log("Session after 5s:", result);
         if (result.data.session) {
-          alert("SESSION WORKS! User: " + result.data.session.user.email);
+          console.log("SESSION WORKS! User:", result.data.session.user.email);
         } else {
-          alert("NO SESSION after 5s. Hash: " + window.location.hash);
+          console.log("NO SESSION after 5s. Hash:", window.location.hash);
         }
       }, 5000);
     </script>
