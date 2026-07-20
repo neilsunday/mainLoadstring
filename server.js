@@ -1,8 +1,3 @@
-// ==========================================
-// Loadstring Gen - Node.js Server (Render Web Service)
-// Serves static frontend + proxies loadstring endpoint + obfuscation API
-// ==========================================
-
 const express = require("express");
 const path = require("path");
 const https = require("https");
@@ -11,25 +6,18 @@ const { obfuscate } = require("./obfuscator");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Supabase Edge Function URL (hidden from users)
 const SUPABASE_RAW_URL =
   "https://uwxsgijolhlpnihdelrq.supabase.co/functions/v1/raw";
 
-// ---------- JSON body parser (for /obfuscate endpoint) ----------
-// 12MB limit to support up to 10MB scripts + overhead
 app.use(express.json({ limit: "12mb" }));
 
-// ---------- Static file serving ----------
 app.use(
   express.static(path.join(__dirname), {
     extensions: ["html"],
   }),
 );
 
-// ==========================================
-// POST /obfuscate - Backend Obfuscator API
-// ==========================================
-app.post("/obfuscate", (req, res) => {
+app.post("/obfuscate", async (req, res) => {
   try {
     const { code, level } = req.body || {};
 
@@ -47,8 +35,12 @@ app.post("/obfuscate", (req, res) => {
     const obfLevel = validLevels.includes(level) ? level : "medium";
 
     const start = Date.now();
-    const obfuscated = obfuscate(code, obfLevel);
+    const obfuscated = await obfuscate(code, obfLevel);
     const elapsed = Date.now() - start;
+
+    if (typeof obfuscated !== "string") {
+      throw new Error("Obfuscator returned invalid result");
+    }
 
     res.json({
       success: true,
@@ -66,9 +58,6 @@ app.post("/obfuscate", (req, res) => {
   }
 });
 
-// ==========================================
-// GET /s/:id - Loadstring proxy
-// ==========================================
 app.get("/s/:id", (req, res) => {
   const scriptId = req.params.id;
 
@@ -114,12 +103,10 @@ app.get("/s/:id", (req, res) => {
   });
 });
 
-// ---------- Health check ----------
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// ---------- Catch-all ----------
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, "index.html"), (err) => {
     if (err) {
@@ -128,7 +115,14 @@ app.use((req, res) => {
   });
 });
 
-// ---------- Start server ----------
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err.message);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+});
+
 app.listen(PORT, () => {
   console.log(`Loadstring Gen server running on port ${PORT}`);
 });
