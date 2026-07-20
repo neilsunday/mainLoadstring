@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Dashboard Â· Loadstring Gen</title>
+    <title>Dashboard - Loadstring Gen</title>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -56,7 +56,6 @@
           spellcheck="false"
         ></textarea>
 
-        <!-- Upload file option -->
         <div class="row" style="justify-content: flex-start; margin-top: 12px">
           <input
             type="file"
@@ -73,7 +72,6 @@
           <span id="fileName" class="muted" style="margin-left: 8px"></span>
         </div>
 
-        <!-- Obfuscation Level Selector -->
         <div style="margin-top: 20px">
           <label for="obfuscationLevel">
             Obfuscation Level
@@ -97,10 +95,10 @@
               cursor: pointer;
             "
           >
-            <option value="none">None â€” save as plain text (no protection)</option>
-            <option value="basic">Basic â€” remove comments and minify</option>
-            <option value="medium" selected>Medium â€” string encryption + number encoding (recommended)</option>
-            <option value="maximum">Maximum â€” all protections (slower, strongest)</option>
+            <option value="none">None - save as plain text (no protection)</option>
+            <option value="basic">Basic - remove comments and minify</option>
+            <option value="medium" selected>Medium - string encryption + number encoding</option>
+            <option value="maximum">Maximum - full protection (Luarmor-level)</option>
           </select>
         </div>
 
@@ -113,7 +111,6 @@
         <div id="message" class="message hidden"></div>
       </div>
 
-      <!-- Result Card (hidden by default) -->
       <div id="resultCard" class="card hidden">
         <h2>Script Saved!</h2>
         <p style="color: var(--text-dim); margin-top: 8px; font-size: 0.9rem">
@@ -127,7 +124,7 @@
             Copy Loadstring
           </button>
           <a href="saved.html" class="muted" style="font-size: 0.88rem">
-            View all saved scripts â†’
+            View all saved scripts
           </a>
         </div>
       </div>
