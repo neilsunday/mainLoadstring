@@ -4,8 +4,6 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 
-const PROMETHEUS_BIN = require.resolve("@gamely/prometheus-cli/bin/prometheus-cli.js");
-
 const LEVEL_PRESET = {
   none: null,
   basic: "Minify",
@@ -33,7 +31,7 @@ function runPrometheus(code, preset) {
     }
 
     const args = [
-      PROMETHEUS_BIN,
+      "prometheus-cli",
       "--preset",
       preset,
       "--out",
@@ -41,9 +39,10 @@ function runPrometheus(code, preset) {
       inputPath,
     ];
 
-    const proc = spawn("node", args, {
-      timeout: 60000,
+    const proc = spawn("npx", args, {
+      timeout: 90000,
       env: { ...process.env, PROMETHEUS_NO_COLOR: "1" },
+      shell: true,
     });
 
     let stderr = "";
