@@ -1,7 +1,7 @@
 {
   "name": "loadstring-gen",
-  "version": "2.0.1",
-  "description": "Roblox Loadstring Generator with Prometheus VM-based obfuscation",
+  "version": "3.0.0",
+  "description": "Roblox Loadstring Generator with AzureVM custom obfuscator",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,6 +11,6 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "@gamely/prometheus-cli": "0.0.9"
+    "luaparse": "^0.3.1"
   }
 }
