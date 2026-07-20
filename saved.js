@@ -1,5 +1,6 @@
 // ==========================================
-// Saved Scripts Page Logic - v3 (privacy fix)
+// Saved Scripts Page Logic - PROXY v5
+// Uses /s/:id proxy route on Render (hides Supabase URL)
 // ==========================================
 
 // ---------- DOM elements ----------
@@ -104,13 +105,12 @@ logoutBtn?.addEventListener("click", async () => {
   }
 });
 
-// ---------- Build loadstring using Edge Function URL ----------
+// ---------- Build loadstring using PROXY URL (hides Supabase) ----------
 function buildLoadstring(scriptId) {
-  return (
-    'loadstring(game:HttpGet("https://uwxsgijolhlpnihdelrq.supabase.co/functions/v1/raw?id=' +
-    scriptId +
-    '"))()'
-  );
+  // Uses current origin so it works on localhost AND production
+  // production: https://azurehub.onrender.com/s/xxx
+  const rawUrl = `${window.location.origin}/s/${scriptId}`;
+  return `loadstring(game:HttpGet("${rawUrl}"))()`;
 }
 
 // ---------- Load scripts (FILTERED by current user only) ----------
@@ -120,7 +120,6 @@ async function loadScripts() {
   scriptList.classList.add("hidden");
 
   try {
-    // Filter explicitly by user_id
     const { data, error } = await sb
       .from("scripts")
       .select("id, name, code, views, created_at, updated_at, user_id")
@@ -251,7 +250,7 @@ async function deleteScript(script) {
       .from("scripts")
       .delete()
       .eq("id", script.id)
-      .eq("user_id", currentUser.id); // double-check ownership
+      .eq("user_id", currentUser.id);
 
     if (error) throw error;
 
@@ -290,19 +289,16 @@ function closeEditModal() {
 closeModalBtn.addEventListener("click", closeEditModal);
 cancelEditBtn.addEventListener("click", closeEditModal);
 
-// Close modal when clicking outside
 editModal.addEventListener("click", (e) => {
   if (e.target === editModal) closeEditModal();
 });
 
-// ESC key closes modal
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !editModal.classList.contains("hidden")) {
     closeEditModal();
   }
 });
 
-// Character counter for edit modal
 editCode.addEventListener("input", updateEditCharCount);
 
 function updateEditCharCount() {
@@ -331,16 +327,14 @@ saveEditBtn.addEventListener("click", async () => {
   saveEditBtn.textContent = "Saving...";
 
   try {
-    // Update with ownership check
     const { error } = await sb
       .from("scripts")
       .update({ name: name || null, code })
       .eq("id", editingScriptId)
-      .eq("user_id", currentUser.id); // double-check ownership
+      .eq("user_id", currentUser.id);
 
     if (error) throw error;
 
-    // Update local list
     const script = allScripts.find((s) => s.id === editingScriptId);
     if (script) {
       script.name = name || null;

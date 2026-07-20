@@ -1,3 +1,8 @@
+// ==========================================
+// Dashboard - Script Editor Logic - PROXY v5
+// Uses /s/:id proxy route on Render (hides Supabase URL)
+// ==========================================
+
 async function handleOAuthCallback() {
   const hasHash =
     window.location.hash.includes("access_token") ||
@@ -30,9 +35,6 @@ async function handleOAuthCallback() {
     }, 10000);
   });
 }
-
-const RAW_ENDPOINT =
-  "https://uwxsgijolhlpnihdelrq.supabase.co/functions/v1/raw";
 
 // ---------- DOM elements ----------
 const userEmailEl = document.getElementById("userEmail");
@@ -157,9 +159,9 @@ function generateId(length = 8) {
   return id;
 }
 
-// ---------- Build loadstring using Edge Function URL ----------
+// ---------- Build loadstring using PROXY URL (hides Supabase) ----------
 function buildLoadstring(scriptId) {
-  const rawUrl = `${RAW_ENDPOINT}?id=${scriptId}`;
+  const rawUrl = `${window.location.origin}/s/${scriptId}`;
   return `loadstring(game:HttpGet("${rawUrl}"))()`;
 }
 
