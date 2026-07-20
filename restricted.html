@@ -1,555 +1,647 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ACCESS RESTRICTED</title>
+    <title>Security Access Denied</title>
     <style>
+      :root {
+        --bg: #050608;
+        --surface: rgba(255, 255, 255, 0.05);
+        --surface-strong: rgba(255, 255, 255, 0.08);
+        --accent: #ff2d55;
+        --accent-soft: #ff6b81;
+        --highlight: #ffd166;
+        --text: #ecf1f7;
+        --muted: #8f9fb8;
+        --danger: #ff4d6d;
+        --border: rgba(255, 255, 255, 0.08);
+        --shadow: 0 45px 120px rgba(0, 0, 0, 0.32);
+      }
+
       * {
         margin: 0;
         padding: 0;
         box-sizing: border-box;
       }
 
+      html,
       body {
+        min-height: 100%;
+        width: 100%;
+        background:
+          radial-gradient(
+            circle at top left,
+            rgba(255, 77, 117, 0.16),
+            transparent 24%
+          ),
+          radial-gradient(
+            circle at bottom right,
+            rgba(255, 209, 102, 0.12),
+            transparent 20%
+          ),
+          var(--bg);
+        color: var(--text);
+        font-family: "Inter", system-ui, sans-serif;
+        overflow-y: auto;
+        overflow-x: hidden;
         min-height: 100vh;
-        background: #000;
-        color: #ff0033;
-        font-family: "Courier New", "Consolas", monospace;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 20px;
-        overflow: hidden;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+        padding: clamp(1rem, 2vw, 2.5rem);
         position: relative;
       }
 
-      body::before {
-        content: "";
+      .background-grid {
         position: fixed;
         inset: 0;
         background-image:
-          linear-gradient(rgba(255, 0, 51, 0.08) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(255, 0, 51, 0.08) 1px, transparent 1px);
-        background-size: 40px 40px;
-        animation: gridMove 15s linear infinite;
+          linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+        background-size: 96px 96px;
+        opacity: 0.14;
         pointer-events: none;
+        animation: driftGrid 24s linear infinite;
+        z-index: -4;
       }
 
-      @keyframes gridMove {
-        0% {
-          transform: translate(0, 0);
+      @keyframes driftGrid {
+        from {
+          background-position: 0 0;
         }
-        100% {
-          transform: translate(40px, 40px);
+        to {
+          background-position: 96px 96px;
         }
       }
 
-      body::after {
-        content: "";
+      .particle-layer {
         position: fixed;
         inset: 0;
-        background: repeating-linear-gradient(
-          0deg,
-          rgba(255, 0, 51, 0.03) 0px,
-          rgba(255, 0, 51, 0.03) 1px,
-          transparent 1px,
-          transparent 3px
-        );
         pointer-events: none;
-        animation: scan 6s linear infinite;
-        z-index: 2;
+        z-index: -3;
       }
 
-      @keyframes scan {
-        0% {
-          transform: translateY(-100%);
-        }
-        100% {
-          transform: translateY(100%);
-        }
-      }
-
-      .container {
-        max-width: 720px;
-        width: 100%;
-        padding: 50px 40px;
-        border: 2px solid #ff0033;
-        background: rgba(15, 0, 0, 0.9);
-        box-shadow:
-          0 0 60px rgba(255, 0, 51, 0.6),
-          inset 0 0 40px rgba(255, 0, 51, 0.15);
-        position: relative;
-        z-index: 3;
-        animation: flicker 4s infinite;
-      }
-
-      @keyframes flicker {
-        0%,
-        100% {
-          opacity: 1;
-        }
-        91% {
-          opacity: 1;
-        }
-        92% {
-          opacity: 0.6;
-        }
-        93% {
-          opacity: 1;
-        }
-        95% {
-          opacity: 0.85;
-        }
-        96% {
-          opacity: 1;
-        }
-      }
-
-      .container::before,
-      .container::after {
-        content: "";
+      .particle-layer span {
         position: absolute;
-        width: 30px;
-        height: 30px;
-        border: 3px solid #ff0033;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.16);
+        box-shadow: 0 0 18px rgba(255, 255, 255, 0.08);
+        animation: floatParticle 16s ease-in-out infinite;
       }
 
-      .container::before {
-        top: -3px;
-        left: -3px;
-        border-right: none;
-        border-bottom: none;
+      .particle-layer span:nth-child(1) {
+        top: 8%;
+        left: 22%;
+        animation-duration: 14s;
+      }
+      .particle-layer span:nth-child(2) {
+        top: 24%;
+        left: 72%;
+        animation-duration: 18s;
+        animation-delay: 1s;
+      }
+      .particle-layer span:nth-child(3) {
+        top: 48%;
+        left: 16%;
+        animation-duration: 20s;
+        animation-delay: 3s;
+      }
+      .particle-layer span:nth-child(4) {
+        top: 12%;
+        left: 82%;
+        animation-duration: 15s;
+        animation-delay: 2s;
+      }
+      .particle-layer span:nth-child(5) {
+        top: 68%;
+        left: 54%;
+        animation-duration: 22s;
+        animation-delay: 4s;
+      }
+      .particle-layer span:nth-child(6) {
+        top: 86%;
+        left: 14%;
+        animation-duration: 17s;
+        animation-delay: 2.2s;
+      }
+      .particle-layer span:nth-child(7) {
+        top: 40%;
+        left: 90%;
+        animation-duration: 19s;
+        animation-delay: 5s;
+      }
+      .particle-layer span:nth-child(8) {
+        top: 92%;
+        left: 62%;
+        animation-duration: 16s;
+        animation-delay: 0.7s;
       }
 
-      .container::after {
-        bottom: -3px;
-        right: -3px;
-        border-left: none;
-        border-top: none;
-      }
-
-      .warning-bar {
-        background: #ff0033;
-        color: #000;
-        padding: 8px 15px;
-        font-weight: bold;
-        letter-spacing: 3px;
-        font-size: 12px;
-        text-align: center;
-        margin-bottom: 25px;
-        animation: alertBlink 1.2s ease-in-out infinite;
-      }
-
-      @keyframes alertBlink {
+      @keyframes floatParticle {
         0%,
         100% {
-          background: #ff0033;
+          transform: translateY(0);
+          opacity: 0.9;
         }
         50% {
-          background: #990000;
+          transform: translateY(-26px);
+          opacity: 0.55;
         }
       }
 
-      h1 {
-        font-size: 48px;
-        font-weight: 900;
-        letter-spacing: 6px;
-        color: #ff0033;
-        text-align: center;
-        margin-bottom: 10px;
-        text-shadow:
-          0 0 20px #ff0033,
-          0 0 40px #ff0033,
-          0 0 60px #ff0033;
-        animation: glitch 2.5s infinite;
-        position: relative;
+      .noise-overlay {
+        position: fixed;
+        inset: 0;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cg fill='rgba(255,255,255,0.03)'%3E%3Ccircle cx='2' cy='2' r='1'/%3E%3Ccircle cx='12' cy='12' r='1'/%3E%3Ccircle cx='22' cy='22' r='1'/%3E%3C/g%3E%3C/svg%3E");
+        opacity: 0.14;
+        pointer-events: none;
+        mix-blend-mode: screen;
+        z-index: -2;
       }
 
-      @keyframes glitch {
-        0%,
-        100% {
-          text-shadow:
-            0 0 20px #ff0033,
-            0 0 40px #ff0033;
-          transform: translate(0);
-        }
-        15% {
-          transform: translate(-3px, 2px);
-          text-shadow:
-            3px 0 #00ffff,
-            -3px 0 #ff0033;
-        }
-        30% {
-          transform: translate(3px, -1px);
-          text-shadow:
-            -3px 0 #00ffff,
-            3px 0 #ff0033;
-        }
-        45% {
-          transform: translate(-1px, 1px);
-          text-shadow: 0 0 20px #ff0033;
-        }
-        60% {
-          transform: translate(0);
-          text-shadow:
-            0 0 20px #ff0033,
-            0 0 40px #ff0033;
-        }
-      }
-
-      h2 {
-        font-size: 18px;
-        color: #ff6666;
-        text-align: center;
-        letter-spacing: 4px;
-        margin-bottom: 30px;
-        font-weight: normal;
-      }
-
-      .divider {
-        height: 1px;
-        background: linear-gradient(90deg, transparent, #ff0033, transparent);
-        margin: 25px 0;
+      .dashboard-card {
+        width: min(100%, 860px);
+        border-radius: 36px;
+        padding: clamp(1.75rem, 2.5vw, 3rem);
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--surface-strong);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(24px);
         position: relative;
         overflow: hidden;
       }
 
-      .divider::after {
+      .dashboard-card::before {
         content: "";
         position: absolute;
-        top: 0;
-        left: -100%;
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(90deg, transparent, #ff0033, transparent);
-        animation: dividerSlide 3s linear infinite;
+        inset: 0;
+        pointer-events: none;
+        background:
+          linear-gradient(120deg, rgba(255, 45, 85, 0.14), transparent 34%),
+          radial-gradient(
+            circle at top right,
+            rgba(255, 209, 102, 0.12),
+            transparent 20%
+          );
       }
 
-      @keyframes dividerSlide {
-        0% {
-          left: -100%;
-        }
-        100% {
-          left: 100%;
-        }
+      .dashboard-card::after {
+        content: "";
+        position: absolute;
+        inset: -1px;
+        border-radius: 37px;
+        padding: 1px;
+        background: linear-gradient(
+          90deg,
+          rgba(255, 45, 85, 0.45),
+          rgba(255, 107, 129, 0.3),
+          rgba(255, 209, 102, 0.15)
+        );
+        -webkit-mask:
+          linear-gradient(#fff 0 0) content-box,
+          linear-gradient(#fff 0 0);
+        -webkit-mask-composite: destination-out;
+        mask-composite: exclude;
+        pointer-events: none;
+        z-index: -1;
       }
 
-      .message {
-        font-size: 15px;
-        color: #ff9999;
-        line-height: 1.9;
-        margin-bottom: 20px;
-        letter-spacing: 0.5px;
+      .hero {
+        display: grid;
+        gap: 1.25rem;
+        position: relative;
+        z-index: 1;
       }
 
-      .message strong {
-        color: #ff0033;
-        text-shadow: 0 0 10px #ff0033;
+      .hero-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        padding: 0.75rem 1rem;
+        border-radius: 999px;
+        background: rgba(255, 45, 85, 0.12);
+        color: var(--accent);
+        font-size: 0.86rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
       }
 
-      .callout {
+      .hero-title {
+        font-size: clamp(2rem, 4vw, 3.3rem);
+        line-height: 1.02;
+        letter-spacing: -0.03em;
+      }
+
+      .hero-copy {
+        max-width: 56rem;
+        color: var(--muted);
+        font-size: clamp(0.95rem, 1.1vw, 1.05rem);
+        line-height: 1.8;
+      }
+
+      .status-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1rem;
+        margin-top: 1.75rem;
+        position: relative;
+        z-index: 1;
+      }
+
+      .panel {
+        border-radius: 28px;
+        padding: 1.4rem 1.3rem;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        display: grid;
+        gap: 0.75rem;
+      }
+
+      .panel .label {
+        color: var(--muted);
+        font-size: 0.9rem;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+      }
+
+      .panel .value {
+        font-size: clamp(1.35rem, 2.4vw, 1.85rem);
+        font-weight: 700;
+        color: var(--text);
+      }
+
+      .panel .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.55rem 0.85rem;
+        border-radius: 999px;
+        background: rgba(255, 45, 85, 0.12);
+        color: var(--accent);
+        font-size: 0.9rem;
+        width: fit-content;
+      }
+
+      .alert-panel {
+        display: grid;
+        gap: 1rem;
+        margin: 1.75rem 0;
+        padding: 1.6rem 1.5rem;
+        border-radius: 30px;
+        background: rgba(255, 209, 102, 0.08);
+        border: 1px solid rgba(255, 209, 102, 0.2);
+      }
+
+      .alert-title {
         display: flex;
         align-items: center;
-        justify-content: center;
-        gap: 12px;
-        background: rgba(255, 204, 0, 0.1);
-        border: 1px solid #ffcc00;
-        padding: 15px 20px;
-        margin: 25px 0;
-        color: #ffcc00;
-        text-align: center;
-        font-weight: bold;
-        letter-spacing: 1.5px;
-        font-size: 16px;
-        animation: calloutPulse 2s ease-in-out infinite;
+        gap: 0.8rem;
+        font-size: 1rem;
+        font-weight: 700;
+        color: #ffe5a8;
       }
 
-      .callout svg {
+      .alert-title svg {
         width: 22px;
         height: 22px;
         flex-shrink: 0;
       }
 
-      @keyframes calloutPulse {
-        0%,
-        100% {
-          box-shadow: 0 0 20px rgba(255, 204, 0, 0.4);
-          border-color: #ffcc00;
-        }
-        50% {
-          box-shadow: 0 0 40px rgba(255, 204, 0, 0.8);
-          border-color: #ffdd44;
-        }
+      .alert-panel p {
+        margin: 0;
+        color: var(--text);
+        line-height: 1.8;
+        font-size: 1rem;
+      }
+
+      .code-panel {
+        position: relative;
+        padding: 1.7rem 1.4rem 1.4rem;
+        border-radius: 28px;
+        background: rgba(7, 12, 20, 0.95);
+        border: 1px solid rgba(255, 45, 85, 0.18);
+        overflow: auto;
+      }
+
+      .code-panel::before {
+        content: "SYSTEM LOG";
+        position: absolute;
+        top: 1rem;
+        left: 1rem;
+        color: rgba(255, 179, 205, 0.9);
+        font-size: 0.78rem;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
       }
 
       .code-block {
-        background: #000;
-        border: 1px solid #660011;
-        padding: 20px;
-        margin: 25px 0;
-        font-family: "Courier New", monospace;
-        color: #ff3355;
-        font-size: 13px;
-        line-height: 2;
-        text-align: left;
-        position: relative;
-        overflow: hidden;
-      }
-
-      .code-block::before {
-        content: "SYSTEM_LOG";
-        position: absolute;
-        top: 0;
-        left: 0;
-        background: #ff0033;
-        color: #000;
-        padding: 3px 12px;
-        font-size: 10px;
-        font-weight: bold;
-        letter-spacing: 2px;
-      }
-
-      .code-block .code-content {
-        margin-top: 20px;
+        margin: 0;
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", monospace;
+        color: #ffb3cd;
+        font-size: 0.94rem;
+        line-height: 1.85;
+        white-space: pre-wrap;
+        overflow-x: auto;
       }
 
       .code-line {
         opacity: 0;
-        animation: typeIn 0.5s forwards;
+        transform: translateX(-16px);
+        animation: revealLine 0.42s ease forwards;
       }
 
       .code-line:nth-child(1) {
-        animation-delay: 0.2s;
+        animation-delay: 0.18s;
       }
       .code-line:nth-child(2) {
-        animation-delay: 0.7s;
+        animation-delay: 0.52s;
       }
       .code-line:nth-child(3) {
-        animation-delay: 1.2s;
+        animation-delay: 0.86s;
       }
       .code-line:nth-child(4) {
-        animation-delay: 1.7s;
+        animation-delay: 1.2s;
       }
       .code-line:nth-child(5) {
-        animation-delay: 2.2s;
+        animation-delay: 1.54s;
       }
 
-      @keyframes typeIn {
-        from {
-          opacity: 0;
-          transform: translateX(-10px);
-        }
+      @keyframes revealLine {
         to {
           opacity: 1;
           transform: translateX(0);
         }
       }
 
-      .status-tracking {
-        color: #ff0033;
-        font-weight: bold;
-        animation: blink 1s infinite;
+      .footer-row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1rem;
+        margin-top: 1.75rem;
+        padding-top: 1.1rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        color: var(--muted);
+        font-size: 0.94rem;
       }
 
-      @keyframes blink {
-        0%,
-        50% {
-          opacity: 1;
-        }
-        51%,
-        100% {
-          opacity: 0;
-        }
-      }
-
-      .footer-info {
+      .footer-item {
         display: flex;
-        justify-content: space-between;
         align-items: center;
-        margin-top: 30px;
-        padding-top: 20px;
-        border-top: 1px solid #330011;
-        font-size: 11px;
-        color: #660011;
-        letter-spacing: 2px;
-        flex-wrap: wrap;
-        gap: 10px;
+        gap: 0.65rem;
+        min-height: 2.2rem;
       }
 
-      .status-icon {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        color: #660011;
-      }
-
-      .status-icon svg {
+      .status-dot {
         width: 10px;
         height: 10px;
-        display: block;
+        border-radius: 999px;
+        background: var(--accent);
+        box-shadow: 0 0 16px rgba(255, 45, 85, 0.4);
       }
 
-      @keyframes livePulse {
-        0%,
-        100% {
-          opacity: 1;
-          box-shadow: 0 0 10px #ff0033;
-        }
-        50% {
-          opacity: 0.3;
-          box-shadow: 0 0 20px #ff0033;
-        }
+      .code-block {
+        margin: 0;
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", monospace;
+        color: #ffb3cd;
+        font-size: 0.94rem;
+        line-height: 1.85;
+        white-space: pre-wrap;
+        overflow-x: auto;
+        word-break: break-word;
       }
 
-      @media (max-width: 900px) {
-        .container {
-          padding: 40px 28px;
+      @media (max-width: 1024px) {
+        .dashboard-card {
+          width: min(100%, 760px);
         }
-        h1 {
-          font-size: 40px;
-          letter-spacing: 4px;
-        }
-        h2 {
-          font-size: 16px;
-        }
-        .warning-bar {
-          font-size: 11px;
-          padding: 7px 12px;
-        }
-        .callout {
-          font-size: 15px;
-          padding: 14px 18px;
-        }
-        .code-block {
-          font-size: 13px;
-          padding: 18px;
-        }
-        .footer-info {
-          gap: 12px;
+
+        .hero-copy {
+          max-width: 100%;
         }
       }
 
-      @media (max-width: 600px) {
+      @media (max-width: 840px) {
+        .status-grid,
+        .footer-row {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 680px) {
+        .dashboard-card {
+          padding: 1.4rem;
+        }
+
+        .hero-title {
+          font-size: clamp(1.9rem, 6vw, 2.4rem);
+        }
+
+        .hero-copy {
+          font-size: 1rem;
+        }
+
+        .panel,
+        .alert-panel,
+        .code-panel {
+          padding: 1.15rem 1rem;
+        }
+      }
+
+      @media (max-width: 520px) {
+        .dashboard-card {
+          padding: 1rem;
+          border-radius: 24px;
+        }
+
+        .hero-title {
+          font-size: clamp(1.8rem, 7vw, 2.2rem);
+        }
+
+        .hero-copy {
+          font-size: 0.96rem;
+        }
+
+        .panel,
+        .alert-panel,
+        .code-panel {
+          padding: 1rem 0.95rem;
+        }
+
+        .code-panel::before {
+          left: 0.75rem;
+        }
+
+        .footer-row {
+          gap: 0.75rem;
+          font-size: 0.92rem;
+        }
+
+        .footer-item {
+          min-height: auto;
+        }
+      }
+
+      @media (max-width: 420px) {
         body {
-          padding: 16px;
+          padding: 0.75rem;
         }
-        .container {
-          padding: 24px 18px;
-          border-width: 1px;
+
+        .dashboard-card {
+          border-radius: 20px;
+          padding: 0.85rem;
         }
-        h1 {
-          font-size: 28px;
-          letter-spacing: 2px;
+
+        .hero-label {
+          padding: 0.65rem 0.9rem;
+          font-size: 0.82rem;
         }
-        h2 {
-          font-size: 13px;
-          letter-spacing: 1.5px;
+
+        .hero-title {
+          font-size: clamp(1.75rem, 8vw, 2rem);
         }
-        .warning-bar {
-          font-size: 11px;
-          padding: 8px 10px;
+
+        .hero-copy {
+          line-height: 1.7;
+          font-size: 0.92rem;
         }
-        .message {
-          font-size: 14px;
+
+        .status-grid,
+        .footer-row {
+          gap: 0.85rem;
         }
-        .callout {
-          font-size: 14px;
-          padding: 12px 14px;
+
+        .panel,
+        .alert-panel,
+        .code-panel {
+          padding: 0.95rem 0.85rem;
         }
-        .code-block {
-          font-size: 12px;
-          padding: 16px;
-        }
-        .divider {
-          margin: 20px 0;
-        }
-        .footer-info {
-          justify-content: center;
-          text-align: center;
-          flex-direction: column;
-          align-items: center;
-        }
-        .footer-info > div {
-          width: 100%;
+
+        .code-panel::before {
+          top: 0.85rem;
+          left: 0.75rem;
         }
       }
     </style>
   </head>
   <body>
-    <div class="container">
-      <div class="warning-bar"></div>
+    <div class="background-grid"></div>
+    <div class="particle-layer">
+      <span></span><span></span><span></span><span></span> <span></span
+      ><span></span><span></span><span></span>
+    </div>
+    <div class="noise-overlay"></div>
 
-      <h1>ACCESS RESTRICTED</h1>
-      <h2>ALSO IF YOU ARE ARGON USER</h2>
+    <main class="dashboard-card" aria-labelledby="page-title">
+      <section class="hero">
+        <div class="hero-label">Security Operations</div>
+        <h1 id="page-title" class="hero-title">
+          Access Denied — Incident Blocked
+        </h1>
+        <p class="hero-copy">
+          This resource is protected for verified Roblox game execution only.
+          Direct browser access is blocked. All unauthorized activity is
+          captured and escalated to active security review.
+        </p>
+      </section>
 
-      <div class="divider"></div>
+      <div class="status-grid">
+        <article class="panel">
+          <span class="label">Endpoint</span>
+          <span class="value">Restricted</span>
+          <span class="badge">Critical</span>
+        </article>
 
-      <p class="message">
-        This resource is <strong>PROTECTED</strong> and reserved exclusively for
-        authorized Roblox game execution. Direct browser access is strictly
-        <strong>PROHIBITED</strong>.
-      </p>
-
-      <div class="callout">
-        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path
-            d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Zm-1-11h2v6h-2V9Zm0 8h2v2h-2v-2Z"
-            fill="#ffcc00"
-          />
-        </svg>
-        Access has been blocked for this session and will be reviewed.
+        <article class="panel">
+          <span class="label">Access state</span>
+          <span class="value">Unauthorized</span>
+          <span class="badge">Monitoring</span>
+        </article>
       </div>
 
-      <p class="message">
-        Your access attempt has been <strong>LOGGED</strong> and
-        <strong>REPORTED</strong>. This incident is now under review by internal
-        monitoring systems.
-      </p>
+      <section class="alert-panel" aria-label="Security alert">
+        <div class="alert-title">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm1 15h-2v-2h2v2Zm0-4h-2V7h2v6Z"
+              fill="currentColor"
+            />
+          </svg>
+          Incident capture active
+        </div>
+        <p>
+          Your access attempt has been logged and is under active monitoring.
+          Any further inspection or tampering will be recorded and reviewed by
+          the SOC team.
+        </p>
+      </section>
 
-      <p
-        class="message"
-        style="font-size: 13px; color: #ff6666; text-align: center"
-      >
-        Continued unauthorized access may result in permanent access revocation
-        and further security actions.
-      </p>
+      <section class="code-panel" aria-label="System log">
+        <pre class="code-block">
+<span class="code-line">&gt; INITIATING_TRACE... COMPLETE</span>
+<span class="code-line">&gt; TAMPERING_DETECTED = TRUE</span>
+<span class="code-line">&gt; USER_AGENT = UNVERIFIED</span>
+<span class="code-line">&gt; INCIDENT_ID = <span id="incidentId">GENERATING...</span></span>
+<span class="code-line">&gt; STATUS = <span class="status-tracking">TRACKING</span></span>
+        </pre>
+      </section>
 
-      
+      <div class="footer-row">
+        <div class="footer-item">System v2.4.7</div>
+        <div class="footer-item">Security level: maximum</div>
+        <div class="footer-item">
+          <span class="status-dot"></span>
+          Live monitoring active
+        </div>
+      </div>
+    </main>
 
     <script>
-      // Generate random incident ID
       const incidentId = Math.random()
         .toString(36)
         .substring(2, 15)
         .toUpperCase();
       document.getElementById("incidentId").textContent = incidentId;
 
-      // Anti-inspection
-      document.addEventListener("contextmenu", (e) => e.preventDefault());
-      document.addEventListener("keydown", (e) => {
-        if (e.key === "F12") e.preventDefault();
-        if (e.ctrlKey && e.shiftKey && (e.key === "I" || e.key === "i"))
-          e.preventDefault();
-        if (e.ctrlKey && (e.key === "u" || e.key === "U")) e.preventDefault();
-        if (e.ctrlKey && (e.key === "s" || e.key === "S")) e.preventDefault();
+      document.addEventListener("contextmenu", (event) =>
+        event.preventDefault(),
+      );
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "F12") event.preventDefault();
+        if (
+          event.ctrlKey &&
+          event.shiftKey &&
+          (event.key === "I" || event.key === "i")
+        )
+          event.preventDefault();
+        if (event.ctrlKey && (event.key === "u" || event.key === "U"))
+          event.preventDefault();
+        if (event.ctrlKey && (event.key === "s" || event.key === "S"))
+          event.preventDefault();
       });
       document.onselectstart = () => false;
 
-      // Console warnings
       setInterval(() => {
         console.clear();
         console.log(
           "%c[SECURITY]",
-          "color: #ff0033; font-size: 40px; font-weight: bold; text-shadow: 0 0 10px #ff0033;",
+          "color: #ff2d55; font-size: 38px; font-weight: 800; text-shadow: 0 0 18px rgba(255, 45, 85, 0.75);",
         );
         console.log(
           "%cUnauthorized access is being logged and reported.",
-          "color: #ff6666; font-size: 14px;",
+          "color: #ffd166; font-size: 14px;",
         );
         console.log(
           "%cIncident ID: " + incidentId,
-          "color: #ffcc00; font-size: 12px;",
+          "color: #ff6b81; font-size: 12px;",
         );
       }, 2000);
     </script>
