@@ -22,20 +22,12 @@ const ROBLOX_GLOBALS = new Set([
   "syn", "fluxus", "krnl", "self", "true", "false", "nil"
 ]);
 
-function randInt(min, max) {
-  return min + Math.floor(Math.random() * (max - min + 1));
-}
-
-function randChoice(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
+function randInt(min, max) { return min + Math.floor(Math.random() * (max - min + 1)); }
+function randChoice(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 function randHexName(length = 6) {
   const chars = "0123456789abcdef";
   let out = "_0x";
-  for (let i = 0; i < length; i++) {
-    out += chars[Math.floor(Math.random() * chars.length)];
-  }
+  for (let i = 0; i < length; i++) out += chars[Math.floor(Math.random() * chars.length)];
   return out;
 }
 
@@ -54,6 +46,16 @@ function minify(code) {
   return code;
 }
 
+function aggressiveMinify(code) {
+  code = preprocess(code);
+  code = code.replace(/[ \t]+/g, " ");
+  code = code.replace(/\n+/g, "\n");
+  code = code.replace(/\s*([=+\-*/%<>~^&|,;(){}[\]])\s*/g, "$1");
+  code = code.replace(/\n/g, " ");
+  code = code.replace(/  +/g, " ");
+  return code.trim();
+}
+
 function encryptString(str, key, shift) {
   const bytes = [];
   for (let i = 0; i < str.length; i++) {
@@ -68,51 +70,24 @@ function makeStringDecoder(varName, key, shift) {
   return `local function ${varName}(t) local k=${key} local s="" for i=1,#t do s=s..string.char(bit32.bxor(t[i],(k+((i-1+${shift})%11)))%256) end return s end`;
 }
 
-function bytesToLuaTable(bytes) {
-  return "{" + bytes.join(",") + "}";
-}
+function bytesToLuaTable(bytes) { return "{" + bytes.join(",") + "}"; }
 
 function encodeNumber(n) {
   if (!Number.isInteger(n) || n < 0 || n > 200000) return String(n);
   const variant = randInt(0, 5);
   switch (variant) {
-    case 0: {
-      const a = randInt(0, Math.max(1, n));
-      return `(${a}+${n - a})`;
-    }
-    case 1: {
-      if (n < 4) return String(n);
-      const a = randInt(2, 7);
-      const b = Math.floor(n / a);
-      const c = n - a * b;
-      return `(${a}*${b}${c >= 0 ? "+" + c : c})`;
-    }
-    case 2: {
-      const offset = randInt(1, 500);
-      return `(${n + offset}-${offset})`;
-    }
-    case 3: {
-      const mask = randInt(1, 255);
-      return `bit32.bxor(${n ^ mask},${mask})`;
-    }
-    case 4: {
-      if (n === 0) return "0";
-      const shift = randInt(1, 4);
-      return `bit32.rshift(${n << shift},${shift})`;
-    }
-    case 5: {
-      const base = randInt(1, Math.max(1, Math.floor(n / 2)));
-      return `(${base}+${n - base})`;
-    }
+    case 0: { const a = randInt(0, Math.max(1, n)); return `(${a}+${n - a})`; }
+    case 1: { if (n < 4) return String(n); const a = randInt(2, 7); const b = Math.floor(n / a); const c = n - a * b; return `(${a}*${b}${c >= 0 ? "+" + c : c})`; }
+    case 2: { const offset = randInt(1, 500); return `(${n + offset}-${offset})`; }
+    case 3: { const mask = randInt(1, 255); return `bit32.bxor(${n ^ mask},${mask})`; }
+    case 4: { if (n === 0) return "0"; const shift = randInt(1, 4); return `bit32.rshift(${n << shift},${shift})`; }
+    case 5: { const base = randInt(1, Math.max(1, Math.floor(n / 2))); return `(${base}+${n - base})`; }
     default: return String(n);
   }
 }
 
 class RenameCtx {
-  constructor() {
-    this.map = new Map();
-    this.counter = 0;
-  }
+  constructor() { this.map = new Map(); this.counter = 0; }
   rename(name) {
     if (ROBLOX_GLOBALS.has(name)) return name;
     if (this.map.has(name)) return this.map.get(name);
@@ -121,39 +96,28 @@ class RenameCtx {
     this.map.set(name, newName);
     return newName;
   }
-  get(name) {
-    if (ROBLOX_GLOBALS.has(name)) return name;
-    return this.map.get(name) || name;
-  }
 }
 
 function walkAst(node, ctx) {
   if (!node || typeof node !== "object") return;
-
   if (node.type === "StringLiteral" && typeof node.value === "string") {
     node.__obf = { type: "str", bytes: encryptString(node.value, ctx.stringKey, ctx.stringShift) };
     return;
   }
-
   if (node.type === "NumericLiteral" && typeof node.value === "number") {
     node.__obf = { type: "num", expr: encodeNumber(node.value) };
     return;
   }
-
   if (ctx.rename) {
     if (node.type === "LocalStatement" && Array.isArray(node.variables)) {
-      node.variables.forEach(v => {
-        if (v.type === "Identifier" && v.name) v.name = ctx.rename.rename(v.name);
-      });
+      node.variables.forEach(v => { if (v.type === "Identifier" && v.name) v.name = ctx.rename.rename(v.name); });
     }
     if (node.type === "FunctionDeclaration") {
       if (node.isLocal && node.identifier && node.identifier.type === "Identifier") {
         node.identifier.name = ctx.rename.rename(node.identifier.name);
       }
       if (Array.isArray(node.parameters)) {
-        node.parameters.forEach(p => {
-          if (p.type === "Identifier" && p.name) p.name = ctx.rename.rename(p.name);
-        });
+        node.parameters.forEach(p => { if (p.type === "Identifier" && p.name) p.name = ctx.rename.rename(p.name); });
       }
     }
     if (node.type === "ForNumericStatement" && node.variable) {
@@ -163,14 +127,12 @@ function walkAst(node, ctx) {
       node.variables.forEach(v => { v.name = ctx.rename.rename(v.name); });
     }
   }
-
   for (const key in node) {
     if (key === "loc" || key === "range" || key === "__obf") continue;
     const child = node[key];
     if (Array.isArray(child)) child.forEach(c => walkAst(c, ctx));
     else if (child && typeof child === "object") walkAst(child, ctx);
   }
-
   if (ctx.rename && node.type === "Identifier" && node.name && ctx.rename.map.has(node.name)) {
     node.name = ctx.rename.map.get(node.name);
   }
@@ -184,16 +146,10 @@ function serialize(node) {
   }
   switch (node.type) {
     case "Chunk": return node.body.map(serialize).join("\n");
-    case "LocalStatement": {
-      const vars = node.variables.map(v => v.name).join(",");
-      const inits = node.init.map(serialize).join(",");
-      return `local ${vars}${inits ? "=" + inits : ""}`;
-    }
-    case "AssignmentStatement":
-      return `${node.variables.map(serialize).join(",")}=${node.init.map(serialize).join(",")}`;
+    case "LocalStatement": { const vars = node.variables.map(v => v.name).join(","); const inits = node.init.map(serialize).join(","); return `local ${vars}${inits ? "=" + inits : ""}`; }
+    case "AssignmentStatement": return `${node.variables.map(serialize).join(",")}=${node.init.map(serialize).join(",")}`;
     case "CallStatement": return serialize(node.expression);
-    case "CallExpression":
-      return `${serialize(node.base)}(${node.arguments.map(serialize).join(",")})`;
+    case "CallExpression": return `${serialize(node.base)}(${node.arguments.map(serialize).join(",")})`;
     case "StringCallExpression": return `${serialize(node.base)}(${serialize(node.argument)})`;
     case "TableCallExpression": return `${serialize(node.base)}(${serialize(node.arguments)})`;
     case "Identifier": return node.name;
@@ -205,8 +161,7 @@ function serialize(node) {
     case "MemberExpression": return `${serialize(node.base)}${node.indexer}${node.identifier.name}`;
     case "IndexExpression": return `${serialize(node.base)}[${serialize(node.index)}]`;
     case "BinaryExpression":
-    case "LogicalExpression":
-      return `(${serialize(node.left)}${node.operator}${serialize(node.right)})`;
+    case "LogicalExpression": return `(${serialize(node.left)}${node.operator}${serialize(node.right)})`;
     case "UnaryExpression": return `(${node.operator} ${serialize(node.argument)})`;
     case "FunctionDeclaration": {
       const params = node.parameters.map(p => p.type === "VarargLiteral" ? "..." : p.name).join(",");
@@ -224,109 +179,19 @@ function serialize(node) {
       });
       return out + "end";
     }
-    case "WhileStatement":
-      return `while ${serialize(node.condition)} do\n${node.body.map(serialize).join("\n")}\nend`;
-    case "RepeatStatement":
-      return `repeat\n${node.body.map(serialize).join("\n")}\nuntil ${serialize(node.condition)}`;
-    case "ForNumericStatement": {
-      const step = node.step ? "," + serialize(node.step) : "";
-      return `for ${node.variable.name}=${serialize(node.start)},${serialize(node.end)}${step} do\n${node.body.map(serialize).join("\n")}\nend`;
-    }
-    case "ForGenericStatement":
-      return `for ${node.variables.map(v => v.name).join(",")} in ${node.iterators.map(serialize).join(",")} do\n${node.body.map(serialize).join("\n")}\nend`;
+    case "WhileStatement": return `while ${serialize(node.condition)} do\n${node.body.map(serialize).join("\n")}\nend`;
+    case "RepeatStatement": return `repeat\n${node.body.map(serialize).join("\n")}\nuntil ${serialize(node.condition)}`;
+    case "ForNumericStatement": { const step = node.step ? "," + serialize(node.step) : ""; return `for ${node.variable.name}=${serialize(node.start)},${serialize(node.end)}${step} do\n${node.body.map(serialize).join("\n")}\nend`; }
+    case "ForGenericStatement": return `for ${node.variables.map(v => v.name).join(",")} in ${node.iterators.map(serialize).join(",")} do\n${node.body.map(serialize).join("\n")}\nend`;
     case "DoStatement": return `do\n${node.body.map(serialize).join("\n")}\nend`;
     case "ReturnStatement": return `return ${node.arguments.map(serialize).join(",")}`;
     case "BreakStatement": return "break";
-    case "TableConstructorExpression": {
-      const fields = node.fields.map(f => {
-        if (f.type === "TableKey") return `[${serialize(f.key)}]=${serialize(f.value)}`;
-        if (f.type === "TableKeyString") return `${f.key.name}=${serialize(f.value)}`;
-        return serialize(f.value);
-      });
-      return `{${fields.join(",")}}`;
-    }
+    case "TableConstructorExpression": { const fields = node.fields.map(f => { if (f.type === "TableKey") return `[${serialize(f.key)}]=${serialize(f.value)}`; if (f.type === "TableKeyString") return `${f.key.name}=${serialize(f.value)}`; return serialize(f.value); }); return `{${fields.join(",")}}`; }
     default: return "";
   }
 }
 
-function wrapOpaquePredicate(code) {
-  const trueConds = [
-    "(#\"\"==0)",
-    "((1+1)==2)",
-    "((5*5)==25)",
-    "((\"a\"..\"b\")==\"ab\")",
-    "(type(1)==\"number\")",
-    "(math.floor(1.5)==1)",
-    "(string.len(\"x\")==1)",
-    "(bit32.band(15,15)==15)",
-    "(math.max(1,2)==2)"
-  ];
-  const cond = randChoice(trueConds);
-  const junkVar1 = randHexName(5);
-  const junkVar2 = randHexName(5);
-  const junkVar3 = randHexName(5);
-  const junk = `local ${junkVar1}=${randInt(1, 999)}*${randInt(1, 999)} local ${junkVar2}=${randInt(0, 999)}+${randInt(0, 999)} local ${junkVar3}=math.floor(${junkVar1}/${randInt(2, 9)})`;
-  return `if ${cond} then\n${code}\nelse\n${junk}\nend`;
-}
-
-function generateJunkFunctions(count = 3) {
-  const junks = [];
-  for (let i = 0; i < count; i++) {
-    const fn = randHexName(6);
-    const p1 = randHexName(3);
-    const p2 = randHexName(3);
-    const junkOps = [
-      `return ${p1}+${p2}`,
-      `return ${p1}*${p2}-${randInt(1, 100)}`,
-      `return math.floor(${p1}/${randInt(2, 9)})`,
-      `return bit32.bxor(${p1},${p2})`,
-      `if ${p1}>${p2} then return ${p1} else return ${p2} end`,
-    ];
-    junks.push(`local function ${fn}(${p1},${p2}) ${randChoice(junkOps)} end`);
-  }
-  return junks.join(" ");
-}
-
-function generateAntiDebug() {
-  const wrapper = randHexName(6);
-  const checkFn = randHexName(5);
-  const okVar = randHexName(4);
-  return [
-    `local ${wrapper}=function()`,
-    `local ${checkFn}=function()`,
-    `if debug and debug.getinfo then`,
-    `local ${okVar}=pcall(function() return debug.getinfo(1,"S") end)`,
-    `if not ${okVar} then return true end`,
-    `end`,
-    `if debug and debug.sethook then`,
-    `local h=debug.gethook and debug.gethook()`,
-    `if h then return true end`,
-    `end`,
-    `return false`,
-    `end`,
-    `if ${checkFn}() then`,
-    `while true do end`,
-    `end`,
-    `end`,
-    `${wrapper}()`
-  ].join(" ");
-}
-
-function generateIntegrityCheck(payloadLength) {
-  const varName = randHexName(5);
-  const expectedLen = payloadLength;
-  const dummy1 = randHexName(4);
-  const dummy2 = randHexName(4);
-  return [
-    `local ${varName}=${expectedLen}`,
-    `local ${dummy1}=math.floor(${varName}/${randInt(2, 9)})`,
-    `local ${dummy2}=bit32.bxor(${varName},${randInt(1, 255)})`
-  ].join(" ");
-}
-
-function bytesToBase64(bytes) {
-  return Buffer.from(bytes).toString("base64");
-}
+function bytesToBase64(bytes) { return Buffer.from(bytes).toString("base64"); }
 
 function encryptPayload(code, xorKey) {
   const bytes = [];
@@ -339,56 +204,28 @@ function encryptPayload(code, xorKey) {
 }
 
 function makePayloadDecoder(varName, xorKey) {
-  return [
-    `local function ${varName}(s)`,
-    `local b="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"`,
-    `local d={}`,
-    `for i=1,#b do d[string.sub(b,i,i)]=i-1 end`,
-    `local o={} local pad=0`,
-    `if string.sub(s,-2)=="==" then pad=2 elseif string.sub(s,-1)=="=" then pad=1 end`,
-    `s=string.gsub(s,"[^A-Za-z0-9+/=]","")`,
-    `for i=1,#s,4 do`,
-    `local a=d[string.sub(s,i,i)] or 0`,
-    `local b1=d[string.sub(s,i+1,i+1)] or 0`,
-    `local c=d[string.sub(s,i+2,i+2)] or 0`,
-    `local e=d[string.sub(s,i+3,i+3)] or 0`,
-    `local n=bit32.bor(bit32.lshift(a,18),bit32.lshift(b1,12),bit32.lshift(c,6),e)`,
-    `table.insert(o,string.char(bit32.band(bit32.rshift(n,16),0xff)))`,
-    `table.insert(o,string.char(bit32.band(bit32.rshift(n,8),0xff)))`,
-    `table.insert(o,string.char(bit32.band(n,0xff)))`,
-    `end`,
-    `local r=table.concat(o)`,
-    `if pad>0 then r=string.sub(r,1,#r-pad) end`,
-    `local out={}`,
-    `for i=1,#r do`,
-    `out[i]=string.char(bit32.bxor(string.byte(r,i),(${xorKey}+((i-1)%17)))%256)`,
-    `end`,
-    `return table.concat(out)`,
-    `end`
-  ].join(" ");
+  return `local function ${varName}(s) local b="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" local d={} for i=1,#b do d[string.sub(b,i,i)]=i-1 end local o={} local pad=0 if string.sub(s,-2)=="==" then pad=2 elseif string.sub(s,-1)=="=" then pad=1 end s=string.gsub(s,"[^A-Za-z0-9+/=]","") for i=1,#s,4 do local a=d[string.sub(s,i,i)] or 0 local b1=d[string.sub(s,i+1,i+1)] or 0 local c=d[string.sub(s,i+2,i+2)] or 0 local e=d[string.sub(s,i+3,i+3)] or 0 local n=bit32.bor(bit32.lshift(a,18),bit32.lshift(b1,12),bit32.lshift(c,6),e) table.insert(o,string.char(bit32.band(bit32.rshift(n,16),0xff))) table.insert(o,string.char(bit32.band(bit32.rshift(n,8),0xff))) table.insert(o,string.char(bit32.band(n,0xff))) end local r=table.concat(o) if pad>0 then r=string.sub(r,1,#r-pad) end local out={} for i=1,#r do out[i]=string.char(bit32.bxor(string.byte(r,i),(${xorKey}+((i-1)%17)))%256) end return table.concat(out) end`;
 }
 
-function makeVmDispatcher(payloadVar, decoderVar, execFnVar) {
-  const stateVar = randHexName(4);
-  const opsTable = randHexName(4);
-  const initState = randInt(1, 4);
-  const stateA = initState;
-  const stateB = initState + 1;
-  const stateC = initState + 2;
-  const stateEnd = initState + 3;
-  return [
-    `local ${stateVar}=${stateA}`,
-    `local ${opsTable}={}`,
-    `${opsTable}[${stateA}]=function() return ${stateB} end`,
-    `${opsTable}[${stateB}]=function() return ${stateC} end`,
-    `${opsTable}[${stateC}]=function()`,
-    `local _L=loadstring or load`,
-    `local ${execFnVar}=_L(${decoderVar}(${payloadVar}))`,
-    `if ${execFnVar} then ${execFnVar}() end`,
-    `return ${stateEnd}`,
-    `end`,
-    `while ${stateVar}~=${stateEnd} do ${stateVar}=${opsTable}[${stateVar}]() end`
-  ].join(" ");
+function generateAntiDebug() {
+  const wrapper = randHexName(6); const checkFn = randHexName(5); const okVar = randHexName(4);
+  return `local ${wrapper}=function() local ${checkFn}=function() if debug and debug.getinfo then local ${okVar}=pcall(function() return debug.getinfo(1,"S") end) if not ${okVar} then return true end end if debug and debug.sethook then local h=debug.gethook and debug.gethook() if h then return true end end return false end if ${checkFn}() then while true do end end end ${wrapper}()`;
+}
+
+function byteLevelObfuscate(code, level) {
+  const minified = aggressiveMinify(code);
+  const payloadXor = randInt(40, 240);
+  const encPayload = encryptPayload(minified, payloadXor);
+  const payloadDec = makePayloadDecoder("_P", payloadXor);
+  const strVar = randHexName(7);
+  const execVar = randHexName(6);
+
+  if (level === "medium") {
+    return minify([payloadDec, `local ${strVar}="${encPayload}"`, `local _L=loadstring or load`, `local ${execVar}=_L(_P(${strVar}))`, `if ${execVar} then ${execVar}() end`].join("\n"));
+  }
+
+  const antiDebug = generateAntiDebug();
+  return minify([antiDebug, payloadDec, `local ${strVar}="${encPayload}"`, `local _L=loadstring or load`, `local ${execVar}=_L(_P(${strVar}))`, `if ${execVar} then ${execVar}() end`].join("\n"));
 }
 
 async function obfuscate(luaCode, level = "medium") {
@@ -396,9 +233,22 @@ async function obfuscate(luaCode, level = "medium") {
     let code = preprocess(luaCode);
 
     if (level === "none") return code;
-    if (level === "basic") return minify(code);
+    if (level === "basic") return aggressiveMinify(code);
 
-    const ast = luaparse.parse(code, { luaVersion: "5.1", comments: false });
+    let ast = null;
+    try {
+      ast = luaparse.parse(code, { luaVersion: "5.1", comments: false });
+    } catch (e1) {
+      try {
+        ast = luaparse.parse(code, { luaVersion: "5.3", comments: false });
+      } catch (e2) {
+        console.warn("[obfuscator] Parse failed both 5.1 and 5.3, using byte-level fallback");
+      }
+    }
+
+    if (!ast) {
+      return byteLevelObfuscate(code, level);
+    }
 
     const isMedium = level === "medium";
     const isMaximum = level === "maximum";
@@ -416,15 +266,7 @@ async function obfuscate(luaCode, level = "medium") {
     const decoder = makeStringDecoder("_D", stringKey, stringShift);
     let combined = `${decoder}\n${obfuscated}`;
 
-    if (isMedium) {
-      return minify(combined);
-    }
-
-    combined = wrapOpaquePredicate(combined);
-    combined = wrapOpaquePredicate(combined);
-
-    const junkFns = generateJunkFunctions(randInt(2, 5));
-    combined = `${junkFns}\n${combined}`;
+    if (isMedium) return minify(combined);
 
     const payloadXor = randInt(40, 240);
     const encPayload = encryptPayload(combined, payloadXor);
@@ -432,29 +274,19 @@ async function obfuscate(luaCode, level = "medium") {
     const strVar = randHexName(7);
     const execVar = randHexName(6);
     const antiDebug = generateAntiDebug();
-    const integrity = generateIntegrityCheck(encPayload.length);
-    const vmDispatch = makeVmDispatcher(strVar, "_P", execVar);
 
-    const finalCode = [
-      antiDebug,
-      payloadDec,
-      integrity,
-      `local ${strVar}="${encPayload}"`,
-      vmDispatch
-    ].join("\n");
-
-    return minify(finalCode);
+    return minify([antiDebug, payloadDec, `local ${strVar}="${encPayload}"`, `local _L=loadstring or load`, `local ${execVar}=_L(_P(${strVar}))`, `if ${execVar} then ${execVar}() end`].join("\n"));
   } catch (err) {
     console.error("[obfuscator] Error:", err.message);
-    throw new Error("Failed to obfuscate: " + err.message);
+    try {
+      return byteLevelObfuscate(preprocess(luaCode), level);
+    } catch (e) {
+      throw new Error("Failed to obfuscate: " + err.message);
+    }
   }
 }
 
-process.on("uncaughtException", (err) => {
-  console.error("[obfuscator] Uncaught:", err.message);
-});
-process.on("unhandledRejection", (reason) => {
-  console.error("[obfuscator] Unhandled:", reason);
-});
+process.on("uncaughtException", (err) => { console.error("[obfuscator] Uncaught:", err.message); });
+process.on("unhandledRejection", (reason) => { console.error("[obfuscator] Unhandled:", reason); });
 
 module.exports = { obfuscate };
