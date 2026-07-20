@@ -249,6 +249,10 @@
       }
 
       .callout {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
         background: rgba(255, 204, 0, 0.1);
         border: 1px solid #ffcc00;
         padding: 15px 20px;
@@ -256,10 +260,15 @@
         color: #ffcc00;
         text-align: center;
         font-weight: bold;
-        letter-spacing: 2px;
+        letter-spacing: 1.5px;
         font-size: 16px;
         animation: calloutPulse 2s ease-in-out infinite;
-        position: relative;
+      }
+
+      .callout svg {
+        width: 22px;
+        height: 22px;
+        flex-shrink: 0;
       }
 
       @keyframes calloutPulse {
@@ -271,22 +280,6 @@
         50% {
           box-shadow: 0 0 40px rgba(255, 204, 0, 0.8);
           border-color: #ffdd44;
-        }
-      }
-
-      .callout .arrows {
-        display: inline-block;
-        margin: 0 10px;
-        animation: arrowBlink 1s infinite;
-      }
-
-      @keyframes arrowBlink {
-        0%,
-        100% {
-          opacity: 1;
-        }
-        50% {
-          opacity: 0.3;
         }
       }
 
@@ -384,15 +377,17 @@
         gap: 10px;
       }
 
-      .live-dot {
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        background: #ff0033;
-        border-radius: 50%;
-        margin-right: 5px;
-        animation: livePulse 1s infinite;
-        vertical-align: middle;
+      .status-icon {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: #660011;
+      }
+
+      .status-icon svg {
+        width: 10px;
+        height: 10px;
+        display: block;
       }
 
       @keyframes livePulse {
@@ -407,21 +402,76 @@
         }
       }
 
-      @media (max-width: 600px) {
+      @media (max-width: 900px) {
+        .container {
+          padding: 40px 28px;
+        }
         h1 {
-          font-size: 32px;
-          letter-spacing: 3px;
+          font-size: 40px;
+          letter-spacing: 4px;
         }
         h2 {
-          font-size: 14px;
-          letter-spacing: 2px;
+          font-size: 16px;
+        }
+        .warning-bar {
+          font-size: 11px;
+          padding: 7px 12px;
+        }
+        .callout {
+          font-size: 15px;
+          padding: 14px 18px;
+        }
+        .code-block {
+          font-size: 13px;
+          padding: 18px;
+        }
+        .footer-info {
+          gap: 12px;
+        }
+      }
+
+      @media (max-width: 600px) {
+        body {
+          padding: 16px;
         }
         .container {
-          padding: 30px 20px;
+          padding: 24px 18px;
+          border-width: 1px;
+        }
+        h1 {
+          font-size: 28px;
+          letter-spacing: 2px;
+        }
+        h2 {
+          font-size: 13px;
+          letter-spacing: 1.5px;
+        }
+        .warning-bar {
+          font-size: 11px;
+          padding: 8px 10px;
+        }
+        .message {
+          font-size: 14px;
+        }
+        .callout {
+          font-size: 14px;
+          padding: 12px 14px;
+        }
+        .code-block {
+          font-size: 12px;
+          padding: 16px;
+        }
+        .divider {
+          margin: 20px 0;
         }
         .footer-info {
           justify-content: center;
           text-align: center;
+          flex-direction: column;
+          align-items: center;
+        }
+        .footer-info > div {
+          width: 100%;
         }
       }
     </style>
@@ -442,15 +492,19 @@
       </p>
 
       <div class="callout">
-        <span class="arrows">&gt;&gt;&gt;</span>
-        ESPECIALLY IF YOU ARE AN ARGON USER
-        <span class="arrows">&lt;&lt;&lt;</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path
+            d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Zm-1-11h2v6h-2V9Zm0 8h2v2h-2v-2Z"
+            fill="#ffcc00"
+          />
+        </svg>
+        Access has been blocked for this session and will be reviewed.
       </div>
 
       <p class="message">
         Your access attempt has been <strong>LOGGED</strong> and
-        <strong>REPORTED</strong>. This incident is now under active review by
-        our automated security systems.
+        <strong>REPORTED</strong>. This incident is now under review by internal
+        monitoring systems.
       </p>
 
       <div class="code-block">
@@ -477,8 +531,13 @@
 
       <div class="footer-info">
         <div>SYSTEM_v2.4.7</div>
-        <div>SEC_LEVEL::MAXIMUM</div>
-        <div><span class="live-dot"></span>LIVE_MONITORING</div>
+        <div>SECURITY LEVEL: MAXIMUM</div>
+        <div class="status-icon">
+          <svg viewBox="0 0 10 10" aria-hidden="true" focusable="false">
+            <circle cx="5" cy="5" r="4" fill="#ff0033" />
+          </svg>
+          Monitoring active
+        </div>
       </div>
     </div>
 
