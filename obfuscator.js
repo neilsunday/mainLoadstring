@@ -40,13 +40,30 @@ function preprocess(code){
   return code.trim();
 }
 
+// v5.2 FIX: Semicolon-based statement separator prevents Lua parser ambiguity
+// Before: `Player.PlayerGui\n(function()...)()` â†’ `Player.PlayerGui (function()...)()` = PARSE ERROR
+// After:  `Player.PlayerGui;(function()...)()` = valid Lua
 function aggressiveMinify(code){
   code=preprocess(code);
+  code=code.split("\n").map(l=>l.trim()).filter(l=>l.length>0).join("\n");
   code=code.replace(/[ \t]+/g," ");
-  code=code.replace(/\n+/g,"\n");
-  code=code.replace(/\n/g," ");
-  code=code.replace(/  +/g," ");
-  return code.trim();
+  const lines=code.split("\n");
+  const result=[];
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    if(result.length===0){result.push(line);continue;}
+    const prev=result[result.length-1].trim();
+    let addSemi=true;
+    if(/\b(do|then|else|repeat)\s*$/.test(prev))addSemi=false;
+    else if(/[=,{(\[+\-*/%<>~^&|.:;]$/.test(prev))addSemi=false;
+    else if(/\b(and|or|not|in|return|local|elseif)\s*$/.test(prev))addSemi=false;
+    else if(/\)\s*$/.test(prev)&&/\bfunction\b/.test(prev)&&!/\bend\s*\)\s*$/.test(prev))addSemi=false;
+    if(addSemi)result[result.length-1]=prev+";";
+    result.push(line);
+  }
+  let out=result.join(" ");
+  out=out.replace(/  +/g," ").replace(/;\s*;/g,";").replace(/;\s*end\b/g," end").replace(/;\s*\)/g,")").replace(/;\s*until\b/g," until");
+  return out.trim();
 }
 
 function tripleXorEncrypt(str,k1,k2,k3){
@@ -92,7 +109,7 @@ function generateJunkOps(count){
     ]);
     ops.push(op);
   }
-  return ops.join(" ");
+  return ops.join("; ");
 }
 
 function generateOpaquePredicate(payload){
@@ -111,19 +128,12 @@ function generateOpaquePredicate(payload){
   return "if "+c1+" and "+c2+" then "+payload+" else local "+junkV+"="+randInt(1,999)+"*"+randInt(1,999)+" end";
 }
 
-// v5.1 FIX: Executor-safe anti-tamper
-// - REMOVED debug.gethook() check (false positive on Synapse/Fluxus/Krnl/Wave/Delta/Solara â€” they hook debug by default)
-// - REMOVED `while true do end` freeze trap (silent failure = user thinks nothing works)
-// - REPLACED with soft integrity checks that don't block execution
-// - Uses environment fingerprinting instead of debug hooks
+// Executor-safe soft check â€” does NOT freeze if fails
 function generateAntiTamper(){
   const wrapper=randHexName(6);
   const chk1=randHexName(5);
   const chk2=randHexName(5);
   const flag=randHexName(4);
-  // Soft checks: verify Roblox environment exists, verify bit32 works correctly
-  // These are TRUE on legit Roblox and FALSE on decompilers/emulators
-  // Does NOT freeze on failure â€” just proceeds normally (attacker learns nothing)
   return "local "+wrapper+"=function() local "+flag+"=true local "+chk1+"=pcall(function() return bit32.bxor(15,15)==0 end) local "+chk2+"=pcall(function() return type(game)=='userdata' or type(game)=='table' or true end) if not "+chk1+" then "+flag+"=false end if not "+chk2+" then "+flag+"=false end return "+flag+" end "+wrapper+"()";
 }
 
@@ -209,6 +219,12 @@ function walkAst(node,ctx){
   }
 }
 
+// v5.2 FIX: serialize() now joins statements with `;` explicitly to prevent
+// aggressiveMinify from creating ambiguous statement boundaries
+function serializeBlock(stmts){
+  return stmts.map(serialize).filter(s=>s.length>0).join(";");
+}
+
 function serialize(node){
   if(!node)return "";
   if(node.__obf){
@@ -216,7 +232,7 @@ function serialize(node){
     if(node.__obf.type==="num")return node.__obf.expr;
   }
   switch(node.type){
-    case "Chunk":return node.body.map(serialize).join("\n");
+    case "Chunk":return serializeBlock(node.body);
     case "LocalStatement":{const v=node.variables.map(x=>x.name).join(",");const i=node.init.map(serialize).join(",");return "local "+v+(i?"="+i:"");}
     case "AssignmentStatement":return node.variables.map(serialize).join(",")+"="+node.init.map(serialize).join(",");
     case "CallStatement":return serialize(node.expression);
@@ -236,25 +252,25 @@ function serialize(node){
     case "UnaryExpression":return "("+node.operator+" "+serialize(node.argument)+")";
     case "FunctionDeclaration":{
       const p=node.parameters.map(x=>x.type==="VarargLiteral"?"...":x.name).join(",");
-      const b=node.body.map(serialize).join("\n");
+      const b=serializeBlock(node.body);
       const id=node.identifier?serialize(node.identifier):"";
       const lp=node.isLocal?"local ":"";
-      return id?lp+"function "+id+"("+p+")\n"+b+"\nend":"function("+p+")\n"+b+"\nend";
+      return id?lp+"function "+id+"("+p+") "+b+" end":"function("+p+") "+b+" end";
     }
     case "IfStatement":{
       let o="";
       node.clauses.forEach(c=>{
-        if(c.type==="IfClause")o+="if "+serialize(c.condition)+" then\n"+c.body.map(serialize).join("\n")+"\n";
-        else if(c.type==="ElseifClause")o+="elseif "+serialize(c.condition)+" then\n"+c.body.map(serialize).join("\n")+"\n";
-        else if(c.type==="ElseClause")o+="else\n"+c.body.map(serialize).join("\n")+"\n";
+        if(c.type==="IfClause")o+="if "+serialize(c.condition)+" then "+serializeBlock(c.body)+" ";
+        else if(c.type==="ElseifClause")o+="elseif "+serialize(c.condition)+" then "+serializeBlock(c.body)+" ";
+        else if(c.type==="ElseClause")o+="else "+serializeBlock(c.body)+" ";
       });
       return o+"end";
     }
-    case "WhileStatement":return "while "+serialize(node.condition)+" do\n"+node.body.map(serialize).join("\n")+"\nend";
-    case "RepeatStatement":return "repeat\n"+node.body.map(serialize).join("\n")+"\nuntil "+serialize(node.condition);
-    case "ForNumericStatement":{const s=node.step?","+serialize(node.step):"";return "for "+node.variable.name+"="+serialize(node.start)+","+serialize(node.end)+s+" do\n"+node.body.map(serialize).join("\n")+"\nend";}
-    case "ForGenericStatement":return "for "+node.variables.map(x=>x.name).join(",")+" in "+node.iterators.map(serialize).join(",")+" do\n"+node.body.map(serialize).join("\n")+"\nend";
-    case "DoStatement":return "do\n"+node.body.map(serialize).join("\n")+"\nend";
+    case "WhileStatement":return "while "+serialize(node.condition)+" do "+serializeBlock(node.body)+" end";
+    case "RepeatStatement":return "repeat "+serializeBlock(node.body)+" until "+serialize(node.condition);
+    case "ForNumericStatement":{const s=node.step?","+serialize(node.step):"";return "for "+node.variable.name+"="+serialize(node.start)+","+serialize(node.end)+s+" do "+serializeBlock(node.body)+" end";}
+    case "ForGenericStatement":return "for "+node.variables.map(x=>x.name).join(",")+" in "+node.iterators.map(serialize).join(",")+" do "+serializeBlock(node.body)+" end";
+    case "DoStatement":return "do "+serializeBlock(node.body)+" end";
     case "ReturnStatement":return "return "+node.arguments.map(serialize).join(",");
     case "BreakStatement":return "break";
     case "TableConstructorExpression":{const f=node.fields.map(x=>{if(x.type==="TableKey")return "["+serialize(x.key)+"]="+serialize(x.value);if(x.type==="TableKeyString")return x.key.name+"="+serialize(x.value);return serialize(x.value);});return "{"+f.join(",")+"}";}
@@ -278,32 +294,19 @@ function byteLevelTripleObfuscate(code,level){
   const junk1=generateJunkOps(randInt(10,20));
   const junk2=generateJunkOps(randInt(5,15));
 
-  // v5.1 FIX: Wrap execution in pcall for error visibility during debugging
-  // If script fails, error is printed via warn() so user can diagnose
-  // Also removed opaque predicate freeze fallback â€” payload always runs
-  const execCore="local _L=loadstring or load local "+execVar+","+errVar+"=_L("+realDec+"("+strVar+")) if "+execVar+" then local _ok,_err=pcall("+execVar+") if not _ok and _err then warn('[AzureVM] Runtime: '..tostring(_err)) end else if "+errVar+" then warn('[AzureVM] Compile: '..tostring("+errVar+")) end end";
+  // pcall wrapper surfaces real errors via warn() for debugging
+  const execCore="local _L=loadstring or load; local "+execVar+","+errVar+"=_L("+realDec+"("+strVar+")); if "+execVar+" then local _ok,_err=pcall("+execVar+"); if not _ok and _err then warn('[AzureVM] Runtime: '..tostring(_err)) end else if "+errVar+" then warn('[AzureVM] Compile: '..tostring("+errVar+")) end end";
 
-  if(level==="medium"){
-    return aggressiveMinify([
-      junk1,
-      fakeDecs,
-      decoder,
-      "local "+strVar+"=\""+encPayload+"\"",
-      generateOpaquePredicate(execCore),
-      junk2
-    ].join("\n"));
-  }
-
-  const antiTamper=generateAntiTamper();
-  return aggressiveMinify([
-    antiTamper,
-    junk1,
-    fakeDecs,
-    decoder,
-    "local "+strVar+"=\""+encPayload+"\"",
-    generateOpaquePredicate(execCore),
-    junk2
-  ].join("\n"));
+  // Join with `;` explicitly â€” no more newline-strip ambiguity
+  const parts=[];
+  if(level==="maximum")parts.push(generateAntiTamper());
+  parts.push(junk1);
+  parts.push(fakeDecs);
+  parts.push(decoder);
+  parts.push("local "+strVar+"=\""+encPayload+"\"");
+  parts.push(generateOpaquePredicate(execCore));
+  parts.push(junk2);
+  return parts.join("; ");
 }
 
 async function obfuscate(luaCode,level){
@@ -336,9 +339,10 @@ async function obfuscate(luaCode,level){
     walkAst(ast,ctx);
     let ob=serialize(ast);
     const decoder=makeStringDecoder("_D",stringKey,stringShift);
-    let combined=decoder+"\n"+ob;
+    // Join decoder and body with `;` to prevent statement-boundary ambiguity
+    let combined=decoder+"; "+ob;
 
-    if(isMedium)return aggressiveMinify(combined);
+    if(isMedium)return combined;
 
     return byteLevelTripleObfuscate(combined,level);
   }catch(err){
