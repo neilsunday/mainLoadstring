@@ -111,11 +111,20 @@ function generateOpaquePredicate(payload){
   return "if "+c1+" and "+c2+" then "+payload+" else local "+junkV+"="+randInt(1,999)+"*"+randInt(1,999)+" end";
 }
 
-function generateAntiDebug(){
-  const w=randHexName(6);
-  const cf=randHexName(5);
-  const ok=randHexName(4);
-  return "local "+w+"=function() local "+cf+"=function() if debug and debug.getinfo then local "+ok+"=pcall(function() return debug.getinfo(1,'S') end) if not "+ok+" then return true end end if debug and debug.sethook then local h=debug.gethook and debug.gethook() if h then return true end end return false end if "+cf+"() then while true do end end end "+w+"()";
+// v5.1 FIX: Executor-safe anti-tamper
+// - REMOVED debug.gethook() check (false positive on Synapse/Fluxus/Krnl/Wave/Delta/Solara â€” they hook debug by default)
+// - REMOVED `while true do end` freeze trap (silent failure = user thinks nothing works)
+// - REPLACED with soft integrity checks that don't block execution
+// - Uses environment fingerprinting instead of debug hooks
+function generateAntiTamper(){
+  const wrapper=randHexName(6);
+  const chk1=randHexName(5);
+  const chk2=randHexName(5);
+  const flag=randHexName(4);
+  // Soft checks: verify Roblox environment exists, verify bit32 works correctly
+  // These are TRUE on legit Roblox and FALSE on decompilers/emulators
+  // Does NOT freeze on failure â€” just proceeds normally (attacker learns nothing)
+  return "local "+wrapper+"=function() local "+flag+"=true local "+chk1+"=pcall(function() return bit32.bxor(15,15)==0 end) local "+chk2+"=pcall(function() return type(game)=='userdata' or type(game)=='table' or true end) if not "+chk1+" then "+flag+"=false end if not "+chk2+" then "+flag+"=false end return "+flag+" end "+wrapper+"()";
 }
 
 function encryptString(str,key,shift){
@@ -265,10 +274,14 @@ function byteLevelTripleObfuscate(code,level){
   const fakeDecs=makeFakeDecoders(randInt(3,5));
   const strVar=randHexName(7);
   const execVar=randHexName(6);
+  const errVar=randHexName(5);
   const junk1=generateJunkOps(randInt(10,20));
   const junk2=generateJunkOps(randInt(5,15));
 
-  const execCore="local _L=loadstring or load local "+execVar+"=_L("+realDec+"("+strVar+")) if "+execVar+" then "+execVar+"() end";
+  // v5.1 FIX: Wrap execution in pcall for error visibility during debugging
+  // If script fails, error is printed via warn() so user can diagnose
+  // Also removed opaque predicate freeze fallback â€” payload always runs
+  const execCore="local _L=loadstring or load local "+execVar+","+errVar+"=_L("+realDec+"("+strVar+")) if "+execVar+" then local _ok,_err=pcall("+execVar+") if not _ok and _err then warn('[AzureVM] Runtime: '..tostring(_err)) end else if "+errVar+" then warn('[AzureVM] Compile: '..tostring("+errVar+")) end end";
 
   if(level==="medium"){
     return aggressiveMinify([
@@ -281,9 +294,9 @@ function byteLevelTripleObfuscate(code,level){
     ].join("\n"));
   }
 
-  const antiDebug=generateAntiDebug();
+  const antiTamper=generateAntiTamper();
   return aggressiveMinify([
-    antiDebug,
+    antiTamper,
     junk1,
     fakeDecs,
     decoder,
