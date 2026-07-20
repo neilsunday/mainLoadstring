@@ -6,34 +6,53 @@ const crypto = require("crypto");
 
 const LEVEL_PRESET = {
   none: null,
-  basic: "Minify",
-  medium: "Weak",
+  basic: "custom-basic",
+  medium: "custom-medium",
   maximum: "custom-max",
 };
 
-const CUSTOM_MAX_CONFIG = {
-  LuaVersion: "Lua51",
+const BASE_CONFIG = {
+  LuaVersion: "LuaU",
   PrettyPrint: false,
   VarNamePrefix: "",
   NameGenerator: "MangledShuffled",
   Seed: 0,
+};
+
+const CUSTOM_BASIC_CONFIG = {
+  ...BASE_CONFIG,
   Steps: [
-    {
-      Name: "EncryptStrings",
-      Settings: {}
-    },
-    {
-      Name: "WrapInFunction",
-      Settings: {}
-    },
+    { Name: "Minify", Settings: {} }
+  ]
+};
+
+const CUSTOM_MEDIUM_CONFIG = {
+  ...BASE_CONFIG,
+  Steps: [
+    { Name: "EncryptStrings", Settings: {} },
+    { Name: "Minify", Settings: {} }
+  ]
+};
+
+const CUSTOM_MAX_CONFIG = {
+  ...BASE_CONFIG,
+  Steps: [
+    { Name: "EncryptStrings", Settings: {} },
     {
       Name: "ProxifyLocals",
       Settings: {
         LiteralType: "any",
         Treshold: 1
       }
-    }
+    },
+    { Name: "Minify", Settings: {} }
   ]
+};
+
+const CONFIG_MAP = {
+  "custom-basic": CUSTOM_BASIC_CONFIG,
+  "custom-medium": CUSTOM_MEDIUM_CONFIG,
+  "custom-max": CUSTOM_MAX_CONFIG,
 };
 
 function preprocess(code) {
@@ -65,13 +84,12 @@ function runPrometheus(code, preset) {
     const outputPath = path.join(tmpDir, `prom-out-${uniqueId}.lua`);
     const configPath = path.join(tmpDir, `prom-cfg-${uniqueId}.json`);
 
-    let usingConfig = false;
+    const usingConfig = CONFIG_MAP[preset] !== undefined;
 
     try {
       fs.writeFileSync(inputPath, code, "utf8");
-      if (preset === "custom-max") {
-        fs.writeFileSync(configPath, JSON.stringify(CUSTOM_MAX_CONFIG, null, 2), "utf8");
-        usingConfig = true;
+      if (usingConfig) {
+        fs.writeFileSync(configPath, JSON.stringify(CONFIG_MAP[preset], null, 2), "utf8");
       }
     } catch (err) {
       cleanup();
@@ -94,7 +112,7 @@ function runPrometheus(code, preset) {
     }
 
     const proc = spawn("node", args, {
-      timeout: 60000,
+      timeout: 90000,
       env: { ...process.env, PROMETHEUS_NO_COLOR: "1" },
     });
 
@@ -124,7 +142,7 @@ function runPrometheus(code, preset) {
       if (exitCode !== 0) {
         cleanup();
         const errMsg = (stderr || stdout || "no output").substring(0, 500);
-        reject(new Error(`Prometheus exited with code ${exitCode}: ${errMsg}`));
+        reject(new Error("Prometheus exited with code " + exitCode + ": " + errMsg));
         return;
       }
 
