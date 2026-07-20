@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="en">
   <head>
@@ -102,13 +103,34 @@
           </select>
         </div>
 
-        <div class="row" style="margin-top: 18px">
+        <div class="row" style="margin-top: 18px; gap: 10px">
+          <button type="button" id="previewBtn" class="secondary" disabled>
+            Preview Output
+          </button>
           <button type="button" id="saveBtn" class="primary" disabled>
             Save Script
           </button>
         </div>
 
         <div id="message" class="message hidden"></div>
+      </div>
+
+      <div id="previewCard" class="card hidden">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
+          <h2 style="margin: 0">Obfuscated Preview</h2>
+          <button type="button" id="closePreviewBtn" class="secondary small">
+            Close
+          </button>
+        </div>
+        <div id="previewStats" class="muted" style="font-size: 0.85rem; margin-bottom: 10px"></div>
+        <div class="output-box" style="max-height: 400px; overflow: auto; padding: 12px; background: var(--bg, #0a0a1a); border-radius: 6px; font-family: 'Courier New', monospace; font-size: 0.78rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all">
+          <code id="previewOutput"></code>
+        </div>
+        <div class="row" style="margin-top: 12px; gap: 10px">
+          <button type="button" id="copyPreviewBtn" class="secondary small">
+            Copy Obfuscated Code
+          </button>
+        </div>
       </div>
 
       <div id="resultCard" class="card hidden">
