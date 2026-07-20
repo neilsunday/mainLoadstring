@@ -19,8 +19,13 @@ const ROBLOX_GLOBALS = new Set([
   "getcallingscript","getrawmetatable","setrawmetatable","checkcaller",
   "isreadonly","setreadonly","iscclosure","islclosure","newcclosure",
   "identifyexecutor","lz4compress","lz4decompress","queue_on_teleport",
-  "syn","fluxus","krnl","self","true","false","nil"
+  "syn","fluxus","krnl","self","true","false","nil",
+  "and","or","not","if","then","else","elseif","end","do","while","repeat","until",
+  "for","in","function","return","break","goto","continue","local"
 ]);
+
+// v5.3: Word operators that require spaces around them in Lua
+const WORD_BINARY_OPS = new Set(["and","or",".."]);
 
 function randInt(min,max){return min+Math.floor(Math.random()*(max-min+1));}
 function randChoice(a){return a[Math.floor(Math.random()*a.length)];}
@@ -40,9 +45,7 @@ function preprocess(code){
   return code.trim();
 }
 
-// v5.2 FIX: Semicolon-based statement separator prevents Lua parser ambiguity
-// Before: `Player.PlayerGui\n(function()...)()` â†’ `Player.PlayerGui (function()...)()` = PARSE ERROR
-// After:  `Player.PlayerGui;(function()...)()` = valid Lua
+// v5.2/5.3: Semicolon-based statement separator
 function aggressiveMinify(code){
   code=preprocess(code);
   code=code.split("\n").map(l=>l.trim()).filter(l=>l.length>0).join("\n");
@@ -62,7 +65,7 @@ function aggressiveMinify(code){
     result.push(line);
   }
   let out=result.join(" ");
-  out=out.replace(/  +/g," ").replace(/;\s*;/g,";").replace(/;\s*end\b/g," end").replace(/;\s*\)/g,")").replace(/;\s*until\b/g," until");
+  out=out.replace(/  +/g," ").replace(/;\s*;/g,";").replace(/;\s*end\b/g," end").replace(/;\s*\)/g,")").replace(/;\s*until\b/g," until").replace(/;\s*elseif\b/g," elseif").replace(/;\s*else\b/g," else");
   return out.trim();
 }
 
@@ -119,7 +122,7 @@ function generateOpaquePredicate(payload){
     "(string.len('x')==1)",
     "(#'ab'==2)",
     "(bit32.band(15,15)==15)",
-    "((1+1)==2 and (3-1)==2)",
+    "(((1+1)==2) and ((3-1)==2))",
     "(type(1)=='number')"
   ];
   const c1=randChoice(conds);
@@ -128,13 +131,12 @@ function generateOpaquePredicate(payload){
   return "if "+c1+" and "+c2+" then "+payload+" else local "+junkV+"="+randInt(1,999)+"*"+randInt(1,999)+" end";
 }
 
-// Executor-safe soft check â€” does NOT freeze if fails
 function generateAntiTamper(){
   const wrapper=randHexName(6);
   const chk1=randHexName(5);
   const chk2=randHexName(5);
   const flag=randHexName(4);
-  return "local "+wrapper+"=function() local "+flag+"=true local "+chk1+"=pcall(function() return bit32.bxor(15,15)==0 end) local "+chk2+"=pcall(function() return type(game)=='userdata' or type(game)=='table' or true end) if not "+chk1+" then "+flag+"=false end if not "+chk2+" then "+flag+"=false end return "+flag+" end "+wrapper+"()";
+  return "local "+wrapper+"=function() local "+flag+"=true local "+chk1+"=pcall(function() return bit32.bxor(15,15)==0 end) local "+chk2+"=pcall(function() return (type(game)=='userdata') or (type(game)=='table') or true end) if not "+chk1+" then "+flag+"=false end if not "+chk2+" then "+flag+"=false end return "+flag+" end "+wrapper+"()";
 }
 
 function encryptString(str,key,shift){
@@ -219,10 +221,17 @@ function walkAst(node,ctx){
   }
 }
 
-// v5.2 FIX: serialize() now joins statements with `;` explicitly to prevent
-// aggressiveMinify from creating ambiguous statement boundaries
 function serializeBlock(stmts){
   return stmts.map(serialize).filter(s=>s.length>0).join(";");
+}
+
+// v5.3: BinaryExpression/LogicalExpression now correctly spaces word operators (and, or, ..)
+function serializeBinary(node){
+  const op=node.operator;
+  const left=serialize(node.left);
+  const right=serialize(node.right);
+  if(WORD_BINARY_OPS.has(op))return "("+left+" "+op+" "+right+")";
+  return "("+left+op+right+")";
 }
 
 function serialize(node){
@@ -248,7 +257,7 @@ function serialize(node){
     case "MemberExpression":return serialize(node.base)+node.indexer+node.identifier.name;
     case "IndexExpression":return serialize(node.base)+"["+serialize(node.index)+"]";
     case "BinaryExpression":
-    case "LogicalExpression":return "("+serialize(node.left)+node.operator+serialize(node.right)+")";
+    case "LogicalExpression":return serializeBinary(node);
     case "UnaryExpression":return "("+node.operator+" "+serialize(node.argument)+")";
     case "FunctionDeclaration":{
       const p=node.parameters.map(x=>x.type==="VarargLiteral"?"...":x.name).join(",");
@@ -294,10 +303,8 @@ function byteLevelTripleObfuscate(code,level){
   const junk1=generateJunkOps(randInt(10,20));
   const junk2=generateJunkOps(randInt(5,15));
 
-  // pcall wrapper surfaces real errors via warn() for debugging
-  const execCore="local _L=loadstring or load; local "+execVar+","+errVar+"=_L("+realDec+"("+strVar+")); if "+execVar+" then local _ok,_err=pcall("+execVar+"); if not _ok and _err then warn('[AzureVM] Runtime: '..tostring(_err)) end else if "+errVar+" then warn('[AzureVM] Compile: '..tostring("+errVar+")) end end";
+  const execCore="local _L=loadstring or load; local "+execVar+","+errVar+"=_L("+realDec+"("+strVar+")); if "+execVar+" then local _ok,_err=pcall("+execVar+"); if (not _ok) and _err then warn('[AzureVM] Runtime: '..tostring(_err)) end else if "+errVar+" then warn('[AzureVM] Compile: '..tostring("+errVar+")) end end";
 
-  // Join with `;` explicitly â€” no more newline-strip ambiguity
   const parts=[];
   if(level==="maximum")parts.push(generateAntiTamper());
   parts.push(junk1);
@@ -339,7 +346,6 @@ async function obfuscate(luaCode,level){
     walkAst(ast,ctx);
     let ob=serialize(ast);
     const decoder=makeStringDecoder("_D",stringKey,stringShift);
-    // Join decoder and body with `;` to prevent statement-boundary ambiguity
     let combined=decoder+"; "+ob;
 
     if(isMedium)return combined;
