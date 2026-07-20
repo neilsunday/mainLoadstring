@@ -1,6 +1,6 @@
 // ==========================================
-// Dashboard - Script Editor Logic - PROXY v5
-// Uses /s/:id proxy route on Render (hides Supabase URL)
+// Dashboard - Script Editor Logic - PHASE 2
+// Now with backend obfuscation before save
 // ==========================================
 
 async function handleOAuthCallback() {
@@ -38,6 +38,7 @@ async function handleOAuthCallback() {
 
 // ---------- Config ----------
 const MAX_SCRIPT_SIZE = 10 * 1024 * 1024; // 10MB
+const OBFUSCATE_ENDPOINT = "/obfuscate"; // relative to current origin
 
 // ---------- DOM elements ----------
 const userEmailEl = document.getElementById("userEmail");
@@ -52,6 +53,7 @@ const fileNameEl = document.getElementById("fileName");
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
 const messageDiv = document.getElementById("message");
+const obfuscationLevelSelect = document.getElementById("obfuscationLevel");
 
 const resultCard = document.getElementById("resultCard");
 const loadstringOutput = document.getElementById("loadstringOutput");
@@ -161,16 +163,50 @@ function generateId(length = 8) {
   return id;
 }
 
-// ---------- Build loadstring using PROXY URL (hides Supabase) ----------
+// ---------- Build loadstring using PROXY URL ----------
 function buildLoadstring(scriptId) {
   const rawUrl = `${window.location.origin}/s/${scriptId}`;
   return `loadstring(game:HttpGet("${rawUrl}"))()`;
+}
+
+// ---------- Call backend obfuscation API ----------
+async function obfuscateCode(code, level) {
+  if (level === "none") {
+    return code;
+  }
+
+  const response = await fetch(OBFUSCATE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code, level }),
+  });
+
+  if (!response.ok) {
+    let errMsg = "Obfuscation failed";
+    try {
+      const errData = await response.json();
+      errMsg = errData.error || errMsg;
+    } catch (e) {}
+    throw new Error(errMsg);
+  }
+
+  const data = await response.json();
+  if (!data.success || !data.code) {
+    throw new Error(data.error || "Obfuscation returned no code");
+  }
+
+  console.log(
+    `[Obfuscate] Level: ${data.level} | ${data.original_size.toLocaleString()} â†’ ${data.obfuscated_size.toLocaleString()} chars in ${data.elapsed_ms}ms`,
+  );
+
+  return data.code;
 }
 
 // ---------- Save script ----------
 saveBtn.addEventListener("click", async () => {
   const name = scriptNameInput.value.trim();
   const code = scriptCodeInput.value;
+  const level = obfuscationLevelSelect ? obfuscationLevelSelect.value : "none";
 
   hideMessage();
 
@@ -186,9 +222,20 @@ saveBtn.addEventListener("click", async () => {
 
   saveBtn.disabled = true;
   const originalText = saveBtn.textContent;
-  saveBtn.textContent = "Saving...";
 
   try {
+    // Step 1: Obfuscate (if level != none)
+    let finalCode = code;
+    if (level !== "none") {
+      saveBtn.textContent = "Obfuscating...";
+      showMessage(`Obfuscating with level: ${level}...`, "info");
+      finalCode = await obfuscateCode(code, level);
+    }
+
+    // Step 2: Save to Supabase
+    saveBtn.textContent = "Saving...";
+    showMessage("Saving to database...", "info");
+
     let scriptId = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       const id = generateId(8);
@@ -196,7 +243,7 @@ saveBtn.addEventListener("click", async () => {
         id,
         user_id: currentUser.id,
         name: name || null,
-        code,
+        code: finalCode,
       });
 
       if (!error) {
@@ -219,7 +266,14 @@ saveBtn.addEventListener("click", async () => {
     resultCard.classList.remove("hidden");
     resultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
-    showMessage(`Script saved! ID: ${scriptId}`, "success");
+    const sizeInfo =
+      level !== "none"
+        ? ` (${code.length.toLocaleString()} â†’ ${finalCode.length.toLocaleString()} chars)`
+        : "";
+    showMessage(
+      `Script saved! ID: ${scriptId} | Level: ${level}${sizeInfo}`,
+      "success",
+    );
   } catch (err) {
     console.error(err);
     showMessage(err.message || "Failed to save script.", "error");
