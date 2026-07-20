@@ -97,8 +97,9 @@ fileUpload.addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
-  if (file.size > 1024 * 1024) {
-    showMessage("File too large. Max 1MB.", "error");
+  const maxFileSize = 10 * 1024 * 1024;
+  if (file.size > maxFileSize) {
+    showMessage("File too large. Max 10MB.", "error");
     return;
   }
 
