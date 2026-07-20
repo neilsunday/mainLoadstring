@@ -36,6 +36,9 @@ async function handleOAuthCallback() {
   });
 }
 
+// ---------- Config ----------
+const MAX_SCRIPT_SIZE = 10 * 1024 * 1024; // 10MB
+
 // ---------- DOM elements ----------
 const userEmailEl = document.getElementById("userEmail");
 const logoutBtn = document.getElementById("logoutBtn");
@@ -99,8 +102,7 @@ fileUpload.addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
-  const maxFileSize = 10 * 1024 * 1024;
-  if (file.size > maxFileSize) {
+  if (file.size > MAX_SCRIPT_SIZE) {
     showMessage("File too large. Max 10MB.", "error");
     return;
   }
@@ -177,8 +179,8 @@ saveBtn.addEventListener("click", async () => {
     return;
   }
 
-  if (code.length > 500000) {
-    showMessage("Script too long. Max 500,000 characters.", "error");
+  if (code.length > MAX_SCRIPT_SIZE) {
+    showMessage("Script too long. Max 10MB.", "error");
     return;
   }
 
