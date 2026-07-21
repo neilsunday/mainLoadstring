@@ -411,7 +411,7 @@ async function refreshScriptOptions() {
   (scripts || []).forEach((s) => {
     const opt = document.createElement("option");
     opt.value = s.id;
-    opt.textContent = `${s.name || "(unnamed)"} â€” ${s.id}`;
+    opt.textContent = `${s.name || "(unnamed)"} - ${s.id}`;
     keyScriptSelect.appendChild(opt);
   });
 
