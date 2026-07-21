@@ -1440,13 +1440,20 @@ function byteLevelTripleObfuscate(code,level,userId){
 async function obfuscateSingle(luaCode,level,userId){
   level=level||"medium";
   const _WM=pickWatermark();
-  const _DIAG="-- [OBF v14.0 patched: smart split at top-level statement boundaries]\n";
+  const _DIAG="-- [OBF v15.0 patched: light mode (single-shot, no inflation)]\n";
   try{
     let code=preprocess(luaCode);
     // v9.1: Preprocess Luau-specific syntax so luaparse can handle Roblox scripts
     code = luauToLua(code);
     if(level==="none")return _DIAG+_WM+code;
     if(level==="basic")return _DIAG+_WM+aggressiveMinify(code);
+    if(level==="light"){
+      // v16: light path â€” parse-check + minify ONLY. NO renaming (scope bug in RenameCtx
+      // was producing "attempt to index nil with 'X'" runtime errors because it renamed
+      // `local library` but not the later `library:foo()` references). Minified output
+      // is smaller than source, loads in one shot, and preserves all variable scoping.
+      return _DIAG+_WM+aggressiveMinify(code);
+    }
 
     let ast=null;
     let parseErrMsg = "";
@@ -1753,6 +1760,10 @@ function _buildMultiPartLoader(chunks){
 }
 
 async function obfuscate(luaCode, level, userId){
+  // v15: light mode + short paths skip the split â€” they produce a single small blob.
+  if (level === "light" || level === "none" || level === "basic"){
+    return await obfuscateSingle(luaCode, level, userId);
+  }
   // First try single-shot; most inputs will not need splitting.
   const single = await obfuscateSingle(luaCode, level, userId);
   if (typeof single === "string" && single.length <= _CHUNK_SAFE_BYTES) {
