@@ -40,7 +40,26 @@ const ROBLOX_GLOBALS = new Set([
   "getcallingscript","getrawmetatable","setrawmetatable","checkcaller",
   "isreadonly","setreadonly","iscclosure","islclosure","newcclosure",
   "identifyexecutor","lz4compress","lz4decompress","queue_on_teleport",
-  "syn","fluxus","krnl","self","true","false","nil",
+  "syn","fluxus","krnl","delta","electron","sentinel","krampus",
+  // v11.2: Extended executor globals â€” anti-detection, filesystem, cloning
+  "cloneref","gethui","getnamecallmethod","setnamecallmethod","isexecutorclosure",
+  "hookfunc","hookmethod","setthreadidentity","getthreadidentity",
+  "isfile","isfolder","readfile","writefile","makefolder","delfolder","listfiles","delfile",
+  "loadfile","getcustomasset","getsynasset","fireclickdetector","fireproximityprompt",
+  "firetouchinterest","firesignal","replicatesignal",
+  "setclipboard","setrbxclipboard","toclipboard","messagebox","request","http_request","http",
+  "rconsoleprint","rconsoleinfo","rconsolewarn","rconsoleerror","rconsoleinput","rconsolename","rconsoleclear",
+  "getscripthash","getscriptclosure","clonefunction","getcallbackvalue","comparetables",
+  "getexecutorname","getexecutorversion",
+  // Common Roblox datatypes and services (were missing)
+  "Drawing","WebSocket","crypt","base64","cache",
+  "OverlapParams","RaycastParams","DateTime","PathWaypoint",
+  "Vector3","Vector2","CFrame","Color3","UDim","UDim2","Rect","Region3","Ray",
+  "TweenInfo","NumberSequence","ColorSequence","NumberRange","BrickColor",
+  "SharedTable","Content","Path2DControlPoint",
+  // Luraph/obfuscator markers (harmless if unused, breaks if renamed)
+  "LPH_NO_VIRTUALIZE","LPH_JIT","LPH_ENCSTR","LPH_NO_UPVALUES",
+  "self","true","false","nil",
   "and","or","not","if","then","else","elseif","end","do","while","repeat","until",
   "for","in","function","return","break","goto","continue","local"
 ]);
