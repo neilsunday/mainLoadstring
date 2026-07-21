@@ -55,8 +55,18 @@ const resultCard = document.getElementById("resultCard");
 const loadstringOutput = document.getElementById("loadstringOutput");
 const copyBtn = document.getElementById("copyBtn");
 
+// NEW: Key management elements (add these to dashboard.html)
+const keysCard = document.getElementById("keysCard");
+const keysList = document.getElementById("keysList");
+const generateKeyBtn = document.getElementById("generateKeyBtn");
+const keyScriptSelect = document.getElementById("keyScriptSelect");
+const keyPlaceIdsInput = document.getElementById("keyPlaceIds");
+const keyMaxExecInput = document.getElementById("keyMaxExec");
+const keyExpiresInput = document.getElementById("keyExpires");
+
 let currentUser = null;
 let lastPreviewedCode = "";
+let lastSavedScriptId = null;
 
 (async function init() {
   await handleOAuthCallback();
@@ -65,6 +75,9 @@ let lastPreviewedCode = "";
 
   currentUser = user;
   if (userEmailEl) userEmailEl.textContent = user.email;
+
+  // NEW: Load existing keys on page load
+  await loadUserKeys();
 })();
 
 logoutBtn?.addEventListener("click", async () => {
@@ -72,7 +85,7 @@ logoutBtn?.addEventListener("click", async () => {
   logoutBtn.textContent = "Logging out...";
   try {
     await sb.auth.signOut();
-  } catch (err) {} 
+  } catch (err) {}
   finally {
     window.location.href = "index.html";
   }
@@ -154,9 +167,34 @@ function generateId(length = 8) {
   return id;
 }
 
+// NEW: Generate license key (KEY-XXXX-YYYY-ZZZZ format)
+function generateLicenseKey() {
+  const chunks = [];
+  for (let i = 0; i < 4; i++) {
+    const bytes = new Uint8Array(4);
+    crypto.getRandomValues(bytes);
+    chunks.push(
+      Array.from(bytes)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("")
+        .toUpperCase()
+    );
+  }
+  return "KEY-" + chunks.join("-");
+}
+
 function buildLoadstring(scriptId) {
   const rawUrl = `${window.location.origin}/s/${scriptId}`;
   return `loadstring(game:HttpGet("${rawUrl}"))()`;
+}
+
+// NEW: Loadstring with key/HWID/PlaceId auto-injection
+function buildProtectedLoadstring(scriptId, key) {
+  const baseUrl = `${window.location.origin}/s/${scriptId}`;
+  return `local _k="${key}"
+local _h=game:GetService("RbxAnalyticsService"):GetClientId()
+local _p=tostring(game.PlaceId)
+loadstring(game:HttpGet("${baseUrl}?key=".._k.."&hwid=".._h.."&place=".._p))()`;
 }
 
 async function obfuscateCode(code, level) {
@@ -314,6 +352,7 @@ saveBtn.addEventListener("click", async () => {
       throw new Error("Could not generate a unique ID. Try again.");
     }
 
+    lastSavedScriptId = scriptId;
     const loadstring = buildLoadstring(scriptId);
 
     loadstringOutput.textContent = loadstring;
@@ -321,9 +360,12 @@ saveBtn.addEventListener("click", async () => {
     resultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
     showMessage(
-      `Script saved! ID: ${scriptId} | Level: ${level}${sizeInfo}`,
+      `Script saved! ID: ${scriptId} | Level: ${level}${sizeInfo}. Generate a key below to enable protection.`,
       "success",
     );
+
+    // NEW: Refresh script list in key management dropdown
+    await refreshScriptOptions();
   } catch (err) {
     showMessage(err.message || "Failed to save script.", "error");
   } finally {
@@ -343,6 +385,269 @@ copyBtn.addEventListener("click", async () => {
     }, 1500);
   } catch (err) {
     showMessage("Failed to copy. Select and copy manually.", "error");
+  }
+});
+
+// ============================================================================
+// NEW: KEY MANAGEMENT SECTION
+// ============================================================================
+
+// Refresh script dropdown for key generation
+async function refreshScriptOptions() {
+  if (!keyScriptSelect) return;
+
+  const { data: scripts, error } = await sb
+    .from("scripts")
+    .select("id, name, created_at")
+    .eq("user_id", currentUser.id)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("Failed to load scripts:", error);
+    return;
+  }
+
+  keyScriptSelect.innerHTML = '<option value="">-- Select a script --</option>';
+  (scripts || []).forEach((s) => {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    opt.textContent = `${s.name || "(unnamed)"} â€” ${s.id}`;
+    keyScriptSelect.appendChild(opt);
+  });
+
+  // Auto-select just-saved script
+  if (lastSavedScriptId) {
+    keyScriptSelect.value = lastSavedScriptId;
+  }
+}
+
+// Load all keys for current user
+async function loadUserKeys() {
+  if (!keysList) return;
+
+  await refreshScriptOptions();
+
+  const { data: keys, error } = await sb
+    .from("user_keys")
+    .select("*, scripts(name)")
+    .eq("owner_id", currentUser.id)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("Failed to load keys:", error);
+    keysList.innerHTML = '<p class="muted">Failed to load keys.</p>';
+    return;
+  }
+
+  if (!keys || keys.length === 0) {
+    keysList.innerHTML = '<p class="muted">No keys generated yet. Create one above.</p>';
+    return;
+  }
+
+  keysList.innerHTML = keys
+    .map((k) => renderKeyRow(k))
+    .join("");
+
+  // Wire up action buttons
+  keysList.querySelectorAll("[data-action]").forEach((btn) => {
+    btn.addEventListener("click", handleKeyAction);
+  });
+}
+
+function renderKeyRow(k) {
+  const scriptName = k.scripts?.name || "(unnamed)";
+  const status = k.revoked
+    ? '<span class="badge badge-danger">REVOKED</span>'
+    : (k.expires_at && new Date(k.expires_at) < new Date())
+    ? '<span class="badge badge-warning">EXPIRED</span>'
+    : '<span class="badge badge-success">ACTIVE</span>';
+
+  const hwidInfo = k.hwid
+    ? `<code class="hwid">${k.hwid.substring(0, 16)}...</code>`
+    : '<span class="muted">Not bound yet</span>';
+
+  const placeIds = k.place_id_whitelist?.length
+    ? k.place_id_whitelist.join(", ")
+    : "Any game";
+
+  const execInfo = k.max_executions
+    ? `${k.execution_count} / ${k.max_executions}`
+    : `${k.execution_count} / âˆž`;
+
+  const expiresInfo = k.expires_at
+    ? new Date(k.expires_at).toLocaleDateString()
+    : "Never";
+
+  return `
+    <div class="key-row">
+      <div class="key-header">
+        <code class="key-value">${k.key}</code>
+        ${status}
+      </div>
+      <div class="key-details">
+        <div><strong>Script:</strong> ${scriptName} (${k.script_id})</div>
+        <div><strong>HWID:</strong> ${hwidInfo}</div>
+        <div><strong>Allowed PlaceIds:</strong> ${placeIds}</div>
+        <div><strong>Executions:</strong> ${execInfo}</div>
+        <div><strong>Expires:</strong> ${expiresInfo}</div>
+      </div>
+      <div class="key-actions">
+        <button data-action="copy-loader" data-key="${k.key}" data-script="${k.script_id}">Copy Loader</button>
+        <button data-action="reset-hwid" data-key="${k.key}" ${!k.hwid ? "disabled" : ""}>Reset HWID</button>
+        ${
+          k.revoked
+            ? `<button data-action="unrevoke" data-key="${k.key}">Unrevoke</button>`
+            : `<button data-action="revoke" data-key="${k.key}" class="danger">Kill (Revoke)</button>`
+        }
+        <button data-action="delete" data-key="${k.key}" class="danger">Delete</button>
+      </div>
+    </div>
+  `;
+}
+
+async function handleKeyAction(e) {
+  const btn = e.currentTarget;
+  const action = btn.dataset.action;
+  const key = btn.dataset.key;
+  const scriptId = btn.dataset.script;
+
+  try {
+    btn.disabled = true;
+
+    switch (action) {
+      case "copy-loader": {
+        const loader = buildProtectedLoadstring(scriptId, key);
+        await navigator.clipboard.writeText(loader);
+        const orig = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => (btn.textContent = orig), 1500);
+        break;
+      }
+
+      case "reset-hwid": {
+        if (!confirm("Reset HWID for this key? User can rebind on next use.")) {
+          break;
+        }
+        const { error } = await sb
+          .from("user_keys")
+          .update({ hwid: null, first_used_at: null })
+          .eq("key", key)
+          .eq("owner_id", currentUser.id);
+        if (error) throw error;
+        showMessage("HWID reset. User can now rebind.", "success");
+        await loadUserKeys();
+        break;
+      }
+
+      case "revoke": {
+        if (!confirm("KILL this key? Script will stop working for the user immediately.")) {
+          break;
+        }
+        const { error } = await sb
+          .from("user_keys")
+          .update({ revoked: true })
+          .eq("key", key)
+          .eq("owner_id", currentUser.id);
+        if (error) throw error;
+        showMessage("Key revoked (kill switch activated).", "success");
+        await loadUserKeys();
+        break;
+      }
+
+      case "unrevoke": {
+        const { error } = await sb
+          .from("user_keys")
+          .update({ revoked: false })
+          .eq("key", key)
+          .eq("owner_id", currentUser.id);
+        if (error) throw error;
+        showMessage("Key unrevoked.", "success");
+        await loadUserKeys();
+        break;
+      }
+
+      case "delete": {
+        if (!confirm("PERMANENTLY delete this key? Cannot be undone.")) {
+          break;
+        }
+        const { error } = await sb
+          .from("user_keys")
+          .delete()
+          .eq("key", key)
+          .eq("owner_id", currentUser.id);
+        if (error) throw error;
+        showMessage("Key deleted.", "success");
+        await loadUserKeys();
+        break;
+      }
+    }
+  } catch (err) {
+    showMessage(err.message || "Action failed.", "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Generate key button handler
+generateKeyBtn?.addEventListener("click", async () => {
+  hideMessage();
+
+  const scriptId = keyScriptSelect?.value;
+  if (!scriptId) {
+    showMessage("Select a script first.", "error");
+    return;
+  }
+
+  // Parse PlaceIds (comma-separated, optional)
+  let placeIds = null;
+  const placeIdsRaw = (keyPlaceIdsInput?.value || "").trim();
+  if (placeIdsRaw) {
+    placeIds = placeIdsRaw
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !isNaN(n) && n > 0);
+    if (placeIds.length === 0) placeIds = null;
+  }
+
+  // Parse max executions (optional)
+  const maxExec = parseInt(keyMaxExecInput?.value || "", 10);
+  const maxExecutions = !isNaN(maxExec) && maxExec > 0 ? maxExec : null;
+
+  // Parse expiration date (optional)
+  const expiresRaw = keyExpiresInput?.value || "";
+  const expiresAt = expiresRaw ? new Date(expiresRaw).toISOString() : null;
+
+  generateKeyBtn.disabled = true;
+  const orig = generateKeyBtn.textContent;
+  generateKeyBtn.textContent = "Generating...";
+
+  try {
+    const key = generateLicenseKey();
+
+    const { error } = await sb.from("user_keys").insert({
+      key,
+      owner_id: currentUser.id,
+      script_id: scriptId,
+      place_id_whitelist: placeIds,
+      max_executions: maxExecutions,
+      expires_at: expiresAt,
+    });
+
+    if (error) throw error;
+
+    showMessage(`Key generated: ${key}`, "success");
+
+    // Reset form
+    if (keyPlaceIdsInput) keyPlaceIdsInput.value = "";
+    if (keyMaxExecInput) keyMaxExecInput.value = "";
+    if (keyExpiresInput) keyExpiresInput.value = "";
+
+    await loadUserKeys();
+  } catch (err) {
+    showMessage(err.message || "Failed to generate key.", "error");
+  } finally {
+    generateKeyBtn.disabled = false;
+    generateKeyBtn.textContent = orig;
   }
 });
 
