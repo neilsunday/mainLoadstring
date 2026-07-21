@@ -1,10 +1,10 @@
-// AzureVM Obfuscator â€” v9.8 (Phase 3 hotfix 8: TRUE loadstring fix + type-safe fallback)
+// AzureVM Obfuscator Ã¢â‚¬â€ v9.8 (Phase 3 hotfix 8: TRUE loadstring fix + type-safe fallback)
 // Improvements over v8.1:
 //   1. Constants Pool with poison entries (was: unused/broken)
 //   2. Position + prev-byte dependent stream cipher (was: triple XOR only)
 //   3. VM expanded to 55+ opcodes with dummy variants (was: 35)
 //   4. Randomized base64 alphabet per obfuscation (was: standard)
-//   5. Junk with real side effects â€” DCE-resistant (was: pure locals)
+//   5. Junk with real side effects Ã¢â‚¬â€ DCE-resistant (was: pure locals)
 //   6. Higher VM cap: 500 + smart sensitive-first sorting (was: 200)
 const luaparse = require("luaparse");
 const crypto = require("crypto");
@@ -34,7 +34,7 @@ const ROBLOX_GLOBALS = new Set([
 
 const WORD_BINARY_OPS = new Set(["and","or",".."]);
 
-// v6.2: Fake watermark rotation Ã¢â‚¬â€ decoy to mislead attackers into using
+// v6.2: Fake watermark rotation ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â decoy to mislead attackers into using
 // wrong deobfuscator tools (Luraph/Luarmor/IronBrew deobs won't help here)
 const _FAKE_WATERMARKS = [
   "-- This file was protected using Luraph Obfuscator v14.8 [https://lura.ph/]",
@@ -51,13 +51,13 @@ function pickWatermark(){
 
 
 
-// v9.0: Expanded from 35 to 55+ opcodes â€” dummy variants confuse pattern analysis
+// v9.0: Expanded from 35 to 55+ opcodes Ã¢â‚¬â€ dummy variants confuse pattern analysis
 const OP_NAMES = [
   "PUSH_CONST","PUSH_NIL","PUSH_TRUE","PUSH_FALSE","PUSH_GLOBAL","SET_GLOBAL",
   "DUP","POP","CALL","RETURN","ADD","SUB","MUL","DIV","MOD","POW","CONCAT",
   "EQ","NEQ","LT","LE","GT","GE","NOT","NEG","LEN","JMP","JMP_IF_FALSE","JMP_IF_TRUE",
   "NEW_TABLE","SET_INDEX","GET_INDEX","GET_MEMBER","SET_MEMBER","METHOD_CALL","HALT",
-  // Dummy opcodes â€” never emitted by compiler but present in interpreter
+  // Dummy opcodes Ã¢â‚¬â€ never emitted by compiler but present in interpreter
   "NOP_A","NOP_B","NOP_C","NOP_D","NOP_E",
   "SWAP","ROT3","PUSH_ZERO","PUSH_ONE","PUSH_NEG_ONE",
   "INC","DEC","DOUBLE","HALVE","SQUARE",
@@ -80,7 +80,7 @@ function randHexName(len){
   return o;
 }
 
-// v9.0: Custom base64 alphabet â€” shuffled per obfuscation for anti-pattern-matching
+// v9.0: Custom base64 alphabet Ã¢â‚¬â€ shuffled per obfuscation for anti-pattern-matching
 const B64_STD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 function makeCustomB64Alphabet(){
   const arr = B64_STD.split("");
@@ -91,7 +91,7 @@ function makeCustomB64Alphabet(){
   return arr.join("");
 }
 
-// v9.0: Stream cipher â€” position + prev-byte feedback (ChaCha20-inspired)
+// v9.0: Stream cipher Ã¢â‚¬â€ position + prev-byte feedback (ChaCha20-inspired)
 // Much harder to reverse than static XOR because each byte depends on the last
 function streamCipherEncrypt(str, key1, key2, key3, iv){
   const bytes = [];
@@ -203,8 +203,8 @@ function preprocess(code){
 function luauToLua(code) {
   // v9.5 fixes:
   //   - Compound assignment precedence: wrap RHS in parens
-  //     Before: a += b or c   â†’  a = a + b or c   (WRONG: parses as (a+b) or c)
-  //     After:  a += b or c   â†’  a = a + (b or c) (correct)
+  //     Before: a += b or c   Ã¢â€ â€™  a = a + b or c   (WRONG: parses as (a+b) or c)
+  //     After:  a += b or c   Ã¢â€ â€™  a = a + (b or c) (correct)
   //   - continue: convert to 'goto __continue_N__' and inject matching label before loop's 'end'
   //     This preserves semantic behavior (actually skips iteration in Lua 5.3)
 
@@ -310,11 +310,11 @@ function luauToLua(code) {
     "g"
   );
   work = work.replace(compoundRegex, (m, lhs, op, rhs) => {
-    // Wrap RHS in parens to preserve semantics: a += b or c  â†’  a = a + (b or c)
+    // Wrap RHS in parens to preserve semantics: a += b or c  Ã¢â€ â€™  a = a + (b or c)
     return lhs + " = " + lhs + " " + op + " (" + rhs.trim() + ")";
   });
 
-  // ---- Step 3: continue â†’ goto __continue_N__ + inject matching labels ----
+  // ---- Step 3: continue Ã¢â€ â€™ goto __continue_N__ + inject matching labels ----
   // Strategy: assign a unique counter per loop, replace 'continue' inside with goto,
   // then inject ::__continue_N__:: before the 'end' of each loop that has a continue.
   //
@@ -385,7 +385,7 @@ function injectContinueLabels(code) {
     if (t.kind === "keyword") {
       const kw = t.value;
 
-      // Opening block keywords â€” each pushes exactly ONE block
+      // Opening block keywords Ã¢â‚¬â€ each pushes exactly ONE block
       if (kw === "for" || kw === "while") {
         blockStack.push({ type: "pending_loop", labelName: null, needsLabel: false, kw });
       } else if (kw === "repeat") {
@@ -405,22 +405,22 @@ function injectContinueLabels(code) {
           blockStack.push({ type: "do", labelName: null, needsLabel: false, kw });
         }
       } else if (kw === "then") {
-        // 'then' is part of if/elseif clause â€” no block push
+        // 'then' is part of if/elseif clause Ã¢â‚¬â€ no block push
         // But 'if X then' needs to open the if body; the block for 'if' was already pushed
       } else if (kw === "elseif") {
-        // Continuation of if â€” no block change
+        // Continuation of if Ã¢â‚¬â€ no block change
       } else if (kw === "else") {
-        // Continuation of if â€” no block change
+        // Continuation of if Ã¢â‚¬â€ no block change
       } else if (kw === "end") {
         // Close the topmost block (regardless of type: for/while/if/function/do)
         const closing = blockStack.pop();
         if (closing && closing.type === "loop" && closing.needsLabel) {
           result.push({ kind: "raw", value: " ::" + closing.labelName + ":: " });
         }
-        // Note: 'repeat' loops close with 'until', not 'end' â€” handled below
+        // Note: 'repeat' loops close with 'until', not 'end' Ã¢â‚¬â€ handled below
       } else if (kw === "until") {
         // Close a repeat_loop
-        // If the top block isn't a repeat_loop, we have a bug â€” but pop anyway to stay in sync
+        // If the top block isn't a repeat_loop, we have a bug Ã¢â‚¬â€ but pop anyway to stay in sync
         const closing = blockStack.pop();
         if (closing && closing.type === "repeat_loop" && closing.needsLabel) {
           // For 'repeat body until cond', the label goes BEFORE 'until'
@@ -446,7 +446,7 @@ function injectContinueLabels(code) {
           result.push({ kind: "raw", value: "goto " + loopBlock.labelName });
           continue;
         } else {
-          // continue outside a loop â€” safe no-op
+          // continue outside a loop Ã¢â‚¬â€ safe no-op
           result.push({ kind: "raw", value: "--[[continue]]" });
           continue;
         }
@@ -495,7 +495,7 @@ function tokenizeForContinue(code) {
       while (j < len && /[a-zA-Z0-9_]/.test(code[j])) j++;
       const word = code.substring(i, j);
       if (keywords.has(word)) {
-        // Check word boundary â€” must not be preceded by identifier char
+        // Check word boundary Ã¢â‚¬â€ must not be preceded by identifier char
         const prevChar = i > 0 ? code[i - 1] : " ";
         if (!/[a-zA-Z0-9_]/.test(prevChar)) {
           flushBuffer();
@@ -676,7 +676,7 @@ function generateVMInterpreter(vmFn,OP){
     +"elseif op=="+OP.SET_MEMBER+" then local m=ks[bc[pc]+1] pc=pc+1 local v=pp() local t=pp() t[m]=v "
     +"elseif op=="+OP.METHOD_CALL+" then local m=ks[bc[pc]+1] pc=pc+1 local na=bc[pc] pc=pc+1 local nr=bc[pc] pc=pc+1 local a={} for i=na,1,-1 do a[i]=pp() end local t=pp() local r={t[m](t,unpack(a))} if nr>0 then for i=1,nr do ps(r[i]) end end "
     +"elseif op=="+OP.HALT+" then break "
-    // v9.0: Dummy opcode handlers â€” dispatch table looks richer than it is
+    // v9.0: Dummy opcode handlers Ã¢â‚¬â€ dispatch table looks richer than it is
     +"elseif op=="+OP.NOP_A+" then local _n=1+2 "
     +"elseif op=="+OP.NOP_B+" then local _n=bit32.band(15,15) "
     +"elseif op=="+OP.NOP_C+" then local _n=math.floor(3.14) "
@@ -733,7 +733,7 @@ function serializeGlobals(globals){
 }
 
 
-// v7.0: Constant Pool Ã¢â‚¬â€ global encrypted table with real + poison entries
+// v7.0: Constant Pool ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â global encrypted table with real + poison entries
 // Deobfuscator sees _CP[47] but has no clue what index 47 decodes to
 // without emulating the entire pool decryption
 function generateConstantPool(entries, poolKey, poolShift, fnName, varName){
@@ -745,7 +745,7 @@ function generateConstantPool(entries, poolKey, poolShift, fnName, varName){
     allEntries.push({real: true, value: entry});
   }
 
-  // 20-40 poison decoy entries â€” realistic Roblox strings to waste analyst time
+  // 20-40 poison decoy entries Ã¢â‚¬â€ realistic Roblox strings to waste analyst time
   const poisonStrings = [
     "HttpGet","GetService","Players","LocalPlayer","Character","Humanoid",
     "WalkSpeed","JumpPower","Health","MaxHealth","TeleportService","MarketplaceService",
@@ -781,7 +781,7 @@ function generateConstantPool(entries, poolKey, poolShift, fnName, varName){
 }
 
 
-// v7.0: Real Watermarking Ã¢â‚¬â€ user-specific fingerprint scattered as junk vars
+// v7.0: Real Watermarking ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â user-specific fingerprint scattered as junk vars
 // Format: local _wmSIGSHORT = HASHNUM  (looks like junk, but SIGSHORT + HASHNUM
 // combination uniquely identifies which user obfuscated this)
 function generateUserWatermark(userId){
@@ -796,7 +796,7 @@ function generateUserWatermark(userId){
   // Scatter 3-5 watermark vars
   const markCount = randInt(3, 5);
   for(let i = 0; i < markCount; i++){
-    // Random prefix per var â€” no regex signature
+    // Random prefix per var Ã¢â‚¬â€ no regex signature
     const varName = randHexName(2) + sig.substring(i % sig.length, (i % sig.length) + 3) + randHexName(2);
     const value = ((Math.abs(hash) >> (i * 4)) & 0xffff) | 1;
     marks.push("local " + varName + "=" + value);
@@ -826,7 +826,7 @@ function generateAntiDump(){
 
 
 
-// v8.0: Control Flow Flattening Ã¢â‚¬â€ wraps execution in state-machine dispatcher
+// v8.0: Control Flow Flattening ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â wraps execution in state-machine dispatcher
 // Deobfuscator sees while-loop with random state numbers, can't determine flow order
 function generateCFFDispatcher(payloadStates){
   const stateVar = randHexName(5);
@@ -861,7 +861,7 @@ function generateCFFDispatcher(payloadStates){
       dispatcher += doneFlag + "=true ";
     }
   });
-  // Fake state branches (never reached Ã¢â‚¬â€ dead code)
+  // Fake state branches (never reached ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â dead code)
   fakeStates.forEach(s=>{
     dispatcher += "elseif " + stateVar + "==" + s.stateNum + " then " + s.code + "; " + stateVar + "=" + s.nextState + " ";
   });
@@ -870,7 +870,7 @@ function generateCFFDispatcher(payloadStates){
 }
 
 
-// v8.0: Self-Modifying Bytecode Ã¢â‚¬â€ bytecode is XOR-scrambled at rest
+// v8.0: Self-Modifying Bytecode ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â bytecode is XOR-scrambled at rest
 // Runtime unscrambles it just before execution. Static disassembly = garbage.
 function scrambleBytecode(bcArr, scrambleKey){
   const scrambled = bcArr.map((byte, i) => (byte ^ (scrambleKey + (i % 23))) & 0xff);
@@ -882,7 +882,7 @@ function generateBytecodeUnscrambler(fnName, scrambleKey){
 }
 
 
-// v8.0: String Chunking Ã¢â‚¬â€ splits strings into pieces, concats at runtime
+// v8.0: String Chunking ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â splits strings into pieces, concats at runtime
 // Adds junk function calls between chunks to disrupt pattern matching
 function chunkString(str){
   if(str.length < 6) return null; // too short to chunk usefully
@@ -938,7 +938,7 @@ function makeFakeDecoders(count){
   return decoders.join(" ");
 }
 
-// v9.0: DCE-resistant junk â€” writes to shared table so dead-code elimination
+// v9.0: DCE-resistant junk Ã¢â‚¬â€ writes to shared table so dead-code elimination
 // can't prove the writes are unused. Attacker can't strip these safely.
 function generateJunkOps(count, sharedTable){
   const ops=[];
@@ -986,7 +986,7 @@ function generateAntiTamper(){
     "local "+chk2+"=pcall(function() return (type(game)=='userdata') or (type(game)=='table') or true end) "+
     "if not "+chk1+" then "+flag+"=false end "+
     "if not "+chk2+" then "+flag+"=false end "+
-    // Soft tamper response â€” instead of infinite loop that could softlock Roblox,
+    // Soft tamper response Ã¢â‚¬â€ instead of infinite loop that could softlock Roblox,
     // just returns false. Downstream code checks _L existence anyway.
     "return "+flag+" end "+wrapper+"()";
 }
@@ -1079,7 +1079,7 @@ function serializeBlock(stmts){
 
 // v9.1: Add ::__continue__:: label at end of loop bodies so 'goto __continue__' works
 function addContinueLabels(luaCode) {
-  // v9.5: no-op â€” continue labels are now injected in luauToLua's injectContinueLabels
+  // v9.5: no-op Ã¢â‚¬â€ continue labels are now injected in luauToLua's injectContinueLabels
   return luaCode;
 }
 
@@ -1154,7 +1154,7 @@ function tryVmWrap(ast, level){
   let compiledCount = 0;
   const MAX_VM_STATEMENTS = 500; // v9.0: raised from 200
 
-  // v9.0: Prioritize sensitive statements â€” calls to HttpGet, loadstring, GetService, etc.
+  // v9.0: Prioritize sensitive statements Ã¢â‚¬â€ calls to HttpGet, loadstring, GetService, etc.
   const SENSITIVE_KEYWORDS = new Set([
     "HttpGet","HttpPost","loadstring","load","GetService","FindFirstChild",
     "WaitForChild","HttpGetAsync","PostAsync","RequestAsync","identifyexecutor",
@@ -1206,7 +1206,7 @@ function byteLevelTripleObfuscate(code,level,userId){
   const sharedJunkVar = "_" + randHexName(4);
   const junkTablePreamble = "local " + sharedJunkVar + "={}";
   const watermark = generateUserWatermark(userId);
-  // v9.8: antiDump disabled â€” iterating getgc() on scripts with 1000+ functions crashes some executors
+  // v9.8: antiDump disabled Ã¢â‚¬â€ iterating getgc() on scripts with 1000+ functions crashes some executors
   const antiDump = "";
   const k1=randInt(40,240);
   const k2=randInt(40,240);
@@ -1222,18 +1222,27 @@ function byteLevelTripleObfuscate(code,level,userId){
   const junk1=generateJunkOps(randInt(10,20), sharedJunkVar);
   const junk2=generateJunkOps(randInt(5,15), sharedJunkVar);
 
-  // Random 3-letter tag per obfuscation â€” no brand leak
+  // Random 3-letter tag per obfuscation Ã¢â‚¬â€ no brand leak
   const _tagA = String.fromCharCode(65+randInt(0,25));
   const _tagB = String.fromCharCode(65+randInt(0,25));
   const _tagC = String.fromCharCode(65+randInt(0,25));
   const _tag = _tagA+_tagB+_tagC;
   const execCore="local _L=nil "+
-    "if type(loadstring)=='function' then _L=loadstring "+
-    "elseif type(load)=='function' then _L=load "+
-    "elseif getgenv then local _g=getgenv() if type(_g.loadstring)=='function' then _L=_g.loadstring elseif type(_g.load)=='function' then _L=_g.load end end "+
+    "pcall(function() "+
+      "if type(loadstring)=='function' then _L=loadstring return end "+
+      "if type(load)=='function' then _L=load return end "+
+      "if type(getgenv)=='function' then "+
+        "local _g=getgenv() "+
+        "if type(_g)=='table' then "+
+          "if type(rawget(_g,'loadstring'))=='function' then _L=rawget(_g,'loadstring') return end "+
+          "if type(rawget(_g,'load'))=='function' then _L=rawget(_g,'load') return end "+
+        "end "+
+      "end "+
+    "end) "+
     "if type(_L)~='function' then return end "+
-    "local "+execVar+","+errVar+"=_L("+realDec+"("+strVar+")) "+
-    "if "+execVar+" then local _ok,_err=pcall("+execVar+"); if (not _ok) and _err then warn('["+_tag+"] R: '..tostring(_err)) end else if "+errVar+" then warn('["+_tag+"] C: '..tostring("+errVar+")) end end";
+    "local "+execVar+","+errVar+"=pcall(_L,"+realDec+"("+strVar+")) "+
+    "if not "+execVar+" then return end "+
+    "if type("+errVar+")=='function' then local _ok,_err=pcall("+errVar+"); if (not _ok) and _err then warn('["+_tag+"] R: '..tostring(_err)) end end";
 
   const parts=[];
   parts.push(junkTablePreamble);  // v9.0: shared junk table
@@ -1275,7 +1284,7 @@ async function obfuscate(luaCode,level,userId){
 
     if(!ast){
       console.warn("[obfuscator] Falling back to byte-level (no AST). Script size:", code.length);
-      // v9.1: byte-level fallback works for ANY input â€” even if AST parse fails
+      // v9.1: byte-level fallback works for ANY input Ã¢â‚¬â€ even if AST parse fails
       try {
         return _WM+byteLevelTripleObfuscate(code,level,userId);
       } catch(fbErr) {
