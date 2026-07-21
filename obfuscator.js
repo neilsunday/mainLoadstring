@@ -36,20 +36,82 @@ function randHexName(len){
   return o;
 }
 
+// v5.5 CRITICAL FIX: String-aware preprocessor
+// Old regex `/--[^\n]*/g` stripped `--` INSIDE strings, breaking them and causing
+// bracket imbalance â†’ syntax error. This walks char-by-char, respecting:
+//   - Regular strings: "..." and '...' (with \ escapes)
+//   - Long strings: [[...]], [=[...]=], [==[...]==] (Luau leveled)
+//   - Long comments: --[[...]], --[=[...]=]
+//   - Line comments: -- to end of line
+//   - Backtick strings: `hello {name}` (Luau string interpolation)
 function preprocess(code){
-  code=code.replace(/--\[\[[\s\S]*?\]\]/g,"");
-  code=code.replace(/--[^\n]*/g,"");
   code=code.replace(/\r\n/g,"\n").replace(/\r/g,"\n");
-  code=code.split("\n").map(l=>l.replace(/\s+$/,"")).join("\n");
-  return code.trim();
+  let out="";
+  let i=0;
+  const len=code.length;
+  while(i<len){
+    const c=code[i];
+    const next=i+1<len?code[i+1]:"";
+    // Comment: -- or --[[
+    if(c==="-"&&next==="-"){
+      const j=i+2;
+      if(code[j]==="["){
+        let level=0,k=j+1;
+        while(code[k]==="="){level++;k++;}
+        if(code[k]==="["){
+          const closer="]"+"=".repeat(level)+"]";
+          const endIdx=code.indexOf(closer,k+1);
+          if(endIdx>0){i=endIdx+closer.length;continue;}
+          i=len;continue;
+        }
+      }
+      while(i<len&&code[i]!=="\n")i++;
+      continue;
+    }
+    // Long string [[ or [=[
+    if(c==="["){
+      let level=0,j=i+1;
+      while(code[j]==="="){level++;j++;}
+      if(code[j]==="["){
+        const closer="]"+"=".repeat(level)+"]";
+        const endIdx=code.indexOf(closer,j+1);
+        if(endIdx>0){out+=code.substring(i,endIdx+closer.length);i=endIdx+closer.length;continue;}
+        out+=code.substring(i);i=len;continue;
+      }
+    }
+    // Regular string " or '
+    if(c==='"'||c==="'"){
+      const quote=c;out+=c;i++;
+      while(i<len){
+        const ch=code[i];
+        if(ch==="\\"&&i+1<len){out+=ch+code[i+1];i+=2;continue;}
+        if(ch===quote){out+=ch;i++;break;}
+        if(ch==="\n"){out+=ch;i++;break;}
+        out+=ch;i++;
+      }
+      continue;
+    }
+    // Backtick string (Luau interpolation)
+    if(c==="`"){
+      out+=c;i++;
+      let depth=0;
+      while(i<len){
+        const ch=code[i];
+        if(ch==="\\"&&i+1<len){out+=ch+code[i+1];i+=2;continue;}
+        if(ch==="{")depth++;
+        if(ch==="}")depth--;
+        if(ch==="`"&&depth===0){out+=ch;i++;break;}
+        out+=ch;i++;
+      }
+      continue;
+    }
+    out+=c;i++;
+  }
+  out=out.split("\n").map(l=>l.replace(/\s+$/,"")).join("\n");
+  return out.trim();
 }
 
-// v5.4 FINAL FIX: Continuation-aware minifier
-// Checks BOTH prev line's ending AND current line's beginning before inserting ';'
-// Prevents breaking multi-line expressions common in Luau/Roblox scripts:
-//   - `if x\n  and y then` (word op continuation)
-//   - `game\n  :GetService()` (method chain continuation)
-//   - `"a"\n  .. "b"` (concat continuation)
+// v5.4 continuation-aware minifier (unchanged, works correctly with safe preprocess)
 function aggressiveMinify(code){
   code=preprocess(code);
   code=code.split("\n").map(l=>l.trim()).filter(l=>l.length>0).join("\n");
@@ -61,12 +123,10 @@ function aggressiveMinify(code){
     if(result.length===0){result.push(line);continue;}
     const prev=result[result.length-1].trim();
     let addSemi=true;
-    // Prev line ends with block-opener or operator â†’ no ;
     if(/\b(do|then|else|repeat)\s*$/.test(prev))addSemi=false;
     else if(/[=,{(\[+\-*/%<>~^&|.:;]$/.test(prev))addSemi=false;
     else if(/\b(and|or|not|in|return|local|elseif)\s*$/.test(prev))addSemi=false;
     else if(/\)\s*$/.test(prev)&&/\bfunction\b/.test(prev)&&!/\bend\s*\)\s*$/.test(prev))addSemi=false;
-    // Current line begins with continuation token â†’ no ;
     else if(/^(and|or|not)\b/.test(line))addSemi=false;
     else if(/^[.:,)\]}+\-*/%<>=~^&|]/.test(line))addSemi=false;
     else if(/^(then|do|else|elseif|end|until)\b/.test(line))addSemi=false;
@@ -74,7 +134,7 @@ function aggressiveMinify(code){
     result.push(line);
   }
   let out=result.join(" ");
-  out=out.replace(/  +/g," ").replace(/;\s*;/g,";").replace(/;\s*end\b/g," end").replace(/;\s*\)/g,")").replace(/;\s*until\b/g," until").replace(/;\s*elseif\b/g," elseif").replace(/;\s*else\b/g," else").replace(/;\s*then\b/g," then").replace(/;\s*do\b/g," do").replace(/;\s*(and|or)\b/g," $1").replace(/;\s*(\.\.|:|\.)/g," $1");
+  out=out.replace(/  +/g," ").replace(/;\s*;/g,";").replace(/;\s*end\b/g," end").replace(/;\s*\)/g,")").replace(/;\s*\}/g," }").replace(/;\s*until\b/g," until").replace(/;\s*elseif\b/g," elseif").replace(/;\s*else\b/g," else").replace(/;\s*then\b/g," then").replace(/;\s*do\b/g," do").replace(/;\s*(and|or)\b/g," $1").replace(/;\s*(\.\.|:|\.)/g," $1");
   return out.trim();
 }
 
