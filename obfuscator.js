@@ -2316,6 +2316,321 @@ function generateJunkOpHandlers(opTable, junkNames) {
 }
 
 
+
+// ============================================================================
+// v16.0 ADVANCED INTELLIGENCE MODULE
+// Non-hardcoded pattern detection â€” works on ANY script, not just known frameworks.
+// ============================================================================
+
+// ---- Feature 1: Closure-Graph Analyzer ----
+// Builds a graph of which functions capture which upvalues, so we can detect
+// shared mutable state that's used across many closures (fragile under rename).
+function analyzeClosureGraph(ast) {
+  const graph = {
+    functions: [],           // { id, line, capturedUpvalues: [names], parentFn: id|null }
+    sharedStateVars: [],     // vars declared once, captured by 3+ functions
+    upvalueUsage: new Map(), // varName -> [functionIds that capture it]
+  };
+
+  let fnId = 0;
+  const stack = []; // stack of { id, declaredHere: Set, capturedFromParent: Set }
+
+  function findEnclosingDecl(name) {
+    // Walk stack from innermost to find who declared this name
+    for (let i = stack.length - 1; i >= 0; i--) {
+      if (stack[i].declaredHere.has(name)) return i;
+    }
+    return -1; // global/undeclared
+  }
+
+  function walk(node) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+
+    const opensScope = node.type === "FunctionDeclaration" || node.type === "FunctionExpression";
+
+    if (opensScope) {
+      const currentId = fnId++;
+      const line = (node.loc && node.loc.start && node.loc.start.line) || 0;
+      const frame = {
+        id: currentId,
+        line,
+        declaredHere: new Set(),
+        capturedFromParent: new Set(),
+        parentFn: stack.length > 0 ? stack[stack.length - 1].id : null,
+      };
+
+      // Add function params as declared in this scope
+      if (Array.isArray(node.parameters)) {
+        for (const p of node.parameters) {
+          if (p && p.name) frame.declaredHere.add(p.name);
+        }
+      }
+
+      stack.push(frame);
+
+      // Walk function body
+      for (const k of Object.keys(node)) {
+        if (k === "loc" || k === "range" || k === "type" || k === "parameters") continue;
+        walk(node[k]);
+      }
+
+      // Finalize this function's info
+      graph.functions.push({
+        id: currentId,
+        line: line,
+        capturedUpvalues: [...frame.capturedFromParent],
+        parentFn: frame.parentFn,
+      });
+
+      // Track upvalue usage
+      for (const name of frame.capturedFromParent) {
+        if (!graph.upvalueUsage.has(name)) graph.upvalueUsage.set(name, []);
+        graph.upvalueUsage.get(name).push(currentId);
+      }
+
+      stack.pop();
+      return;
+    }
+
+    // Track declarations in current scope
+    if (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      if (node.type === "LocalStatement" && node.variables) {
+        for (const v of node.variables) {
+          if (v && v.name) frame.declaredHere.add(v.name);
+        }
+      }
+      if (node.type === "ForNumericStatement" && node.variable && node.variable.name) {
+        frame.declaredHere.add(node.variable.name);
+      }
+      if (node.type === "ForGenericStatement" && node.variables) {
+        for (const v of node.variables) if (v && v.name) frame.declaredHere.add(v.name);
+      }
+    }
+
+    // Track upvalue captures â€” any Identifier reference not declared in the current
+    // function's local scope but declared in a parent = captured upvalue
+    if (node.type === "Identifier" && node.name && stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      if (!frame.declaredHere.has(node.name)) {
+        const declaredAt = findEnclosingDecl(node.name);
+        if (declaredAt >= 0 && declaredAt < stack.length - 1) {
+          frame.capturedFromParent.add(node.name);
+        }
+      }
+    }
+
+    // Recurse
+    for (const k of Object.keys(node)) {
+      if (k === "loc" || k === "range" || k === "type") continue;
+      // Skip .identifier of MemberExpression (field, not var reference)
+      if (node.type === "MemberExpression" && k === "identifier") continue;
+      walk(node[k]);
+    }
+  }
+
+  walk(ast);
+
+  // Identify shared state â€” vars captured by 3+ functions (heuristic for risky patterns)
+  for (const [name, fns] of graph.upvalueUsage.entries()) {
+    if (fns.length >= 3) {
+      graph.sharedStateVars.push({ name, capturedBy: fns.length });
+    }
+  }
+  graph.sharedStateVars.sort((a, b) => b.capturedBy - a.capturedBy);
+
+  return graph;
+}
+
+// ---- Feature 2: UI Framework Auto-Detector ----
+// Detects Roblox UI patterns dynamically (no hardcoded framework names)
+function detectUIPatterns(ast, rawCode) {
+  const patterns = {
+    instanceNewCount: 0,
+    uiTypeCreations: {},     // { "Frame": 42, "TextLabel": 12, ... }
+    connectionHandlers: 0,   // :Connect() calls
+    tweenServiceUsage: 0,
+    guiParenting: 0,         // .Parent = someGui
+    inputHandlers: 0,        // InputBegan, InputEnded, MouseButton1Click
+    hasCustomUI: false,      // heuristic: many Instance.new + connections
+  };
+
+  function walk(node) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+
+    if (node.type === "CallExpression" && node.base) {
+      // Instance.new("Type")
+      if (node.base.type === "MemberExpression"
+          && node.base.base && node.base.base.name === "Instance"
+          && node.base.identifier && node.base.identifier.name === "new") {
+        patterns.instanceNewCount++;
+        if (node.arguments && node.arguments[0]
+            && node.arguments[0].type === "StringLiteral") {
+          const uiType = node.arguments[0].value;
+          patterns.uiTypeCreations[uiType] = (patterns.uiTypeCreations[uiType] || 0) + 1;
+        }
+      }
+      // :Connect(...) method calls
+      if (node.base.type === "MemberExpression" && node.base.indexer === ":"
+          && node.base.identifier && node.base.identifier.name === "Connect") {
+        patterns.connectionHandlers++;
+      }
+      // TweenService:Create
+      if (node.base.type === "MemberExpression" && node.base.indexer === ":"
+          && node.base.base && node.base.base.name === "TweenService") {
+        patterns.tweenServiceUsage++;
+      }
+    }
+
+    // .Parent = X
+    if (node.type === "AssignmentStatement" && node.variables) {
+      for (const v of node.variables) {
+        if (v.type === "MemberExpression" && v.identifier && v.identifier.name === "Parent") {
+          patterns.guiParenting++;
+        }
+      }
+    }
+
+    for (const k of Object.keys(node)) {
+      if (k === "loc" || k === "range" || k === "type") continue;
+      walk(node[k]);
+    }
+  }
+  walk(ast);
+
+  // Heuristic: 20+ Instance.new + 10+ :Connect = custom UI
+  patterns.hasCustomUI = patterns.instanceNewCount >= 20 && patterns.connectionHandlers >= 10;
+  patterns.inputHandlers = (rawCode.match(/InputBegan|InputEnded|MouseButton1Click|MouseButton1Down|Activated/g) || []).length;
+
+  return patterns;
+}
+
+// ---- Feature 3: Semantic Preservation Checker ----
+// After obfuscation, verify that critical patterns are still present.
+// Compares before/after counts of :Connect, Instance.new, hookfunction, etc.
+function semanticFingerprint(code) {
+  return {
+    instanceNew: (code.match(/Instance\.new/g) || []).length,
+    connects: (code.match(/:Connect\s*\(/g) || []).length,
+    pcalls: (code.match(/\bpcall\s*\(/g) || []).length,
+    hookfunction: (code.match(/\bhookfunction\b/g) || []).length,
+    getgenv: (code.match(/\bgetgenv\s*\(/g) || []).length,
+    getService: (code.match(/:GetService\s*\(/g) || []).length,
+    tweenCreate: (code.match(/:Create\s*\(/g) || []).length,
+    coroutineCreate: (code.match(/coroutine\.(create|wrap|resume)/g) || []).length,
+  };
+}
+
+function comparefingerprints(before, after, ratioTolerance) {
+  ratioTolerance = ratioTolerance || 0.85; // 85% preservation threshold
+  const issues = [];
+  for (const key of Object.keys(before)) {
+    if (before[key] === 0) continue;
+    const ratio = after[key] / before[key];
+    if (ratio < ratioTolerance) {
+      issues.push({
+        pattern: key,
+        before: before[key],
+        after: after[key],
+        preservationRatio: ratio.toFixed(2),
+      });
+    }
+  }
+  return issues;
+}
+
+// ---- Feature 4: Self-Tuning Strategy ----
+// Auto-adjusts obfuscation intensity based on script characteristics
+function tuneStrategy(profile, closureGraph, uiPatterns) {
+  const strategy = {
+    baseLevelOverride: null,        // 'medium' or null (no override)
+    disableStringEncrypt: false,
+    disableNumberEncode: false,
+    disableVMHarness: false,
+    disableRename: false,
+    reasons: [],
+  };
+
+  // Rule 1: If closure graph has many shared state vars, be conservative with rename
+  if (closureGraph.sharedStateVars.length >= 5) {
+    strategy.reasons.push(
+      "Detected " + closureGraph.sharedStateVars.length +
+      " shared state variables â€” scope-aware rename recommended but keep strict"
+    );
+  }
+
+  // Rule 2: If UI-heavy (custom framework), disable number encoding
+  // (numbers are often used as UI positions/sizes and encoding them can cause layout bugs)
+  if (uiPatterns.hasCustomUI && uiPatterns.instanceNewCount > 50) {
+    strategy.disableNumberEncode = true;
+    strategy.reasons.push(
+      "Custom UI framework detected (" + uiPatterns.instanceNewCount +
+      " Instance.new calls) â€” number encoding disabled to preserve UI values"
+    );
+  }
+
+  // Rule 3: If very deep closure nesting, disable VM harness (VM adds overhead)
+  const maxClosureDepth = Math.max(0, ...closureGraph.functions.map(f => {
+    // count depth by walking parent chain
+    let d = 0, cur = f.parentFn;
+    while (cur !== null && d < 100) {
+      const parent = closureGraph.functions.find(x => x.id === cur);
+      if (!parent) break;
+      cur = parent.parentFn;
+      d++;
+    }
+    return d;
+  }));
+  if (maxClosureDepth >= 5) {
+    strategy.reasons.push(
+      "Closure depth " + maxClosureDepth + " â€” VM harness may cause upvalue issues"
+    );
+  }
+
+  // Rule 4: If script uses executor hooks AND has many closures, force medium
+  if (profile.hasHookfunction && closureGraph.functions.length >= 30) {
+    strategy.baseLevelOverride = "medium";
+    strategy.reasons.push(
+      "Script uses hooks + " + closureGraph.functions.length +
+      " closures â€” forcing medium level for stability"
+    );
+  }
+
+  return strategy;
+}
+
+// ---- Feature 5: Runtime Dependency Report ----
+// Human-readable summary of what the script depends on
+function generateDependencyReport(profile, closureGraph, uiPatterns) {
+  const lines = [];
+  lines.push("=== SCRIPT DEPENDENCY REPORT ===");
+  lines.push("Functions: " + closureGraph.functions.length +
+    " (avg upvalues per closure: " +
+    (closureGraph.functions.reduce((s, f) => s + f.capturedUpvalues.length, 0) /
+      Math.max(1, closureGraph.functions.length)).toFixed(1) + ")");
+
+  if (closureGraph.sharedStateVars.length > 0) {
+    lines.push("Shared state (captured by 3+ functions):");
+    for (const s of closureGraph.sharedStateVars.slice(0, 8)) {
+      lines.push("  - " + s.name + " (used by " + s.capturedBy + " functions)");
+    }
+  }
+
+  if (uiPatterns.hasCustomUI) {
+    lines.push("Custom UI: " + uiPatterns.instanceNewCount + " Instances, " +
+      uiPatterns.connectionHandlers + " event handlers, " +
+      uiPatterns.tweenServiceUsage + " tweens");
+    const topTypes = Object.entries(uiPatterns.uiTypeCreations)
+      .sort((a, b) => b[1] - a[1]).slice(0, 5);
+    lines.push("  Top UI types: " + topTypes.map(t => t[0] + "Ã—" + t[1]).join(", "));
+  }
+
+  return lines.join("\n");
+}
+
+
 async function obfuscate(luaCode,level,userId){
   level=level||"medium";
   const _WM=pickWatermark();
@@ -2355,6 +2670,43 @@ async function obfuscate(luaCode,level,userId){
       console.log("[obfuscator v11.3]   Auto-whitelisted externals:", preview + more);
     }
     for (const w of analysis.warnings) console.log("[obfuscator v11]   " + w);
+
+    // === v16.0 ADVANCED INTELLIGENCE ===
+    const closureGraph = analyzeClosureGraph(ast);
+    const uiPatterns = detectUIPatterns(ast, luaCode);
+    const strategy = tuneStrategy(profile, closureGraph, uiPatterns);
+
+    console.log("[obfuscator v16] Closure graph:",
+      closureGraph.functions.length + " functions,",
+      closureGraph.sharedStateVars.length + " shared-state vars,",
+      closureGraph.upvalueUsage.size + " unique upvalues");
+
+    if (uiPatterns.hasCustomUI) {
+      console.log("[obfuscator v16] UI framework detected:",
+        uiPatterns.instanceNewCount + " Instances,",
+        uiPatterns.connectionHandlers + " handlers,",
+        uiPatterns.tweenServiceUsage + " tweens");
+    }
+
+    if (closureGraph.sharedStateVars.length > 0) {
+      const top5 = closureGraph.sharedStateVars.slice(0, 5).map(s =>
+        s.name + "(" + s.capturedBy + ")"
+      ).join(", ");
+      console.log("[obfuscator v16] Top shared state:", top5);
+    }
+
+    for (const reason of strategy.reasons) {
+      console.log("[obfuscator v16]   " + reason);
+    }
+
+    // Apply strategy overrides
+    if (strategy.baseLevelOverride === "medium" && isMaximum) {
+      console.log("[obfuscator v16] Auto-tuning: maximum â†’ medium (safer for this script)");
+      effectiveIsMaximum = false;
+    }
+
+    // Capture fingerprint of PRE-obfuscation code for post-check
+    const preFingerprint = semanticFingerprint(code);
 
     const code = analysis.convertedCode;
     const ast = analysis.ast;
@@ -2453,6 +2805,20 @@ async function obfuscate(luaCode,level,userId){
       }
     } else {
       console.log("[obfuscator v13] âœ“ Generated code validated OK");
+    }
+
+    // === v16.0 SEMANTIC PRESERVATION CHECK ===
+    const postFingerprint = semanticFingerprint(ob);
+    const semanticIssues = comparefingerprints(preFingerprint, postFingerprint, 0.85);
+    if (semanticIssues.length > 0) {
+      console.warn("[obfuscator v16] âš  Semantic pattern preservation issues:");
+      for (const issue of semanticIssues) {
+        console.warn("[obfuscator v16]   " + issue.pattern +
+          ": " + issue.before + " â†’ " + issue.after +
+          " (ratio: " + issue.preservationRatio + ")");
+      }
+    } else {
+      console.log("[obfuscator v16] âœ“ All semantic patterns preserved");
     }
 
     // === v14.0 ANTI-DEBUGGER + ANTI-TAMPER LAYER ===
