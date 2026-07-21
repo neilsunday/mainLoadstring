@@ -1,4 +1,4 @@
-// AzureVM Obfuscator â€” v9.7 (Phase 3 hotfix 7: safer anti-tamper + robust loadstring fallback)
+// AzureVM Obfuscator â€” v9.8 (Phase 3 hotfix 8: TRUE loadstring fix + type-safe fallback)
 // Improvements over v8.1:
 //   1. Constants Pool with poison entries (was: unused/broken)
 //   2. Position + prev-byte dependent stream cipher (was: triple XOR only)
@@ -1206,7 +1206,8 @@ function byteLevelTripleObfuscate(code,level,userId){
   const sharedJunkVar = "_" + randHexName(4);
   const junkTablePreamble = "local " + sharedJunkVar + "={}";
   const watermark = generateUserWatermark(userId);
-  const antiDump = level === "maximum" ? generateAntiDump() : "";
+  // v9.8: antiDump disabled â€” iterating getgc() on scripts with 1000+ functions crashes some executors
+  const antiDump = "";
   const k1=randInt(40,240);
   const k2=randInt(40,240);
   const k3=randInt(40,240);
@@ -1226,7 +1227,13 @@ function byteLevelTripleObfuscate(code,level,userId){
   const _tagB = String.fromCharCode(65+randInt(0,25));
   const _tagC = String.fromCharCode(65+randInt(0,25));
   const _tag = _tagA+_tagB+_tagC;
-  const execCore="local _L=loadstring or load; local "+execVar+","+errVar+"=_L("+realDec+"("+strVar+")); if "+execVar+" then local _ok,_err=pcall("+execVar+"); if (not _ok) and _err then warn('["+_tag+"] R: '..tostring(_err)) end else if "+errVar+" then warn('["+_tag+"] C: '..tostring("+errVar+")) end end";
+  const execCore="local _L=nil "+
+    "if type(loadstring)=='function' then _L=loadstring "+
+    "elseif type(load)=='function' then _L=load "+
+    "elseif getgenv then local _g=getgenv() if type(_g.loadstring)=='function' then _L=_g.loadstring elseif type(_g.load)=='function' then _L=_g.load end end "+
+    "if type(_L)~='function' then return end "+
+    "local "+execVar+","+errVar+"=_L("+realDec+"("+strVar+")) "+
+    "if "+execVar+" then local _ok,_err=pcall("+execVar+"); if (not _ok) and _err then warn('["+_tag+"] R: '..tostring(_err)) end else if "+errVar+" then warn('["+_tag+"] C: '..tostring("+errVar+")) end end";
 
   const parts=[];
   parts.push(junkTablePreamble);  // v9.0: shared junk table
