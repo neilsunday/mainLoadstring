@@ -397,6 +397,90 @@ function generateAntiDump(){
 }
 
 
+
+// v8.0: Control Flow Flattening â€” wraps execution in state-machine dispatcher
+// Deobfuscator sees while-loop with random state numbers, can't determine flow order
+function generateCFFDispatcher(payloadStates){
+  const stateVar = randHexName(5);
+  const dispatchFn = randHexName(6);
+  const doneFlag = randHexName(4);
+  // Randomize state numbers so order isn't obvious
+  const shuffled = payloadStates.map((code,i)=>({code, realIdx:i, stateNum: randInt(100,9999)}));
+  // Add 3-5 fake states that jump back to themselves (never execute payload)
+  const fakeCount = randInt(3, 5);
+  const fakeStates = [];
+  for(let i = 0; i < fakeCount; i++){
+    fakeStates.push({
+      code: "local " + randHexName(4) + "=" + randInt(1,999) + "*" + randInt(1,999),
+      realIdx: -1,
+      stateNum: randInt(100,9999),
+      nextState: randInt(100,9999)
+    });
+  }
+  // Build the state machine
+  let dispatcher = "local " + stateVar + "=" + shuffled[0].stateNum + "; ";
+  dispatcher += "local " + doneFlag + "=false; ";
+  dispatcher += "while not " + doneFlag + " do ";
+  // Real state branches
+  shuffled.forEach((s, idx)=>{
+    const isFirst = idx === 0;
+    const prefix = isFirst ? "if " : "elseif ";
+    const nextStateNum = idx < shuffled.length - 1 ? shuffled[idx + 1].stateNum : null;
+    dispatcher += prefix + stateVar + "==" + s.stateNum + " then " + s.code + "; ";
+    if(nextStateNum !== null){
+      dispatcher += stateVar + "=" + nextStateNum + " ";
+    } else {
+      dispatcher += doneFlag + "=true ";
+    }
+  });
+  // Fake state branches (never reached â€” dead code)
+  fakeStates.forEach(s=>{
+    dispatcher += "elseif " + stateVar + "==" + s.stateNum + " then " + s.code + "; " + stateVar + "=" + s.nextState + " ";
+  });
+  dispatcher += "else " + doneFlag + "=true end end";
+  return dispatcher;
+}
+
+
+// v8.0: Self-Modifying Bytecode â€” bytecode is XOR-scrambled at rest
+// Runtime unscrambles it just before execution. Static disassembly = garbage.
+function scrambleBytecode(bcArr, scrambleKey){
+  const scrambled = bcArr.map((byte, i) => (byte ^ (scrambleKey + (i % 23))) & 0xff);
+  return scrambled;
+}
+
+function generateBytecodeUnscrambler(fnName, scrambleKey){
+  return "local function " + fnName + "(arr) local out={} for i=1,#arr do out[i]=bit32.bxor(arr[i],(" + scrambleKey + "+((i-1)%23)))%256 end return out end";
+}
+
+
+// v8.0: String Chunking â€” splits strings into pieces, concats at runtime
+// Adds junk function calls between chunks to disrupt pattern matching
+function chunkString(str){
+  if(str.length < 6) return null; // too short to chunk usefully
+  const numChunks = Math.min(4, Math.max(2, Math.floor(str.length / 5)));
+  const chunkSize = Math.ceil(str.length / numChunks);
+  const chunks = [];
+  for(let i = 0; i < str.length; i += chunkSize){
+    chunks.push(str.substring(i, Math.min(i + chunkSize, str.length)));
+  }
+  // Build concat expression with occasional junk empty-string fns
+  const parts = chunks.map((c, i) => {
+    if(i > 0 && Math.random() < 0.3){
+      // Insert junk empty string generator between chunks
+      const junkFn = randChoice([
+        "(function() return '' end)()",
+        "string.rep('',1)",
+        "string.sub('a',1,0)"
+      ]);
+      return junkFn + " .. " + JSON.stringify(c);
+    }
+    return JSON.stringify(c);
+  });
+  return "(" + parts.join(" .. ") + ")";
+}
+
+
 function tripleXorEncrypt(str,k1,k2,k3){
   const bytes=[];
   for(let i=0;i<str.length;i++){
@@ -729,8 +813,18 @@ async function obfuscate(luaCode,level,userId){
     if(isMedium)return _WM+combined;
 
     const encrypted = byteLevelTripleObfuscate(combined, level, userId);
-    // v6.1: prepend VM harness OUTSIDE encryption for real hybrid protection
-    return _WM+(vmOuterHarness ? (vmOuterHarness + "; " + encrypted) : encrypted);
+    // v8.0: Wrap in Control Flow Flattening state machine (maximum only)
+    let finalOutput;
+    if(isMaximum){
+      const states = [];
+      if(vmOuterHarness) states.push(vmOuterHarness);
+      states.push(encrypted);
+      const cffWrapped = generateCFFDispatcher(states);
+      finalOutput = cffWrapped;
+    } else {
+      finalOutput = vmOuterHarness ? (vmOuterHarness + "; " + encrypted) : encrypted;
+    }
+    return _WM + finalOutput;
   }catch(err){
     console.error("[obfuscator] Error:",err.message);
     try{
