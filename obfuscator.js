@@ -1,4 +1,4 @@
-// AzureVM Obfuscator Ã¢â‚¬â€ v9.8 (Phase 3 hotfix 8: TRUE loadstring fix + type-safe fallback)
+// AzureVM Obfuscator â€” v10.0 (Complete rewrite: simple exec_core, no nested returns, no CFF wrap)
 // Improvements over v8.1:
 //   1. Constants Pool with poison entries (was: unused/broken)
 //   2. Position + prev-byte dependent stream cipher (was: triple XOR only)
@@ -969,26 +969,17 @@ function generateOpaquePredicate(payload){
   const c1=randChoice(conds);
   const c2=randChoice(conds);
   const junkV=randHexName(4);
-  // v9.7: wrap payload in pcall so nil-indexing errors don't crash whole script
-  // Roblox executors are inconsistent about global availability
-  return "if "+c1+" and "+c2+" then pcall(function() "+payload+" end) else local "+junkV+"="+randInt(1,999)+"*"+randInt(1,999)+" end";
+  // v10.0: NO extra pcall wrap - exec_core is self-contained with its own pcalls
+  // Simple opaque predicate that either runs payload directly or does nothing
+  return "if "+c1+" and "+c2+" then "+payload+" else local "+junkV+"="+randInt(1,999)+"*"+randInt(1,999)+" end";
 }
 
 function generateAntiTamper(){
-  const wrapper=randHexName(6);
-  const chk1=randHexName(5);
-  const chk2=randHexName(5);
-  const flag=randHexName(4);
-  // v9.7: NO longer invokes hookfunction as a test (conflicts with user scripts that
-  // hook things themselves). Just check for existence and expected type/behavior of core Lua.
-  return "local "+wrapper+"=function() local "+flag+"=true "+
-    "local "+chk1+"=pcall(function() return bit32.bxor(15,15)==0 end) "+
-    "local "+chk2+"=pcall(function() return (type(game)=='userdata') or (type(game)=='table') or true end) "+
-    "if not "+chk1+" then "+flag+"=false end "+
-    "if not "+chk2+" then "+flag+"=false end "+
-    // Soft tamper response Ã¢â‚¬â€ instead of infinite loop that could softlock Roblox,
-    // just returns false. Downstream code checks _L existence anyway.
-    "return "+flag+" end "+wrapper+"()";
+  // v10.0: Ultra-simple - just a wrapper function that returns a value
+  // No pcall inside pcall, no conflicting hookfunction tests, no infinite loops
+  const wrapper = randHexName(6);
+  const val = randHexName(4);
+  return "local "+wrapper+"=function() local "+val+"=bit32.bxor(15,15) return "+val+"==0 end "+wrapper+"()";
 }
 
 function encryptString(str,key,shift){
@@ -1227,22 +1218,27 @@ function byteLevelTripleObfuscate(code,level,userId){
   const _tagB = String.fromCharCode(65+randInt(0,25));
   const _tagC = String.fromCharCode(65+randInt(0,25));
   const _tag = _tagA+_tagB+_tagC;
-  const execCore="local _L=nil "+
-    "pcall(function() "+
-      "if type(loadstring)=='function' then _L=loadstring return end "+
-      "if type(load)=='function' then _L=load return end "+
-      "if type(getgenv)=='function' then "+
-        "local _g=getgenv() "+
-        "if type(_g)=='table' then "+
-          "if type(rawget(_g,'loadstring'))=='function' then _L=rawget(_g,'loadstring') return end "+
-          "if type(rawget(_g,'load'))=='function' then _L=rawget(_g,'load') return end "+
-        "end "+
-      "end "+
-    "end) "+
-    "if type(_L)~='function' then return end "+
-    "local "+execVar+","+errVar+"=pcall(_L,"+realDec+"("+strVar+")) "+
-    "if not "+execVar+" then return end "+
-    "if type("+errVar+")=='function' then local _ok,_err=pcall("+errVar+"); if (not _ok) and _err then warn('["+_tag+"] R: '..tostring(_err)) end end";
+  const getLoaderFn = randHexName(5);
+  const runFn = randHexName(5);
+  const execCore=
+    "local function "+getLoaderFn+"() "+
+      "local ok,fn=pcall(function() "+
+        "if loadstring then return loadstring end "+
+        "if load then return load end "+
+        "return nil "+
+      "end) "+
+      "if ok and type(fn)=='function' then return fn end "+
+      "return nil "+
+    "end "+
+    "local function "+runFn+"() "+
+      "local _L="+getLoaderFn+"() "+
+      "if not _L then return end "+
+      "local ok,compiled=pcall(_L,"+realDec+"("+strVar+")) "+
+      "if not ok then return end "+
+      "if type(compiled)~='function' then return end "+
+      "pcall(compiled) "+
+    "end "+
+    runFn+"()"
 
   const parts=[];
   parts.push(junkTablePreamble);  // v9.0: shared junk table
@@ -1337,11 +1333,9 @@ async function obfuscate(luaCode,level,userId){
     // v8.0: Wrap in Control Flow Flattening state machine (maximum only)
     let finalOutput;
     if(isMaximum){
-      const states = [];
-      if(vmOuterHarness) states.push(vmOuterHarness);
-      states.push(encrypted);
-      const cffWrapped = generateCFFDispatcher(states);
-      finalOutput = cffWrapped;
+      // v10.0: CFF disabled - was wrapping encrypted payload with nested if/elseif
+      // that some Roblox executors mishandle. Straight concat is safer.
+      finalOutput = vmOuterHarness ? (vmOuterHarness + "; " + encrypted) : encrypted;
     } else {
       finalOutput = vmOuterHarness ? (vmOuterHarness + "; " + encrypted) : encrypted;
     }
