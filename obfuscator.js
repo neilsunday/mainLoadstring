@@ -1,4 +1,5 @@
-// AzureVM Obfuscator (patched v10.3 â€” top-local tracking, method-call passthrough
+// AzureVM Obfuscator (patched v10.4 â€” declaration-order tracking, no reordering
+// v10.3 â€” top-local tracking, method-call passthrough
 // v10.2 â€” method-call passthrough, executor-aware loader
 // v10.1 â€” executor-aware loader chain)
 // Original:  Ã¢â‚¬â€ v10.0 (Complete rewrite: simple exec_core, no nested returns, no CFF wrap)
@@ -1243,17 +1244,77 @@ function tryVmWrap(ast, level){
     }
     return score;
   }
-  const indexed = ast.body.map((stmt, i) => ({ stmt, i, score: stmtSensitivity(stmt) }));
-  indexed.sort((a, b) => b.score - a.score || a.i - b.i);
-  ast.body = indexed.map(x => x.stmt);
+  // v10.4: Disabled sensitivity reordering â€” it hoists calls BEFORE their
+  // 'local function' declarations, causing 'attempt to call a nil value'.
+  // Preserving original order keeps declaration-before-use semantics intact.
+  //
+  // Additionally: track locals declared as we walk, so a later call to a
+  // function declared earlier in the same top-level scope compiles safely,
+  // but a call to a function declared LATER falls through to passthrough.
+  const declaredSoFar = new Set(topLocals);
+  // Remove things that appear AFTER their first usage â€” start empty of body-declared items
+  // and re-add as we encounter them in order
+  const bodyLocalNames = new Set();
   for(const stmt of ast.body){
-    // v10.3: Also reject statements that reference unknown identifiers
-    // (locals from other scopes wrongly treated as globals â†’ nil at runtime)
-    if(compiledCount < MAX_VM_STATEMENTS && vmCanCompile(stmt) && !_refsUnknown(stmt)){
+    if(stmt.type === "LocalStatement" && stmt.variables){
+      for(const v of stmt.variables) if(v && v.name) bodyLocalNames.add(v.name);
+    } else if(stmt.type === "FunctionDeclaration" && stmt.identifier
+              && stmt.identifier.type === "Identifier"){
+      bodyLocalNames.add(stmt.identifier.name);
+    } else if(stmt.type === "AssignmentStatement" && stmt.variables){
+      for(const v of stmt.variables) if(v && v.type === "Identifier") bodyLocalNames.add(v.name);
+    }
+  }
+  // Remove body-declared names from declaredSoFar â€” they only become available
+  // as we walk past their declaration
+  for(const n of bodyLocalNames) declaredSoFar.delete(n);
+  // Keep ROBLOX_GLOBALS + executor globals always available
+  for(const g of ROBLOX_GLOBALS) declaredSoFar.add(g);
+  const EXECUTOR_GLOBALS2 = ["hookfunction","hookmetamethod","getgenv","getrenv","getsenv","getreg",
+    "getconnections","getgc","getinstances","getnilinstances","getscripts","getloadedmodules",
+    "getcallingscript","getrawmetatable","setrawmetatable","checkcaller","isreadonly","setreadonly",
+    "iscclosure","islclosure","newcclosure","identifyexecutor","lz4compress","lz4decompress",
+    "queue_on_teleport","syn","fluxus","krnl","delta","request","http_request","http",
+    "cloneref","gethui","getnamecallmethod","setnamecallmethod","isexecutorclosure"];
+  for(const g of EXECUTOR_GLOBALS2) declaredSoFar.add(g);
+
+  function _refsUndeclared(node){
+    if(!node || typeof node !== "object") return false;
+    if(Array.isArray(node)){
+      for(const x of node) if(_refsUndeclared(x)) return true;
+      return false;
+    }
+    if(node.type === "Identifier"){
+      return !declaredSoFar.has(node.name);
+    }
+    if(node.type === "FunctionDeclaration" || node.type === "FunctionExpression") return false;
+    for(const k of Object.keys(node)){
+      if(k === "type" || k === "loc" || k === "range") continue;
+      if(_refsUndeclared(node[k])) return true;
+    }
+    return false;
+  }
+
+  for(const stmt of ast.body){
+    // Check compile-ability BEFORE updating declaredSoFar with this statement's outputs
+    // (a statement's own RHS cannot reference its own LHS-being-declared)
+    const canCompile = compiledCount < MAX_VM_STATEMENTS
+                    && vmCanCompile(stmt)
+                    && !_refsUndeclared(stmt);
+    if(canCompile){
       vmCompileStmt(stmt, bc, consts, globals, OP);
       compiledCount++;
     } else {
       passthrough.push(stmt);
+    }
+    // NOW update declaredSoFar so subsequent statements can reference this decl
+    if(stmt.type === "LocalStatement" && stmt.variables){
+      for(const v of stmt.variables) if(v && v.name) declaredSoFar.add(v.name);
+    } else if(stmt.type === "FunctionDeclaration" && stmt.identifier
+              && stmt.identifier.type === "Identifier"){
+      declaredSoFar.add(stmt.identifier.name);
+    } else if(stmt.type === "AssignmentStatement" && stmt.variables){
+      for(const v of stmt.variables) if(v && v.type === "Identifier") declaredSoFar.add(v.name);
     }
   }
   if(compiledCount === 0) return null;
