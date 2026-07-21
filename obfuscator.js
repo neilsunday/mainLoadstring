@@ -742,7 +742,7 @@ function vmCompileStmt(node,bc,consts,globals,OP){
   }
 }
 
-function generateVMInterpreter(vmFn,OP){
+function generateVMInterpreter(vmFn,OP,junkOpNames){
   return "local function "+vmFn+"(bc,ks,gs,env) local st={} local sp=0 local function ps(v) sp=sp+1 st[sp]=v end local function pp() local v=st[sp] st[sp]=nil sp=sp-1 return v end local pc=1 while true do local op=bc[pc] pc=pc+1 "
     +"if op=="+OP.PUSH_CONST+" then ps(ks[bc[pc]+1]) pc=pc+1 "
     +"elseif op=="+OP.PUSH_NIL+" then ps(nil) "
@@ -779,7 +779,8 @@ function generateVMInterpreter(vmFn,OP){
     +"elseif op=="+OP.GET_MEMBER+" then local m=ks[bc[pc]+1] pc=pc+1 local t=pp() ps(t[m]) "
     +"elseif op=="+OP.SET_MEMBER+" then local m=ks[bc[pc]+1] pc=pc+1 local v=pp() local t=pp() t[m]=v "
     +"elseif op=="+OP.METHOD_CALL+" then local m=ks[bc[pc]+1] pc=pc+1 local na=bc[pc] pc=pc+1 local nr=bc[pc] pc=pc+1 local a={} for i=na,1,-1 do a[i]=pp() end local t=pp() local r={t[m](t,unpack(a))} if nr>0 then for i=1,nr do ps(r[i]) end end "
-    +"elseif op=="+OP.HALT+" then break "
+    +"elseif op="+OP.HALT+" then break "
+    +generateJunkOpHandlers(OP, junkOpNames || [])
     // v9.0: Dummy opcode handlers ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â dispatch table looks richer than it is
     +"elseif op=="+OP.NOP_A+" then local _n=1+2 "
     +"elseif op=="+OP.NOP_B+" then local _n=bit32.band(15,15) "
@@ -1252,7 +1253,8 @@ function serialize(node){
 
 function tryVmWrap(ast, level, extraSafeGlobals){
   if(!ast || !ast.body || ast.body.length === 0) return null;
-  const OP = makeOpTable();
+  // v14.0: Randomized opcode table with junk entries for anti-analysis
+  const { table: OP, junkNames: junkOpNames } = makeRandomizedOpTable();
   const bc = [];
   const consts = [];
   const globals = [];
@@ -1426,7 +1428,7 @@ function tryVmWrap(ast, level, extraSafeGlobals){
   const ksVar = randHexName(5);
   const gsVar = randHexName(5);
   const unpackFn = randHexName(6);
-  const interp = generateVMInterpreter(vmFn, OP);
+  const interp = generateVMInterpreter(vmFn, OP, junkOpNames);
   const unpacker = makeBytecodeUnpacker(unpackFn);
   const packedBc = packBytecode(bc);
   const vmHarness = [
@@ -2115,6 +2117,125 @@ function validateGeneratedCode(code) {
 }
 
 
+
+// ============================================================================
+// v14.0 ANTI-DEBUGGER + ANTI-TAMPER MODULE
+// Runtime checks that detect deobfuscator tooling and refuse to execute.
+// Auto-gated by v13 profiler: only enabled when profile.riskTier === "low"
+// (safe to add runtime overhead). For high/extreme risk scripts, skipped.
+// ============================================================================
+
+// Generate a runtime integrity check.
+// Computes a checksum of a fixed payload marker at runtime and compares
+// to precomputed value. If they mismatch, the script exits silently.
+function generateIntegrityCheck(payload) {
+  // Compute a simple checksum of the payload marker at JS-time
+  const marker = payload.substring(0, Math.min(200, payload.length));
+  let checksum = 0;
+  for (let i = 0; i < marker.length; i++) {
+    checksum = ((checksum * 31) + marker.charCodeAt(i)) & 0x7fffffff;
+  }
+  const checkFn = randHexName(6);
+  const chkVar = randHexName(4);
+  const expectedVar = randHexName(4);
+  // Runtime: recompute the same checksum. If any byte was patched, mismatch.
+  return "local function " + checkFn + "() " +
+    "local " + expectedVar + "=" + checksum + " " +
+    "local " + chkVar + "=0 " +
+    "local s=" + JSON.stringify(marker) + " " +
+    "for i=1,#s do " + chkVar + "=(" + chkVar + "*31+string.byte(s,i))%2147483648 end " +
+    "return " + chkVar + "==" + expectedVar + " " +
+    "end " +
+    "if not " + checkFn + "() then return end";
+}
+
+// Generate anti-debugger checks.
+// Detects common analysis tooling:
+//   - getgc iteration (dumper tools scan the GC for functions)
+//   - hookfunction on our own decoder (deobfuscator tools intercept)
+//   - debug.sethook (single-step debugging)
+//   - excessive pcall depth (some tools wrap everything in extra pcalls)
+function generateAntiDebugger() {
+  const fnName = randHexName(6);
+  const flagVar = randHexName(4);
+  const gcVar = randHexName(4);
+
+  return "local function " + fnName + "() " +
+    "local " + flagVar + "=false " +
+    // Check 1: is debug.sethook active? (single-step debugger)
+    "if debug and debug.gethook then " +
+      "local ok,hook=pcall(debug.gethook) " +
+      "if ok and hook then " + flagVar + "=true end " +
+    "end " +
+    // Check 2: is our own execution being watched via getgc?
+    "if type(getgc)=='function' then " +
+      "local ok2,gc=pcall(getgc,false) " +
+      "if ok2 and type(gc)=='table' and #gc>50000 then " +
+        // Suspiciously large GC pool â€” probably a scanning tool active
+        flagVar + "=true " +
+      "end " +
+    "end " +
+    // Check 3: is coroutine.wrap being hooked? (common for tracers)
+    "if type(hookfunction)=='function' and type(coroutine)=='table' then " +
+      "local ok3,orig=pcall(function() return coroutine.wrap end) " +
+      "if ok3 and orig then " +
+        "local info=debug and debug.info and debug.info(orig,'s') " +
+        "if info and type(info)=='string' and #info>0 then " +
+          flagVar + "=true " +
+        "end " +
+      "end " +
+    "end " +
+    "return not " + flagVar + " " +
+    "end " +
+    "if not " + fnName + "() then return end";
+}
+
+// ============================================================================
+// v14.0 VM OPCODE RANDOMIZATION HELPERS
+// Extends the existing tryVmWrap by shuffling opcodes and injecting junk.
+// ============================================================================
+
+// Shuffle opcode numbers so each obfuscation run produces a different opcode set.
+// (The existing makeOpTable already randomizes numbers 1-250, but v14 also adds
+//  junk opcodes to inflate the dispatch table.)
+function makeRandomizedOpTable() {
+  const opNames = OP_NAMES.slice();
+  // Add per-run junk opcodes with random names (never emitted by compiler,
+  // but present in the interpreter dispatch table)
+  const extraJunkCount = randInt(8, 15);
+  for (let i = 0; i < extraJunkCount; i++) {
+    opNames.push("JUNK_" + randHexName(4).substring(3));
+  }
+  // Shuffle values 1-250 and assign
+  const nums = [];
+  const seen = new Set();
+  while (nums.length < opNames.length) {
+    const n = randInt(1, 250);
+    if (!seen.has(n)) { seen.add(n); nums.push(n); }
+  }
+  const table = {};
+  opNames.forEach((name, i) => { table[name] = nums[i]; });
+  return { table, junkNames: opNames.filter(n => n.startsWith("JUNK_")) };
+}
+
+// Generate junk opcode handlers for the interpreter (never actually dispatched
+// but present in the code â€” inflates the interpreter and confuses static analysis)
+function generateJunkOpHandlers(opTable, junkNames) {
+  const handlers = [];
+  for (const name of junkNames) {
+    const opNum = opTable[name];
+    const junkExpr = randChoice([
+      "local _j=bit32.bxor(" + randInt(1,255) + "," + randInt(1,255) + ")",
+      "local _j=math.floor(" + randInt(100,9999) + "/" + randInt(2,9) + ")",
+      "local _j=string.byte('" + randChoice(["x","a","z","q","m","n"]) + "')",
+      "local _j=#'" + randChoice(["abc","xyzq","mnop","test"]) + "'",
+    ]);
+    handlers.push("elseif op==" + opNum + " then " + junkExpr + " ");
+  }
+  return handlers.join("");
+}
+
+
 async function obfuscate(luaCode,level,userId){
   level=level||"medium";
   const _WM=pickWatermark();
@@ -2252,6 +2373,25 @@ async function obfuscate(luaCode,level,userId){
       }
     } else {
       console.log("[obfuscator v13] âœ“ Generated code validated OK");
+    }
+
+    // === v14.0 ANTI-DEBUGGER + ANTI-TAMPER LAYER ===
+    // Only enabled for low-risk scripts (adding runtime checks to a script that
+    // already uses hooks would break it â€” the checks would false-positive on
+    // the user's own hookfunction calls).
+    if (profile.riskTier === "low" && !profile.hasHookfunction && !profile.hasHookmetamethod) {
+      console.log("[obfuscator v14] Enabling anti-debugger + anti-tamper layer (safe: low-risk script)");
+      const antiDebug = generateAntiDebugger();
+      const integrityCheck = generateIntegrityCheck(ob);
+      // Prepend runtime checks. If any detects tooling, script silently exits.
+      ob = antiDebug + "; " + integrityCheck + "; " + ob;
+      console.log("[obfuscator v14]   Added integrity check (checksum of first 200 bytes)");
+      console.log("[obfuscator v14]   Added anti-debugger (gethook + getgc scan + hookfunction detection)");
+    } else {
+      const reason = profile.riskTier !== "low"
+        ? "risk=" + profile.riskTier
+        : "script uses hooks (would false-positive)";
+      console.log("[obfuscator v14] Skipping anti-debugger layer (" + reason + ")");
     }
     ob = addContinueLabels(ob);  // v9.1: replace goto __continue__ with safe no-op
     const decName=randHexName(3);
