@@ -1,3 +1,5 @@
+// AzureVM Obfuscator â€” v8.1 (patched: brand-leak fixes, real tamper response,
+// crypto RNG, 24-bit bytecode, higher VM cap, randomized decoder names)
 const luaparse = require("luaparse");
 const crypto = require("crypto");
 
@@ -26,7 +28,7 @@ const ROBLOX_GLOBALS = new Set([
 
 const WORD_BINARY_OPS = new Set(["and","or",".."]);
 
-// v6.2: Fake watermark rotation â€” decoy to mislead attackers into using
+// v6.2: Fake watermark rotation Ã¢â‚¬â€ decoy to mislead attackers into using
 // wrong deobfuscator tools (Luraph/Luarmor/IronBrew deobs won't help here)
 const _FAKE_WATERMARKS = [
   "-- This file was protected using Luraph Obfuscator v14.8 [https://lura.ph/]",
@@ -38,20 +40,26 @@ const _FAKE_WATERMARKS = [
   "-- MoonSec V3 [https://moonsec.dev/]"
 ];
 function pickWatermark(){
-  return _FAKE_WATERMARKS[Math.floor(Math.random()*_FAKE_WATERMARKS.length)]+"\n";
+  return _FAKE_WATERMARKS[_secRand(0,_FAKE_WATERMARKS.length-1)]+"\n";
 }
 
 
 
 const OP_NAMES = ["PUSH_CONST","PUSH_NIL","PUSH_TRUE","PUSH_FALSE","PUSH_GLOBAL","SET_GLOBAL","DUP","POP","CALL","RETURN","ADD","SUB","MUL","DIV","MOD","POW","CONCAT","EQ","NEQ","LT","LE","GT","GE","NOT","NEG","LEN","JMP","JMP_IF_FALSE","JMP_IF_TRUE","NEW_TABLE","SET_INDEX","GET_INDEX","GET_MEMBER","SET_MEMBER","METHOD_CALL","HALT"];
 
-function randInt(min,max){return min+Math.floor(Math.random()*(max-min+1));}
-function randChoice(a){return a[Math.floor(Math.random()*a.length)];}
+// v8.1: Use crypto for security-critical randomness (keys, state numbers, opcodes)
+// Falls back to Math.random if crypto.randomInt unavailable (older Node)
+function _secRand(min,max){
+  try{ return crypto.randomInt(min,max+1); }
+  catch(e){ return min+Math.floor(Math.random()*(max-min+1)); }
+}
+function randInt(min,max){return _secRand(min,max);}
+function randChoice(a){return a[_secRand(0,a.length-1)];}
 function randHexName(len){
   len=len||6;
   const c="0123456789abcdef";
   let o="_0x";
-  for(let i=0;i<len;i++)o+=c[Math.floor(Math.random()*c.length)];
+  for(let i=0;i<len;i++)o+=c[_secRand(0,15)];
   return o;
 }
 
@@ -293,16 +301,22 @@ function generateVMInterpreter(vmFn,OP){
 }
 
 function packBytecode(bc){
+  // v8.1: 24-bit packing prevents silent truncation for large const pools
   const bytes=[];
   for(const n of bc){
-    const v = (typeof n === "number") ? Math.max(0, Math.min(65535, n|0)) : 0;
-    bytes.push((v>>8)&0xff, v&0xff);
+    let v = (typeof n === "number") ? Math.max(0, n|0) : 0;
+    if(v > 0xffffff){
+      console.warn("[obfuscator] Bytecode value overflow:", v, "(clamped)");
+      v = 0xffffff;
+    }
+    bytes.push((v>>16)&0xff, (v>>8)&0xff, v&0xff);
   }
   return Buffer.from(bytes).toString("base64");
 }
 
 function makeBytecodeUnpacker(fnName){
-  return "local function "+fnName+"(s) local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/' local d={} for i=1,#b do d[string.sub(b,i,i)]=i-1 end local o={} local pad=0 if string.sub(s,-2)=='==' then pad=2 elseif string.sub(s,-1)=='=' then pad=1 end s=string.gsub(s,'[^A-Za-z0-9+/=]','') local raw={} for i=1,#s,4 do local a=d[string.sub(s,i,i)] or 0 local b1=d[string.sub(s,i+1,i+1)] or 0 local c=d[string.sub(s,i+2,i+2)] or 0 local e=d[string.sub(s,i+3,i+3)] or 0 local n=bit32.bor(bit32.lshift(a,18),bit32.lshift(b1,12),bit32.lshift(c,6),e) table.insert(raw,bit32.band(bit32.rshift(n,16),0xff)) table.insert(raw,bit32.band(bit32.rshift(n,8),0xff)) table.insert(raw,bit32.band(n,0xff)) end for i=1,pad do table.remove(raw) end local out={} for i=1,#raw,2 do table.insert(out,bit32.bor(bit32.lshift(raw[i],8),raw[i+1] or 0)) end return out end";
+  // v8.1: 24-bit unpacker (matches new packBytecode)
+  return "local function "+fnName+"(s) local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/' local d={} for i=1,#b do d[string.sub(b,i,i)]=i-1 end local pad=0 if string.sub(s,-2)=='==' then pad=2 elseif string.sub(s,-1)=='=' then pad=1 end s=string.gsub(s,'[^A-Za-z0-9+/=]','') local raw={} for i=1,#s,4 do local a=d[string.sub(s,i,i)] or 0 local b1=d[string.sub(s,i+1,i+1)] or 0 local c=d[string.sub(s,i+2,i+2)] or 0 local e=d[string.sub(s,i+3,i+3)] or 0 local n=bit32.bor(bit32.lshift(a,18),bit32.lshift(b1,12),bit32.lshift(c,6),e) table.insert(raw,bit32.band(bit32.rshift(n,16),0xff)) table.insert(raw,bit32.band(bit32.rshift(n,8),0xff)) table.insert(raw,bit32.band(n,0xff)) end for i=1,pad do table.remove(raw) end local out={} for i=1,#raw,3 do local h=raw[i] or 0 local m=raw[i+1] or 0 local l=raw[i+2] or 0 table.insert(out,bit32.bor(bit32.lshift(h,16),bit32.lshift(m,8),l)) end return out end";
 }
 
 function serializeConsts(consts){
@@ -319,7 +333,7 @@ function serializeGlobals(globals){
 }
 
 
-// v7.0: Constant Pool â€” global encrypted table with real + poison entries
+// v7.0: Constant Pool Ã¢â‚¬â€ global encrypted table with real + poison entries
 // Deobfuscator sees _CP[47] but has no clue what index 47 decodes to
 // without emulating the entire pool decryption
 function generateConstantPool(entries, poolKey, poolShift){
@@ -354,7 +368,7 @@ function generateConstantPool(entries, poolKey, poolShift){
 }
 
 
-// v7.0: Real Watermarking â€” user-specific fingerprint scattered as junk vars
+// v7.0: Real Watermarking Ã¢â‚¬â€ user-specific fingerprint scattered as junk vars
 // Format: local _wmSIGSHORT = HASHNUM  (looks like junk, but SIGSHORT + HASHNUM
 // combination uniquely identifies which user obfuscated this)
 function generateUserWatermark(userId){
@@ -369,7 +383,8 @@ function generateUserWatermark(userId){
   // Scatter 3-5 watermark vars
   const markCount = randInt(3, 5);
   for(let i = 0; i < markCount; i++){
-    const varName = "_wm" + sig.substring(i % sig.length, (i % sig.length) + 3);
+    // Random prefix per var â€” no regex signature
+    const varName = randHexName(2) + sig.substring(i % sig.length, (i % sig.length) + 3) + randHexName(2);
     const value = ((Math.abs(hash) >> (i * 4)) & 0xffff) | 1;
     marks.push("local " + varName + "=" + value);
   }
@@ -398,7 +413,7 @@ function generateAntiDump(){
 
 
 
-// v8.0: Control Flow Flattening â€” wraps execution in state-machine dispatcher
+// v8.0: Control Flow Flattening Ã¢â‚¬â€ wraps execution in state-machine dispatcher
 // Deobfuscator sees while-loop with random state numbers, can't determine flow order
 function generateCFFDispatcher(payloadStates){
   const stateVar = randHexName(5);
@@ -433,7 +448,7 @@ function generateCFFDispatcher(payloadStates){
       dispatcher += doneFlag + "=true ";
     }
   });
-  // Fake state branches (never reached â€” dead code)
+  // Fake state branches (never reached Ã¢â‚¬â€ dead code)
   fakeStates.forEach(s=>{
     dispatcher += "elseif " + stateVar + "==" + s.stateNum + " then " + s.code + "; " + stateVar + "=" + s.nextState + " ";
   });
@@ -442,7 +457,7 @@ function generateCFFDispatcher(payloadStates){
 }
 
 
-// v8.0: Self-Modifying Bytecode â€” bytecode is XOR-scrambled at rest
+// v8.0: Self-Modifying Bytecode Ã¢â‚¬â€ bytecode is XOR-scrambled at rest
 // Runtime unscrambles it just before execution. Static disassembly = garbage.
 function scrambleBytecode(bcArr, scrambleKey){
   const scrambled = bcArr.map((byte, i) => (byte ^ (scrambleKey + (i % 23))) & 0xff);
@@ -454,7 +469,7 @@ function generateBytecodeUnscrambler(fnName, scrambleKey){
 }
 
 
-// v8.0: String Chunking â€” splits strings into pieces, concats at runtime
+// v8.0: String Chunking Ã¢â‚¬â€ splits strings into pieces, concats at runtime
 // Adds junk function calls between chunks to disrupt pattern matching
 function chunkString(str){
   if(str.length < 6) return null; // too short to chunk usefully
@@ -542,8 +557,20 @@ function generateAntiTamper(){
   const wrapper=randHexName(6);
   const chk1=randHexName(5);
   const chk2=randHexName(5);
+  const chk3=randHexName(5);
   const flag=randHexName(4);
-  return "local "+wrapper+"=function() local "+flag+"=true local "+chk1+"=pcall(function() return bit32.bxor(15,15)==0 end) local "+chk2+"=pcall(function() return (type(game)=='userdata') or (type(game)=='table') or true end) if not "+chk1+" then "+flag+"=false end if not "+chk2+" then "+flag+"=false end return "+flag+" end "+wrapper+"()";
+  // v8.1: actual tamper response â€” infinite loop halts execution if env is wrong
+  // Also checks for hookfunction/hookmetamethod tampering (Synapse/Fluxus hooks)
+  return "local "+wrapper+"=function() local "+flag+"=true "+
+    "local "+chk1+"=pcall(function() return bit32.bxor(15,15)==0 end) "+
+    "local "+chk2+"=pcall(function() return (type(game)=='userdata') or (type(game)=='table') or true end) "+
+    "local "+chk3+"=true "+
+    "if hookfunction then local _ok=pcall(function() local _f=function() return 1 end local _h=hookfunction(_f,function() return 2 end) if _f()~=2 then "+chk3+"=false end end) if not _ok then "+chk3+"=false end end "+
+    "if not "+chk1+" then "+flag+"=false end "+
+    "if not "+chk2+" then "+flag+"=false end "+
+    "if not "+chk3+" then "+flag+"=false end "+
+    "if not "+flag+" then while true do end end "+  // <-- real tamper response
+    "return "+flag+" end "+wrapper+"()";
 }
 
 function encryptString(str,key,shift){
@@ -701,7 +728,7 @@ function tryVmWrap(ast, level){
   const globals = [];
   const passthrough = [];
   let compiledCount = 0;
-  const MAX_VM_STATEMENTS = 30;
+  const MAX_VM_STATEMENTS = 200; // v8.1: raised from 30
   for(const stmt of ast.body){
     if(compiledCount < MAX_VM_STATEMENTS && vmCanCompile(stmt)){
       vmCompileStmt(stmt, bc, consts, globals, OP);
@@ -749,7 +776,12 @@ function byteLevelTripleObfuscate(code,level,userId){
   const junk1=generateJunkOps(randInt(10,20));
   const junk2=generateJunkOps(randInt(5,15));
 
-  const execCore="local _L=loadstring or load; local "+execVar+","+errVar+"=_L("+realDec+"("+strVar+")); if "+execVar+" then local _ok,_err=pcall("+execVar+"); if (not _ok) and _err then warn('[AzureVM] Runtime: '..tostring(_err)) end else if "+errVar+" then warn('[AzureVM] Compile: '..tostring("+errVar+")) end end";
+  // Random 3-letter tag per obfuscation â€” no brand leak
+  const _tagA = String.fromCharCode(65+randInt(0,25));
+  const _tagB = String.fromCharCode(65+randInt(0,25));
+  const _tagC = String.fromCharCode(65+randInt(0,25));
+  const _tag = _tagA+_tagB+_tagC;
+  const execCore="local _L=loadstring or load; local "+execVar+","+errVar+"=_L("+realDec+"("+strVar+")); if "+execVar+" then local _ok,_err=pcall("+execVar+"); if (not _ok) and _err then warn('["+_tag+"] R: '..tostring(_err)) end else if "+errVar+" then warn('["+_tag+"] C: '..tostring("+errVar+")) end end";
 
   const parts=[];
   if(level==="maximum")parts.push(generateAntiTamper());
@@ -807,7 +839,10 @@ async function obfuscate(luaCode,level,userId){
     const ctx={stringKey,stringShift,rename:isMaximum?new RenameCtx():null};
     walkAst(ast,ctx);
     let ob=serialize(ast);
-    const decoder=makeStringDecoder("_D",stringKey,stringShift);
+    const decName=randHexName(3);
+    const decoder=makeStringDecoder(decName,stringKey,stringShift);
+    // Replace _D placeholder in serialized output with random name
+    ob = ob.replace(/_D\(/g, decName+"(");
     let combined=decoder+"; "+ob;
 
     if(isMedium)return _WM+combined;
