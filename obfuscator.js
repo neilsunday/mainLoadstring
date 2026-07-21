@@ -1,4 +1,13 @@
-// AzureVM Obfuscator v12.0 - Phase 1 patched
+// AzureVM Obfuscator v13.0 - Phase 2 patched
+// Applied fixes (this batch):
+//   2A  Constant obfuscation in VM constants pool (encodeNumber on numeric consts)
+//   2B  Conservative string encryption re-enabled with reflection-safe whitelist
+//       - Skips: <4 or >800 chars, PascalCase, ALL_CAPS, __metatable, Roblox globals,
+//         rbx URIs, service/class/method/event names (200+ entries)
+//       - Skips string positions: obj["field"], {["k"]=v}, t["m"](), :"lit",
+//         GetService/FindFirstChild/WaitForChild/etc argument slots
+// Previous fixes (v12.0 Phase 1):
+//   P0.1  Fixed `const code` self-reference in obfuscate() main flow
 // Applied fixes:
 //   P0.1  Fixed `const code` self-reference in obfuscate() main flow
 //   P0.2  Fixed `effectiveIsMaximum` used-before-declared (TDZ ReferenceError)
@@ -866,9 +875,12 @@ function makeBytecodeUnpacker(fnName){
 }
 
 function serializeConsts(consts){
+  // v13.0 (2A): Numeric consts get math-expression obfuscation via encodeNumber.
+  // Strings stay as JSON literals here (they're already encrypted by walkAst
+  // BEFORE they reach the VM constants pool via 2B).
   const parts = consts.map(c=>{
     if(c.type==="s")return JSON.stringify(c.value);
-    if(c.type==="n")return String(c.value);
+    if(c.type==="n")return encodeNumber(c.value);
     return "nil";
   });
   return "{"+parts.join(",")+"}";
@@ -1144,6 +1156,92 @@ function makeStringDecoder(varName,key,shift){
 
 function bytesToLuaTable(bytes){return "{"+bytes.join(",")+"}";}
 
+// v13.0 (2B): Names/tokens that must NEVER be string-encrypted.
+// Encrypting these breaks Roblox reflection (GetService, FindFirstChild by name,
+// Enum lookups, remote event names, etc.).
+const NEVER_ENCRYPT_STRINGS = new Set([
+  // Roblox services (used by GetService(name))
+  "Players","ReplicatedStorage","ReplicatedFirst","ServerStorage","ServerScriptService",
+  "Workspace","Lighting","StarterGui","StarterPack","StarterPlayer","StarterPlayerScripts",
+  "StarterCharacterScripts","SoundService","Chat","TextChatService","Teams","Debris",
+  "TweenService","RunService","UserInputService","CoreGui","GuiService","ContextActionService",
+  "HttpService","DataStoreService","MessagingService","MemoryStoreService","PathfindingService",
+  "PhysicsService","CollectionService","MarketplaceService","TeleportService","PolicyService",
+  "LocalizationService","BadgeService","GamePassService","GroupService","FriendsService",
+  "SocialService","AnalyticsService","AssetService","InsertService","ContentProvider",
+  "TextService","VoiceChatService","Stats","LogService","VirtualUser","VirtualInputManager",
+  "HapticService","VRService","GuiService","NotificationService","AdService","OmniRecommendationsService",
+  // Common instance/class names used in FindFirstChild/WaitForChild by string
+  "Humanoid","HumanoidRootPart","Head","Torso","LeftArm","RightArm","LeftLeg","RightLeg",
+  "Character","Backpack","PlayerGui","PlayerScripts","Camera","Terrain","Baseplate",
+  "Animator","Animation","AnimationTrack","Sound","SoundGroup","ParticleEmitter",
+  "PointLight","SpotLight","SurfaceLight","BillboardGui","ScreenGui","SurfaceGui",
+  "TextLabel","TextButton","TextBox","ImageLabel","ImageButton","Frame","ScrollingFrame",
+  "UIListLayout","UIGridLayout","UIPadding","UICorner","UIStroke","UIGradient","UISizeConstraint",
+  "UIAspectRatioConstraint","LocalScript","Script","ModuleScript","Folder","Configuration",
+  "IntValue","StringValue","BoolValue","NumberValue","ObjectValue","Vector3Value","CFrameValue",
+  "Color3Value","BrickColorValue","RayValue","BindableEvent","BindableFunction","RemoteEvent",
+  "RemoteFunction","UnreliableRemoteEvent","Attachment","Motor6D","Weld","WeldConstraint",
+  "Part","MeshPart","UnionOperation","WedgePart","CornerWedgePart","TrussPart","SpawnLocation",
+  "Model","BasePart","Tool","HopperBin","Hint","Message","Decal","Texture","SelectionBox",
+  "Beam","Trail","Explosion","Fire","Smoke","Sparkles",
+  // Common method/property names used via string keys or reflection
+  "Parent","Name","ClassName","Value","Text","Position","Size","Anchored","CanCollide",
+  "Transparency","Color","Material","BrickColor","Reflectance","Visible","Active","Enabled",
+  "Locked","CFrame","Orientation","Rotation","Origin","Direction","LookVector","RightVector",
+  "UpVector","Velocity","AssemblyLinearVelocity","AssemblyAngularVelocity","Mass",
+  // Enum categories
+  "Enum","EnumItem","KeyCode","UserInputType","MouseBehavior","HttpMethod","Material",
+  "NormalId","Axis","SortOrder","StartCorner","FillDirection","HorizontalAlignment",
+  "VerticalAlignment","EasingStyle","EasingDirection","PlaybackState","AspectType",
+  "SizeConstraint","ScaleType","Font","FontSize","TextXAlignment","TextYAlignment",
+  // Common event/callback names
+  "Touched","TouchEnded","Changed","AncestryChanged","ChildAdded","ChildRemoved",
+  "DescendantAdded","DescendantRemoving","Destroying","PlayerAdded","PlayerRemoving",
+  "CharacterAdded","CharacterRemoving","CharacterAppearanceLoaded","Died","HealthChanged",
+  "Running","Jumping","Climbing","Seated","StateChanged","FreeFalling","GettingUp",
+  "MouseButton1Click","MouseButton2Click","MouseButton1Down","MouseButton1Up",
+  "MouseEnter","MouseLeave","MouseMoved","InputBegan","InputEnded","InputChanged",
+  "OnServerEvent","OnClientEvent","OnServerInvoke","OnClientInvoke","OnInvoke","Event",
+  "OnServerEvent","AttributeChanged","Attribute",
+  // Common method names (used with : call syntax - normally we skip via context,
+  // but include as belt-and-suspenders)
+  "GetService","FindFirstChild","WaitForChild","GetChildren","GetDescendants","IsA",
+  "IsDescendantOf","FindFirstAncestorOfClass","FindFirstAncestor","FindFirstChildOfClass",
+  "FindFirstChildWhichIsA","Destroy","Clone","Kill","Connect","Disconnect","Wait","Fire",
+  "FireServer","FireClient","FireAllClients","InvokeServer","InvokeClient","GetAttribute",
+  "SetAttribute","GetAttributes","AddTag","RemoveTag","GetTags","HasTag",
+  "GetPropertyChangedSignal","ClearAllChildren","BreakJoints","MakeJoints","MoveTo",
+  "PivotTo","GetPivot","SetPrimaryPartCFrame","GetPrimaryPartCFrame","GetBoundingBox",
+  "GetModelCFrame","GetModelSize","GetExtentsSize","LoadCharacter","LoadAnimation",
+  "Play","Stop","Pause","Resume","AdjustSpeed","AdjustWeight","GetTimeOfDay",
+  "HttpGet","HttpGetAsync","HttpPost","HttpPostAsync","GetAsync","SetAsync",
+  "UpdateAsync","IncrementAsync","RemoveAsync","GetOrderedDataStore","GetDataStore",
+  "PromptPurchase","PromptGamePassPurchase","UserOwnsGamePassAsync","GetProductInfo",
+  "TeleportAsync","Teleport","TeleportToPlaceInstance","GetPlaceIdFromScript",
+  // Http headers / MIME
+  "Content-Type","application/json","text/plain","Accept","User-Agent","Authorization",
+  // Rich text tokens
+  "rbxassetid","rbxthumb","rbxasset","http","https",
+]);
+
+// v13.0 (2B): Decide if a StringLiteral is safe to encrypt.
+// Returns true = safe to encrypt, false = keep literal.
+function _shouldEncryptString(value){
+  if(typeof value !== "string") return false;
+  const len = value.length;
+  if(len < 4 || len > 800) return false;                // too short / too long
+  if(NEVER_ENCRYPT_STRINGS.has(value)) return false;    // known reflection name
+  if(ROBLOX_GLOBALS.has(value)) return false;           // Lua/Roblox global name
+  if(value.startsWith("__")) return false;              // metatable convention
+  if(/^[A-Z][A-Za-z0-9]*$/.test(value)) return false;   // PascalCase (likely class/enum)
+  if(/^[A-Z0-9_]+$/.test(value)) return false;          // ALL_CAPS (likely constant/enum)
+  if(/^rbxassetid:\/\//.test(value)) return false;      // asset URI - engine parses
+  if(/^rbxthumb:\/\//.test(value)) return false;
+  if(/^rbxasset:\/\//.test(value)) return false;
+  return true;
+}
+
 function encodeNumber(n){
   if(!Number.isInteger(n)||n<0||n>200000)return String(n);
   const v=randInt(0,5);
@@ -1228,9 +1326,83 @@ class RenameCtx{
 function walkAst(node,ctx){
   if(!node||typeof node!=="object")return;
 
+  // v13.0 (2B): Lazy-init the string-encrypt skip set for this walk.
+  if(ctx && !ctx._skipStr) ctx._skipStr = new WeakSet();
+
   if(node.type==="NumericLiteral"&&typeof node.value==="number"){
     node.__obf={type:"num",expr:encodeNumber(node.value)};
     return;
+  }
+
+  // v13.0 (2B): Conservative string encryption.
+  // Only encrypt if this string node is NOT flagged as "skip" by its parent
+  // AND passes the content filter.
+  if(node.type==="StringLiteral" && typeof node.value === "string"
+     && ctx && ctx.stringKey != null && !ctx._skipStr.has(node)){
+    if(_shouldEncryptString(node.value)){
+      const bytes = encryptString(node.value, ctx.stringKey, ctx.stringShift);
+      node.__obf = {type:"str", bytes};
+    }
+    return; // don't descend into StringLiteral children (there are none)
+  }
+
+  // v13.0 (2B): Mark unsafe string positions on children BEFORE recursing.
+  // These are AST positions where the string is used as a name/key that
+  // Lua evaluates at parse time, not at runtime.
+  if(ctx && ctx._skipStr){
+    // obj:MethodName(args) - the identifier after ':' is a name lookup
+    if(node.type==="MemberExpression" && node.indexer===":" && node.identifier){
+      // identifier is Identifier, not StringLiteral, so no marking needed
+    }
+    // obj["field"] - if index is a StringLiteral, it's a name lookup at runtime;
+    // Roblox often uses this for property/child access. Keep it literal so
+    // executor's __index metamethod can resolve without decrypting first.
+    if(node.type==="IndexExpression" && node.index
+       && node.index.type==="StringLiteral"){
+      ctx._skipStr.add(node.index);
+    }
+    // {["field"]=value} in table constructors - same reason as above
+    if(node.type==="TableKeyString" && node.key
+       && node.key.type==="StringLiteral"){
+      ctx._skipStr.add(node.key);
+    }
+    // t["MethodName"](args) call - the base of a CallExpression whose
+    // callee resolves via string index should also stay literal
+    if(node.type==="CallExpression" && node.base
+       && node.base.type==="IndexExpression" && node.base.index
+       && node.base.index.type==="StringLiteral"){
+      ctx._skipStr.add(node.base.index);
+    }
+    // StringCallExpression: myFn"literal" - the argument is passed as string
+    if(node.type==="StringCallExpression" && node.argument
+       && node.argument.type==="StringLiteral"){
+      ctx._skipStr.add(node.argument);
+    }
+    // Function call with first arg being GetService/FindFirstChild-style name
+    // (extra safety - these must survive as literal string for reflection)
+    if(node.type==="CallExpression" && node.base){
+      const calleeName = _getCalleeName(node.base);
+      if(calleeName && (
+           calleeName === "GetService" ||
+           calleeName === "FindFirstChild" ||
+           calleeName === "WaitForChild" ||
+           calleeName === "FindFirstChildOfClass" ||
+           calleeName === "FindFirstChildWhichIsA" ||
+           calleeName === "FindFirstAncestorOfClass" ||
+           calleeName === "FindFirstAncestor" ||
+           calleeName === "IsA" ||
+           calleeName === "GetAttribute" ||
+           calleeName === "SetAttribute" ||
+           calleeName === "GetPropertyChangedSignal" ||
+           calleeName === "new"  // Instance.new("Part") - class name must be literal
+      )){
+        if(Array.isArray(node.arguments)){
+          for(const arg of node.arguments){
+            if(arg && arg.type === "StringLiteral") ctx._skipStr.add(arg);
+          }
+        }
+      }
+    }
   }
 
   // v15.0: Scope management for function/loop bodies
