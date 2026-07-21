@@ -1090,9 +1090,17 @@ function encodeNumber(n){
 }
 
 class RenameCtx{
-  constructor(){this.map=new Map();this.counter=0;}
+  constructor(externalSet){
+    this.map=new Map();
+    this.counter=0;
+    // v11.3: extra whitelist of identifiers this script depends on but doesn't declare.
+    // These are auto-detected from the AST â€” filesystem calls, executor globals,
+    // Roblox datatypes, anything the runtime provides.
+    this.externals = externalSet || new Set();
+  }
   rename(name){
     if(ROBLOX_GLOBALS.has(name))return name;
+    if(this.externals.has(name))return name;  // v11.3: auto-detected externals
     if(this.map.has(name))return this.map.get(name);
     const n=randHexName(6)+"_"+this.counter.toString(16);
     this.counter++;
@@ -1215,7 +1223,7 @@ function serialize(node){
   }
 }
 
-function tryVmWrap(ast, level){
+function tryVmWrap(ast, level, extraSafeGlobals){
   if(!ast || !ast.body || ast.body.length === 0) return null;
   const OP = makeOpTable();
   const bc = [];
@@ -1338,6 +1346,10 @@ function tryVmWrap(ast, level){
     "queue_on_teleport","syn","fluxus","krnl","delta","request","http_request","http",
     "cloneref","gethui","getnamecallmethod","setnamecallmethod","isexecutorclosure"];
   for(const g of EXTRA_SAFE) SAFE_GLOBALS.add(g);
+  // v11.3: fold in the auto-detected externals from pre-analysis
+  if(extraSafeGlobals && extraSafeGlobals.forEach){
+    extraSafeGlobals.forEach(g => SAFE_GLOBALS.add(g));
+  }
 
   function _refsUndeclared(node){
     if(!node || typeof node !== "object") return false;
@@ -1546,10 +1558,13 @@ function preAnalyze(rawCode) {
   }
 
   const symbols = buildSymbolTable(ast);
+  const externsInfo = collectExternalIdentifiers(ast);
   report.stats.declarations = symbols.declarations.length;
   report.stats.forwardRefs = symbols.forwardRefs.length;
   report.stats.tableFieldAssigns = symbols.tableFieldAssigns.length;
   report.stats.methodCalls = symbols.methodCallCount;
+  report.stats.externalIdentifiers = externsInfo.externals.size;
+  report.externals = externsInfo.externals;
 
   if (symbols.forwardRefs.length > 0) {
     report.warnings.push(
@@ -1641,6 +1656,88 @@ function buildSymbolTable(ast) {
   return { declarations, declLine, forwardRefs, tableFieldAssigns, methodCallCount };
 }
 
+// v11.3: Walk the AST and collect EVERY Identifier that's referenced but never
+// declared in ANY scope. These are the script's external dependencies â€” must
+// be added to the safe-rename whitelist so obfuscation doesn't nil them out.
+function collectExternalIdentifiers(ast) {
+  // All names declared anywhere (any scope, any depth)
+  const allDeclared = new Set();
+  // All names referenced (used) anywhere
+  const allReferenced = new Set();
+
+  function collectDeclsIn(node) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(collectDeclsIn); return; }
+
+    // Local declarations
+    if (node.type === "LocalStatement" && node.variables) {
+      for (const v of node.variables) if (v && v.name) allDeclared.add(v.name);
+    }
+    // Function parameters
+    if ((node.type === "FunctionDeclaration" || node.type === "FunctionExpression") && node.parameters) {
+      for (const p of node.parameters) if (p && p.name) allDeclared.add(p.name);
+      // Also treat implicit 'self' as declared in method definitions
+      if (node.identifier && node.identifier.type === "MemberExpression" && node.identifier.indexer === ":") {
+        allDeclared.add("self");
+      }
+    }
+    // Function names (local function foo, function tbl.foo)
+    if (node.type === "FunctionDeclaration" && node.identifier) {
+      if (node.identifier.type === "Identifier") {
+        allDeclared.add(node.identifier.name);
+      }
+    }
+    // for i = 1, n do  -> declares i
+    if (node.type === "ForNumericStatement" && node.variable) {
+      if (node.variable.name) allDeclared.add(node.variable.name);
+    }
+    // for k, v in pairs(t) do -> declares k, v
+    if (node.type === "ForGenericStatement" && node.variables) {
+      for (const v of node.variables) if (v && v.name) allDeclared.add(v.name);
+    }
+    // Global assignments that create new globals: foo = ...
+    if (node.type === "AssignmentStatement" && node.variables) {
+      for (const v of node.variables) {
+        if (v && v.type === "Identifier") allDeclared.add(v.name);
+      }
+    }
+
+    for (const k of Object.keys(node)) {
+      if (k === "loc" || k === "range" || k === "type") continue;
+      collectDeclsIn(node[k]);
+    }
+  }
+
+  function collectRefsIn(node) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(collectRefsIn); return; }
+
+    // Any bare Identifier is a reference â€” but skip MemberExpression's .identifier
+    // (that's a field name, not a variable reference)
+    if (node.type === "Identifier" && node.name) {
+      allReferenced.add(node.name);
+    }
+
+    for (const k of Object.keys(node)) {
+      if (k === "loc" || k === "range" || k === "type") continue;
+      // Skip the .identifier of MemberExpression â€” it's a field access, not a variable
+      if (node.type === "MemberExpression" && k === "identifier") continue;
+      collectRefsIn(node[k]);
+    }
+  }
+
+  collectDeclsIn(ast);
+  collectRefsIn(ast);
+
+  // External = referenced but not declared anywhere
+  const externals = new Set();
+  for (const name of allReferenced) {
+    if (!allDeclared.has(name)) externals.add(name);
+  }
+  return { externals, allDeclared, allReferenced };
+}
+
+
 
 async function obfuscate(luaCode,level,userId){
   level=level||"medium";
@@ -1668,11 +1765,18 @@ async function obfuscate(luaCode,level,userId){
       return _WM + aggressiveMinify(preprocess(luaCode));
     }
 
-    console.log("[obfuscator v11] Pre-analysis OK.",
+    console.log("[obfuscator v11.3] Pre-analysis OK.",
       "Decls:", analysis.stats.declarations,
       "| Forward refs:", analysis.stats.forwardRefs,
+      "| Externals:", analysis.stats.externalIdentifiers,
       "| Field assigns:", analysis.stats.tableFieldAssigns,
       "| Method calls:", analysis.stats.methodCalls);
+    // Log the first 15 external names so user sees what got auto-whitelisted
+    if(analysis.externals && analysis.externals.size > 0){
+      const preview = [...analysis.externals].slice(0, 15).join(", ");
+      const more = analysis.externals.size > 15 ? " (+"+(analysis.externals.size-15)+" more)" : "";
+      console.log("[obfuscator v11.3]   Auto-whitelisted externals:", preview + more);
+    }
     for (const w of analysis.warnings) console.log("[obfuscator v11]   " + w);
 
     const code = analysis.convertedCode;
@@ -1689,7 +1793,7 @@ async function obfuscate(luaCode,level,userId){
     // Attacker sees random opcodes + interpreter but no context on what runs
     let vmOuterHarness = "";
     if(isMaximum){
-      const vmResult = tryVmWrap(ast, level);
+      const vmResult = tryVmWrap(ast, level, analysis.externals);
       if(vmResult && vmResult.compiledCount > 0){
         vmOuterHarness = vmResult.vmHarness;
         ast.body = vmResult.passthrough;
@@ -1699,7 +1803,8 @@ async function obfuscate(luaCode,level,userId){
 
     const stringKey=randInt(30,230);
     const stringShift=randInt(0,10);
-    const ctx={stringKey,stringShift,rename:isMaximum?new RenameCtx():null};
+    // v11.3: Pass auto-detected external identifiers to RenameCtx so they aren't nil-renamed
+    const ctx={stringKey,stringShift,rename:isMaximum?new RenameCtx(analysis.externals):null};
     walkAst(ast,ctx);
     let ob=serialize(ast);
     ob = addContinueLabels(ob);  // v9.1: replace goto __continue__ with safe no-op
