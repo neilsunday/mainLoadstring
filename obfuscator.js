@@ -1,4 +1,4 @@
-// AzureVM Obfuscator â€” v9.4 (Phase 3 hotfix 4: strings protected BEFORE comment stripping)
+// AzureVM Obfuscator â€” v9.6 (Phase 3 hotfix 6: fixed block tracker â€” goto/label counts match)
 // Improvements over v8.1:
 //   1. Constants Pool with poison entries (was: unused/broken)
 //   2. Position + prev-byte dependent stream cipher (was: triple XOR only)
@@ -201,16 +201,17 @@ function preprocess(code){
 // v9.1: Convert Luau-specific syntax to plain Lua 5.1 so luaparse can handle it
 // Handles: compound assignments (+=, -=, *=, /=, ..=), continue statements, type annotations
 function luauToLua(code) {
-  // v9.4: Protect strings FIRST, then strip comments, then apply transforms.
-  // Bug fix: comments were stripped before strings, so '--' inside a string like
-  // Val.Text = '--' would be treated as a comment start, destroying the string.
+  // v9.5 fixes:
+  //   - Compound assignment precedence: wrap RHS in parens
+  //     Before: a += b or c   â†’  a = a + b or c   (WRONG: parses as (a+b) or c)
+  //     After:  a += b or c   â†’  a = a + (b or c) (correct)
+  //   - continue: convert to 'goto __continue_N__' and inject matching label before loop's 'end'
+  //     This preserves semantic behavior (actually skips iteration in Lua 5.3)
 
   const strings = [];
   let idx = 0;
 
-  // ---- Step 1: Protect strings first (BEFORE comment stripping) ----
-  // Use a character-by-character tokenizer instead of regex â€” this correctly handles
-  // all Lua string forms without confusion from '--' inside them.
+  // ---- Step 1: Protect strings first (character tokenizer, safest) ----
   let work = "";
   let i = 0;
   const len = code.length;
@@ -219,29 +220,25 @@ function luauToLua(code) {
     const c = code[i];
     const next = i + 1 < len ? code[i + 1] : "";
 
-    // Long-bracket comment: --[[ ... ]]  or  --[==[ ... ]==]
+    // Long-bracket comment
     if (c === "-" && next === "-") {
-      // Check if it's a long-bracket comment
       let j = i + 2;
       if (code[j] === "[") {
-        let level = 0;
-        let k = j + 1;
+        let level = 0, k = j + 1;
         while (code[k] === "=") { level++; k++; }
         if (code[k] === "[") {
-          // Long comment â€” skip to end
           const closer = "]" + "=".repeat(level) + "]";
           const endIdx = code.indexOf(closer, k + 1);
           if (endIdx > 0) { i = endIdx + closer.length; continue; }
-          i = len;
-          continue;
+          i = len; continue;
         }
       }
-      // Line comment â€” skip to newline
+      // Line comment
       while (i < len && code[i] !== "\n") i++;
       continue;
     }
 
-    // Long-bracket string: [[ ... ]] or [==[ ... ]==]
+    // Long-bracket string
     if (c === "[") {
       let level = 0, j = i + 1;
       while (code[j] === "=") { level++; j++; }
@@ -259,7 +256,7 @@ function luauToLua(code) {
       }
     }
 
-    // Regular string: " ... " or ' ... '
+    // Regular string
     if (c === '"' || c === "'") {
       const quote = c;
       let strStart = i;
@@ -278,7 +275,7 @@ function luauToLua(code) {
       continue;
     }
 
-    // Backtick string (Luau interp) - just preserve as-is by protecting
+    // Backtick string
     if (c === "`") {
       let strStart = i;
       i++;
@@ -302,20 +299,41 @@ function luauToLua(code) {
     i++;
   }
 
-  // ---- Step 2: Now apply transformations on comment-stripped, string-protected code ----
-
+  // ---- Step 2: Compound assignments with PRECEDENCE-SAFE wrapping ----
+  // Match: LHS op= REST_OF_EXPRESSION_UNTIL_STATEMENT_END
+  // Then rewrite: LHS = LHS op (RHS)
   const IDENT = "[A-Za-z_][A-Za-z0-9_]*";
   const CHAIN = IDENT + "(?:\\s*[.:]\\s*" + IDENT + "|\\s*\\[[^\\]]+\\])*";
+  // Match compound assignment and capture the entire RHS until end of line or ';'
+  const compoundRegex = new RegExp(
+    "(" + CHAIN + ")\\s*([+\\-*/%]|\\.\\.)=\\s*([^\\n;]+)",
+    "g"
+  );
+  work = work.replace(compoundRegex, (m, lhs, op, rhs) => {
+    // Wrap RHS in parens to preserve semantics: a += b or c  â†’  a = a + (b or c)
+    return lhs + " = " + lhs + " " + op + " (" + rhs.trim() + ")";
+  });
 
-  // Compound assignments: a += b  â†’  a = a + b
-  const compoundRegex = new RegExp("(" + CHAIN + ")\\s*([+\\-*/%]|\\.\\.)=\\s*", "g");
-  work = work.replace(compoundRegex, (m, lhs, op) => lhs + " = " + lhs + " " + op + " ");
+  // ---- Step 3: continue â†’ goto __continue_N__ + inject matching labels ----
+  // Strategy: assign a unique counter per loop, replace 'continue' inside with goto,
+  // then inject ::__continue_N__:: before the 'end' of each loop that has a continue.
+  //
+  // Since we can't easily track loop nesting with regex, use this approach:
+  //   1. Find each 'continue' occurrence
+  //   2. Walk BACKWARDS to find the nearest enclosing loop start (for/while/repeat)
+  //   3. Assign a unique label for that loop
+  //   4. Replace continue with goto __continue_N__
+  //   5. Inject ::__continue_N__:: before the matching 'end' or 'until'
+  //
+  // For simplicity + safety, we use a scan-based approach:
+  //   - Split into tokens conceptually via a simple state machine
+  //   - Track loop depth using keyword matching
+  //   - Assign labels per loop
 
-  // continue â†’ commented out (parse-safe no-op)
-  work = work.replace(/\bcontinue\b/g, "--[[continue]]");
+  work = injectContinueLabels(work);
 
-  // Type annotations (safe version â€” only in specific contexts)
-  // Rule 1: local x: Type = ...  â†’  local x = ...
+  // ---- Step 4: Type annotations (safe: only in specific contexts) ----
+  // Rule 1: local x: Type = ...
   work = work.replace(
     new RegExp("(\\blocal\\s+" + IDENT + "(?:\\s*,\\s*" + IDENT + ")*)\\s*:\\s*[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?(?:\\.[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?)*\\??", "g"),
     "$1"
@@ -330,24 +348,173 @@ function luauToLua(code) {
     return "(" + cleaned + ")";
   });
 
-  // Rule 3: return types  ): ReturnType
+  // Rule 3: return types
   work = work.replace(
     /(\))\s*:\s*[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?(?:\.[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?)*\??(?=\s*(?:\n|--|\bthen\b|\bdo\b|\breturn\b|\blocal\b|\bif\b|\bfor\b|\bwhile\b|\brepeat\b|\bend\b|;|$))/g,
     "$1"
   );
 
-  // Rule 4: type Foo = ...  â†’  (removed)
+  // Rule 4: type Foo = ...
   work = work.replace(/^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:<[^>]*>)?\s*=.*$/gm, "");
 
   // Rule 5: export type
   work = work.replace(/^\s*export\s+type\s+.*$/gm, "");
 
-  // ---- Step 3: Restore protected strings ----
+  // ---- Step 5: Restore protected strings ----
   for (const s of strings) {
     work = work.split(s.key).join(s.value);
   }
 
   return work;
+}
+
+// v9.6 helper: inject goto labels for continue statements
+// FIX: Every 'if' block also needs 'end' tracking; ambiguity resolved by
+// treating ALL 'end'-terminated constructs uniformly.
+function injectContinueLabels(code) {
+  if (code.indexOf("continue") < 0) return code;
+
+  const tokens = tokenizeForContinue(code);
+  const blockStack = [];
+  let labelCounter = 0;
+  const result = [];
+
+  for (let ti = 0; ti < tokens.length; ti++) {
+    const t = tokens[ti];
+
+    if (t.kind === "keyword") {
+      const kw = t.value;
+
+      // Opening block keywords â€” each pushes exactly ONE block
+      if (kw === "for" || kw === "while") {
+        blockStack.push({ type: "pending_loop", labelName: null, needsLabel: false, kw });
+      } else if (kw === "repeat") {
+        // 'repeat' opens a loop that closes with 'until' (NOT 'end')
+        blockStack.push({ type: "repeat_loop", labelName: null, needsLabel: false, kw });
+      } else if (kw === "function") {
+        blockStack.push({ type: "function", labelName: null, needsLabel: false, kw });
+      } else if (kw === "if") {
+        blockStack.push({ type: "if", labelName: null, needsLabel: false, kw });
+      } else if (kw === "do") {
+        // 'do' after 'for'/'while' = part of that loop's opener (don't push new block)
+        // 'do' standalone = do-block that also uses 'end'
+        const top = blockStack[blockStack.length - 1];
+        if (top && top.type === "pending_loop") {
+          top.type = "loop"; // promote to actual loop
+        } else {
+          blockStack.push({ type: "do", labelName: null, needsLabel: false, kw });
+        }
+      } else if (kw === "then") {
+        // 'then' is part of if/elseif clause â€” no block push
+        // But 'if X then' needs to open the if body; the block for 'if' was already pushed
+      } else if (kw === "elseif") {
+        // Continuation of if â€” no block change
+      } else if (kw === "else") {
+        // Continuation of if â€” no block change
+      } else if (kw === "end") {
+        // Close the topmost block (regardless of type: for/while/if/function/do)
+        const closing = blockStack.pop();
+        if (closing && closing.type === "loop" && closing.needsLabel) {
+          result.push({ kind: "raw", value: " ::" + closing.labelName + ":: " });
+        }
+        // Note: 'repeat' loops close with 'until', not 'end' â€” handled below
+      } else if (kw === "until") {
+        // Close a repeat_loop
+        // If the top block isn't a repeat_loop, we have a bug â€” but pop anyway to stay in sync
+        const closing = blockStack.pop();
+        if (closing && closing.type === "repeat_loop" && closing.needsLabel) {
+          // For 'repeat body until cond', the label goes BEFORE 'until'
+          result.push({ kind: "raw", value: " ::" + closing.labelName + ":: " });
+        }
+      } else if (kw === "continue") {
+        // Find topmost loop (regular or repeat)
+        let loopBlock = null;
+        for (let bi = blockStack.length - 1; bi >= 0; bi--) {
+          const b = blockStack[bi];
+          if (b.type === "loop" || b.type === "repeat_loop") {
+            loopBlock = b;
+            break;
+          }
+          // Stop searching if we hit a function boundary
+          if (b.type === "function") break;
+        }
+        if (loopBlock) {
+          if (!loopBlock.labelName) {
+            loopBlock.labelName = "__continue_" + (labelCounter++) + "__";
+            loopBlock.needsLabel = true;
+          }
+          result.push({ kind: "raw", value: "goto " + loopBlock.labelName });
+          continue;
+        } else {
+          // continue outside a loop â€” safe no-op
+          result.push({ kind: "raw", value: "--[[continue]]" });
+          continue;
+        }
+      }
+    }
+
+    result.push(t);
+  }
+
+  return result.map(t => t.value).join("");
+}
+
+// Simple tokenizer for continue-label injection
+// Splits into keywords (for/while/repeat/do/end/until/function/if/continue) and everything else
+function tokenizeForContinue(code) {
+  const tokens = [];
+  const keywords = new Set(["for","while","repeat","do","end","until","function","if","continue"]);
+  let i = 0;
+  const len = code.length;
+  let buffer = "";
+
+  const flushBuffer = () => {
+    if (buffer.length > 0) {
+      tokens.push({ kind: "text", value: buffer });
+      buffer = "";
+    }
+  };
+
+  while (i < len) {
+    const c = code[i];
+
+    // Skip inside string placeholder ___STR_N___
+    if (c === "_" && code.substring(i, i + 5) === "___ST") {
+      // Read until end of placeholder
+      const endIdx = code.indexOf("___", i + 5);
+      if (endIdx > 0) {
+        buffer += code.substring(i, endIdx + 3);
+        i = endIdx + 3;
+        continue;
+      }
+    }
+
+    // Identifier / keyword
+    if (/[a-zA-Z_]/.test(c)) {
+      let j = i;
+      while (j < len && /[a-zA-Z0-9_]/.test(code[j])) j++;
+      const word = code.substring(i, j);
+      if (keywords.has(word)) {
+        // Check word boundary â€” must not be preceded by identifier char
+        const prevChar = i > 0 ? code[i - 1] : " ";
+        if (!/[a-zA-Z0-9_]/.test(prevChar)) {
+          flushBuffer();
+          tokens.push({ kind: "keyword", value: word });
+          i = j;
+          continue;
+        }
+      }
+      buffer += word;
+      i = j;
+      continue;
+    }
+
+    buffer += c;
+    i++;
+  }
+
+  flushBuffer();
+  return tokens;
 }
 
 function aggressiveMinify(code){
@@ -913,42 +1080,8 @@ function serializeBlock(stmts){
 
 // v9.1: Add ::__continue__:: label at end of loop bodies so 'goto __continue__' works
 function addContinueLabels(luaCode) {
-  // Match: 'do BODY end' patterns after for/while/repeat and inject label before 'end'
-  // Simple approach: replace all ' end' with ' ::__continue__:: end' ONLY when there's a goto
-  if (luaCode.indexOf("__continue__") < 0) return luaCode;
-  // For every loop body, we want the label right before 'end'.
-  // Since we can't easily AST-track, use a heuristic: any 'end' that closes a for/while/repeat block
-  // gets a label. Safest: just ensure the label exists once per goto, using scope-agnostic injection.
-  // Solution: wrap ALL 'end' keywords with the label â€” Lua allows redundant labels? NO, only one per scope.
-  // Real fix: only inject before 'end' that closes a loop body containing the goto.
-  //
-  // Pragmatic solution: replace goto __continue__ with a small do-block that does nothing harmful:
-  // Replace 'goto __continue__' with a comment-out. This changes semantics but keeps compile working.
-  // BETTER: convert 'goto __continue__' â†’ nothing, and warn.
-  //
-  // Actually the cleanest fix: use Lua 5.3 goto properly. Every loop's 'end' should have a label just before it.
-  // Since we don't know which 'end' belongs to which loop, use this workaround:
-  // Replace each goto __continue__ with '(function() end)()' â€” a no-op function call that acts as continue-like skip only within pcall context.
-  // But that doesn't actually skip. The correct semantic requires the label.
-  //
-  // FINAL APPROACH: Since parsing already worked (goto is Lua 5.3), and the AST walker
-  // ignores label statements, we need to insert LabelStatement nodes into loop bodies.
-  // For now, the simpler hack: after serialization, do a regex replacement that adds the label
-  // right before 'end' keyword that follows a 'do ... goto __continue__'.
-  //
-  // Do a simple pass: find "goto __continue__" and ensure the enclosing loop has the label.
-  // The simplest correct-enough thing: replace ALL loop-closing 'end' with '::__continue__:: end'
-  // but Lua doesn't allow duplicate labels in same scope. Since each loop is its own scope, this works.
-  //
-  // Match "do <body> end", "for ... do <body> end", "while ... do <body> end", "repeat <body> until"
-  // For a heuristic that's usually right: any 'end' preceded by content that contains 'goto __continue__' gets the label.
-  // Too complex for regex; simpler: append the label to every 'end' universally â€” but duplicate labels error.
-  //
-  // Simplest working solution: replace 'goto __continue__' with a Lua no-op that's semantically 
-  // acceptable when the script would have used continue: skip to next iteration via a marker.
-  // Use: 'if true then end' as inline no-op (compiles fine, does nothing).
-  // This means the script won't actually 'continue' but at least it will RUN.
-  return luaCode.replace(/goto __continue__/g, "if(true)then end");
+  // v9.5: no-op â€” continue labels are now injected in luauToLua's injectContinueLabels
+  return luaCode;
 }
 
 function serializeBinary(node){
