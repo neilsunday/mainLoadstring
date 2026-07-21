@@ -1416,9 +1416,8 @@ function byteLevelTripleObfuscate(code,level,userId){
       "local ok_dec,src=pcall("+realDec+","+strVar+") "+
       "if not ok_dec then warn('[OBF] decoder threw:', src) return end "+
       "if type(src)~='string' then warn('[OBF] decoder returned non-string:', type(src)) return end "+
-      "local ok,compiled=pcall(_L,src) "+
-      "if not ok then warn('[OBF] loadstring failed:', compiled) return end "+
-      "if type(compiled)~='function' then warn('[OBF] loadstring returned:', type(compiled)) return end "+
+      "local compiled,lerr=_L(src) "+
+      "if type(compiled)~='function' then warn('[OBF] loadstring failed. err=', lerr, 'srcLen=', #src, 'srcHead=', string.sub(src,1,80)) return end "+
       "local ok_run,run_err=xpcall(compiled, function(e) return tostring(e)..'\\n'..debug.traceback() end) "+
       "if not ok_run then warn('[OBF] payload runtime error:', run_err) end "+
     "end "+
@@ -1441,7 +1440,7 @@ function byteLevelTripleObfuscate(code,level,userId){
 async function obfuscateSingle(luaCode,level,userId){
   level=level||"medium";
   const _WM=pickWatermark();
-  const _DIAG="-- [OBF v12.0 patched: auto-split + debug loader + no fake watermark]\n";
+  const _DIAG="-- [OBF v13.0 patched: auto-split + verbose error capture]\n";
   try{
     let code=preprocess(luaCode);
     // v9.1: Preprocess Luau-specific syntax so luaparse can handle Roblox scripts
@@ -1589,7 +1588,7 @@ function _buildMultiPartLoader(chunks){
   // each one in order. We use a shared getLoader() and a simple sequential runner
   // with warn() on any failure â€” identical error visibility to the single-chunk loader.
   const parts = [];
-  parts.push("-- [OBF v12.0 multi-part loader â€” " + chunks.length + " chunks]");
+  parts.push("-- [OBF v13.0 multi-part loader â€” " + chunks.length + " chunks]");
   parts.push([
     "local function __obf_getload()",
     "  local ok,fn = pcall(function()",
@@ -1620,11 +1619,9 @@ function _buildMultiPartLoader(chunks){
   parts.push([
     "for __obf_i = 1, #__obf_chunks do",
     "  local __obf_src = __obf_chunks[__obf_i]",
-    "  local __obf_ok, __obf_fn = pcall(__obf_L, __obf_src)",
-    "  if not __obf_ok then",
-    "    warn('[OBF] chunk ' .. __obf_i .. ' loadstring threw:', __obf_fn)",
-    "  elseif type(__obf_fn) ~= 'function' then",
-    "    warn('[OBF] chunk ' .. __obf_i .. ' loadstring returned:', type(__obf_fn), '(size=' .. #__obf_src .. ')')",
+    "  local __obf_fn, __obf_err = __obf_L(__obf_src)",
+    "  if type(__obf_fn) ~= 'function' then",
+    "    warn('[OBF] chunk ' .. __obf_i .. ' compile failed. err=', __obf_err, 'size=', #__obf_src, 'head=', string.sub(__obf_src, 1, 100))",
     "  else",
     "    local __obf_run_ok, __obf_run_err = xpcall(__obf_fn, function(e) return tostring(e) .. '\\n' .. debug.traceback() end)",
     "    if not __obf_run_ok then",
