@@ -26,6 +26,23 @@ const ROBLOX_GLOBALS = new Set([
 
 const WORD_BINARY_OPS = new Set(["and","or",".."]);
 
+// v6.2: Fake watermark rotation â€” decoy to mislead attackers into using
+// wrong deobfuscator tools (Luraph/Luarmor/IronBrew deobs won't help here)
+const _FAKE_WATERMARKS = [
+  "-- This file was protected using Luraph Obfuscator v14.8 [https://lura.ph/]",
+  "-- This file was protected using Luraph Obfuscator v14.7 [https://lura.ph/]",
+  "-- This file was protected using Luraph Obfuscator v14.6.2 [https://lura.ph/]",
+  "-- Obfuscated using Luarmor v3.9.1 [https://luarmor.net/]",
+  "-- IronBrew v2.9.1 - Protection Level: MAX",
+  "-- Prometheus 0.5.1 - https://github.com/levno-710/Prometheus",
+  "-- MoonSec V3 [https://moonsec.dev/]"
+];
+function pickWatermark(){
+  return _FAKE_WATERMARKS[Math.floor(Math.random()*_FAKE_WATERMARKS.length)]+"\n";
+}
+
+
+
 const OP_NAMES = ["PUSH_CONST","PUSH_NIL","PUSH_TRUE","PUSH_FALSE","PUSH_GLOBAL","SET_GLOBAL","DUP","POP","CALL","RETURN","ADD","SUB","MUL","DIV","MOD","POW","CONCAT","EQ","NEQ","LT","LE","GT","GE","NOT","NEG","LEN","JMP","JMP_IF_FALSE","JMP_IF_TRUE","NEW_TABLE","SET_INDEX","GET_INDEX","GET_MEMBER","SET_MEMBER","METHOD_CALL","HALT"];
 
 function randInt(min,max){return min+Math.floor(Math.random()*(max-min+1));}
@@ -582,10 +599,11 @@ function byteLevelTripleObfuscate(code,level){
 
 async function obfuscate(luaCode,level){
   level=level||"medium";
+  const _WM=pickWatermark();
   try{
     let code=preprocess(luaCode);
-    if(level==="none")return code;
-    if(level==="basic")return aggressiveMinify(code);
+    if(level==="none")return _WM+code;
+    if(level==="basic")return _WM+aggressiveMinify(code);
 
     let ast=null;
     try{
@@ -599,7 +617,7 @@ async function obfuscate(luaCode,level){
     }
 
     if(!ast){
-      return byteLevelTripleObfuscate(code,level);
+      return _WM+byteLevelTripleObfuscate(code,level);
     }
 
     const isMedium=level==="medium";
@@ -625,15 +643,15 @@ async function obfuscate(luaCode,level){
     const decoder=makeStringDecoder("_D",stringKey,stringShift);
     let combined=decoder+"; "+ob;
 
-    if(isMedium)return combined;
+    if(isMedium)return _WM+combined;
 
     const encrypted = byteLevelTripleObfuscate(combined, level);
     // v6.1: prepend VM harness OUTSIDE encryption for real hybrid protection
-    return vmOuterHarness ? (vmOuterHarness + "; " + encrypted) : encrypted;
+    return _WM+(vmOuterHarness ? (vmOuterHarness + "; " + encrypted) : encrypted);
   }catch(err){
     console.error("[obfuscator] Error:",err.message);
     try{
-      return byteLevelTripleObfuscate(preprocess(luaCode),level);
+      return _WM+byteLevelTripleObfuscate(preprocess(luaCode),level);
     }catch(e){
       throw new Error("Failed to obfuscate: "+err.message);
     }
