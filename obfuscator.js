@@ -24,7 +24,6 @@ const ROBLOX_GLOBALS = new Set([
   "for","in","function","return","break","goto","continue","local"
 ]);
 
-// v5.3: Word operators that require spaces around them in Lua
 const WORD_BINARY_OPS = new Set(["and","or",".."]);
 
 function randInt(min,max){return min+Math.floor(Math.random()*(max-min+1));}
@@ -45,7 +44,12 @@ function preprocess(code){
   return code.trim();
 }
 
-// v5.2/5.3: Semicolon-based statement separator
+// v5.4 FINAL FIX: Continuation-aware minifier
+// Checks BOTH prev line's ending AND current line's beginning before inserting ';'
+// Prevents breaking multi-line expressions common in Luau/Roblox scripts:
+//   - `if x\n  and y then` (word op continuation)
+//   - `game\n  :GetService()` (method chain continuation)
+//   - `"a"\n  .. "b"` (concat continuation)
 function aggressiveMinify(code){
   code=preprocess(code);
   code=code.split("\n").map(l=>l.trim()).filter(l=>l.length>0).join("\n");
@@ -57,15 +61,20 @@ function aggressiveMinify(code){
     if(result.length===0){result.push(line);continue;}
     const prev=result[result.length-1].trim();
     let addSemi=true;
+    // Prev line ends with block-opener or operator â†’ no ;
     if(/\b(do|then|else|repeat)\s*$/.test(prev))addSemi=false;
     else if(/[=,{(\[+\-*/%<>~^&|.:;]$/.test(prev))addSemi=false;
     else if(/\b(and|or|not|in|return|local|elseif)\s*$/.test(prev))addSemi=false;
     else if(/\)\s*$/.test(prev)&&/\bfunction\b/.test(prev)&&!/\bend\s*\)\s*$/.test(prev))addSemi=false;
+    // Current line begins with continuation token â†’ no ;
+    else if(/^(and|or|not)\b/.test(line))addSemi=false;
+    else if(/^[.:,)\]}+\-*/%<>=~^&|]/.test(line))addSemi=false;
+    else if(/^(then|do|else|elseif|end|until)\b/.test(line))addSemi=false;
     if(addSemi)result[result.length-1]=prev+";";
     result.push(line);
   }
   let out=result.join(" ");
-  out=out.replace(/  +/g," ").replace(/;\s*;/g,";").replace(/;\s*end\b/g," end").replace(/;\s*\)/g,")").replace(/;\s*until\b/g," until").replace(/;\s*elseif\b/g," elseif").replace(/;\s*else\b/g," else");
+  out=out.replace(/  +/g," ").replace(/;\s*;/g,";").replace(/;\s*end\b/g," end").replace(/;\s*\)/g,")").replace(/;\s*until\b/g," until").replace(/;\s*elseif\b/g," elseif").replace(/;\s*else\b/g," else").replace(/;\s*then\b/g," then").replace(/;\s*do\b/g," do").replace(/;\s*(and|or)\b/g," $1").replace(/;\s*(\.\.|:|\.)/g," $1");
   return out.trim();
 }
 
@@ -225,7 +234,6 @@ function serializeBlock(stmts){
   return stmts.map(serialize).filter(s=>s.length>0).join(";");
 }
 
-// v5.3: BinaryExpression/LogicalExpression now correctly spaces word operators (and, or, ..)
 function serializeBinary(node){
   const op=node.operator;
   const left=serialize(node.left);
