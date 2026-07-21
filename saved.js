@@ -243,7 +243,7 @@ async function deleteScript(script) {
   }
 
   const name = script.name || "(Untitled)";
-  if (!confirm(`Delete "${name}"? Hindi na 'to mababawi.`)) return;
+  if (!confirm(`Delete "${name}"? Can't undone after this..`)) return;
 
   try {
     const { error } = await sb
