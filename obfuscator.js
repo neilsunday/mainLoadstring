@@ -1,4 +1,5 @@
-// AzureVM Obfuscator (patched v10.2 â€” method-call passthrough, executor-aware loader
+// AzureVM Obfuscator (patched v10.3 â€” top-local tracking, method-call passthrough
+// v10.2 â€” method-call passthrough, executor-aware loader
 // v10.1 â€” executor-aware loader chain)
 // Original:  Ã¢â‚¬â€ v10.0 (Complete rewrite: simple exec_core, no nested returns, no CFF wrap)
 // Improvements over v8.1:
@@ -1173,6 +1174,59 @@ function tryVmWrap(ast, level){
   const globals = [];
   const passthrough = [];
   let compiledCount = 0;
+
+  // v10.3: Collect top-level local declarations to avoid mis-compiling
+  // locals as globals (which turn into env[name] lookups â†’ nil at runtime)
+  const topLocals = new Set();
+  for(const stmt of ast.body){
+    if(stmt.type === "LocalStatement" && stmt.variables){
+      for(const v of stmt.variables){
+        if(v && v.name) topLocals.add(v.name);
+      }
+    } else if(stmt.type === "FunctionDeclaration" && stmt.identifier
+              && stmt.identifier.type === "Identifier" && stmt.isLocal){
+      topLocals.add(stmt.identifier.name);
+    } else if(stmt.type === "FunctionDeclaration" && stmt.identifier
+              && stmt.identifier.type === "Identifier"){
+      // global function declaration â€” treat as available
+      topLocals.add(stmt.identifier.name);
+    } else if(stmt.type === "AssignmentStatement" && stmt.variables){
+      // assignments like foo = ... make foo available as global
+      for(const v of stmt.variables){
+        if(v && v.type === "Identifier") topLocals.add(v.name);
+      }
+    }
+  }
+  // Add ROBLOX_GLOBALS to the set â€” these are always safe as env[name]
+  for(const g of ROBLOX_GLOBALS) topLocals.add(g);
+  // Also common Luau/Roblox names likely to be globals via getgenv or the executor
+  const EXECUTOR_GLOBALS = ["hookfunction","hookmetamethod","getgenv","getrenv","getsenv","getreg",
+    "getconnections","getgc","getinstances","getnilinstances","getscripts","getloadedmodules",
+    "getcallingscript","getrawmetatable","setrawmetatable","checkcaller","isreadonly","setreadonly",
+    "iscclosure","islclosure","newcclosure","identifyexecutor","lz4compress","lz4decompress",
+    "queue_on_teleport","syn","fluxus","krnl","delta","request","http_request","http",
+    "cloneref","gethui","getnamecallmethod","setnamecallmethod","isexecutorclosure",
+    "getgenv","LPH_NO_VIRTUALIZE","LPH_JIT","LPH_ENCSTR"];
+  for(const g of EXECUTOR_GLOBALS) topLocals.add(g);
+
+  // v10.3: Walk expression to find any Identifier not in topLocals
+  function _refsUnknown(node){
+    if(!node || typeof node !== "object") return false;
+    if(Array.isArray(node)){
+      for(const x of node) if(_refsUnknown(x)) return true;
+      return false;
+    }
+    if(node.type === "Identifier"){
+      return !topLocals.has(node.name);
+    }
+    // Don't descend into function bodies â€” locals inside are their own scope
+    if(node.type === "FunctionDeclaration" || node.type === "FunctionExpression") return false;
+    for(const k of Object.keys(node)){
+      if(k === "type" || k === "loc" || k === "range") continue;
+      if(_refsUnknown(node[k])) return true;
+    }
+    return false;
+  }
   const MAX_VM_STATEMENTS = 500; // v9.0: raised from 200
 
   // v9.0: Prioritize sensitive statements ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â calls to HttpGet, loadstring, GetService, etc.
@@ -1193,7 +1247,9 @@ function tryVmWrap(ast, level){
   indexed.sort((a, b) => b.score - a.score || a.i - b.i);
   ast.body = indexed.map(x => x.stmt);
   for(const stmt of ast.body){
-    if(compiledCount < MAX_VM_STATEMENTS && vmCanCompile(stmt)){
+    // v10.3: Also reject statements that reference unknown identifiers
+    // (locals from other scopes wrongly treated as globals â†’ nil at runtime)
+    if(compiledCount < MAX_VM_STATEMENTS && vmCanCompile(stmt) && !_refsUnknown(stmt)){
       vmCompileStmt(stmt, bc, consts, globals, OP);
       compiledCount++;
     } else {
