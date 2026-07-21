@@ -7,9 +7,8 @@
     <title>Dashboard - Loadstring Gen</title>
     <link rel="stylesheet" href="style.css" />
     <style>
-      /* ==========================================
-         Key Management Styles (Phase 1)
-         ========================================== */
+      html, body { overflow-x: hidden; }
+
       .key-row {
         border: 1px solid var(--border, #2a2a3e);
         border-radius: 8px;
@@ -17,179 +16,87 @@
         margin-bottom: 12px;
         background: var(--card, #1a1a2e);
       }
-
       .key-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 10px;
-        flex-wrap: wrap;
-        gap: 8px;
+        display: flex; justify-content: space-between; align-items: center;
+        margin-bottom: 10px; flex-wrap: wrap; gap: 8px;
       }
-
       .key-value {
-        font-family: "Courier New", monospace;
-        font-size: 0.9rem;
-        color: #4ade80;
-        word-break: break-all;
-        background: var(--bg, #0a0a1a);
-        padding: 4px 8px;
-        border-radius: 4px;
+        font-family: "Courier New", monospace; font-size: 0.9rem;
+        color: #4ade80; word-break: break-all;
+        background: var(--bg, #0a0a1a); padding: 4px 8px; border-radius: 4px;
       }
-
       .key-details {
-        font-size: 0.85rem;
-        margin-bottom: 12px;
-        line-height: 1.7;
+        font-size: 0.85rem; margin-bottom: 12px; line-height: 1.7;
         color: var(--text-dim, #aaa);
       }
-
-      .key-details strong {
-        color: var(--text, #fff);
-      }
-
+      .key-details strong { color: var(--text, #fff); }
       .key-details code.hwid {
         font-family: "Courier New", monospace;
-        background: var(--bg, #0a0a1a);
-        padding: 2px 6px;
-        border-radius: 3px;
-        font-size: 0.8rem;
-        color: #60a5fa;
+        background: var(--bg, #0a0a1a); padding: 2px 6px;
+        border-radius: 3px; font-size: 0.8rem; color: #60a5fa;
       }
-
-      .key-actions {
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-      }
-
+      .key-actions { display: flex; gap: 8px; flex-wrap: wrap; }
       .key-actions button {
-        padding: 6px 14px;
-        font-size: 0.82rem;
-        border-radius: 5px;
-        cursor: pointer;
+        padding: 6px 14px; font-size: 0.82rem; border-radius: 5px; cursor: pointer;
         border: 1px solid var(--border, #2a2a3e);
-        background: var(--card, #1a1a2e);
-        color: var(--text, #fff);
+        background: var(--card, #1a1a2e); color: var(--text, #fff);
       }
+      .key-actions button:hover:not(:disabled) { background: var(--card-hover, #252540); }
+      .key-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .key-actions button.danger { background: #4c1d1d; border-color: #7f1d1d; color: #fca5a5; }
+      .key-actions button.danger:hover:not(:disabled) { background: #7f1d1d; color: #fff; }
 
-      .key-actions button:hover:not(:disabled) {
-        background: var(--card-hover, #252540);
-      }
-
-      .key-actions button:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-      }
-
-      .key-actions button.danger {
-        background: #4c1d1d;
-        border-color: #7f1d1d;
-        color: #fca5a5;
-      }
-
-      .key-actions button.danger:hover:not(:disabled) {
-        background: #7f1d1d;
-        color: #fff;
-      }
-
-      .badge {
-        padding: 3px 10px;
-        border-radius: 4px;
-        font-size: 0.7rem;
-        font-weight: bold;
-        letter-spacing: 0.5px;
-      }
-
-      .badge-success {
-        background: #14532d;
-        color: #4ade80;
-      }
-      .badge-warning {
-        background: #78350f;
-        color: #fbbf24;
-      }
-      .badge-danger {
-        background: #7f1d1d;
-        color: #f87171;
-      }
+      .badge { padding: 3px 10px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; letter-spacing: 0.5px; }
+      .badge-success { background: #14532d; color: #4ade80; }
+      .badge-warning { background: #78350f; color: #fbbf24; }
+      .badge-danger  { background: #7f1d1d; color: #f87171; }
 
       .form-row {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 14px;
-        margin-bottom: 14px;
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 14px; margin-bottom: 14px;
       }
-
-      .form-row .form-group {
-        display: flex;
-        flex-direction: column;
-      }
-
-      .form-row .form-group label {
-        margin-bottom: 6px;
-        font-size: 0.88rem;
-      }
-
-      .form-row .form-group small {
-        margin-top: 4px;
-        font-size: 0.75rem;
-        color: var(--muted, #888);
-      }
-
-      .form-row input,
-      .form-row select {
-        padding: 9px 12px;
-        background: var(--bg, #0a0a1a);
-        color: var(--text, #fff);
-        border: 1px solid var(--border, #2a2a3e);
-        border-radius: 5px;
-        font-size: 0.9rem;
-      }
-
-      /* Prevent mobile dropdown overlay issues */
-      html, body {
-        overflow-x: hidden;
-      }
-
-      #keysCard {
-        position: relative;
-        z-index: 1;
+      .form-row .form-group { display: flex; flex-direction: column; }
+      .form-row .form-group label { margin-bottom: 6px; font-size: 0.88rem; }
+      .form-row .form-group small { margin-top: 4px; font-size: 0.75rem; color: var(--muted, #888); }
+      .form-row input, .form-row select {
+        padding: 9px 12px; background: var(--bg, #0a0a1a); color: var(--text, #fff);
+        border: 1px solid var(--border, #2a2a3e); border-radius: 5px; font-size: 0.9rem;
       }
 
       #keyScriptSelect {
-        width: 100%;
-        padding: 10px 12px;
-        background: var(--bg, #0a0a1a);
-        color: var(--text, #fff);
-        border: 1px solid var(--border, #2a2a3e);
-        border-radius: 5px;
-        font-size: 0.95rem;
-        margin-top: 6px;
-        cursor: pointer;
+        width: 100%; padding: 10px 12px; margin-top: 6px;
+        background: var(--bg, #0a0a1a); color: var(--text, #fff);
+        border: 1px solid var(--border, #2a2a3e); border-radius: 5px;
+        font-size: 0.95rem; cursor: pointer;
       }
 
-      .keys-divider {
-        border: none;
-        border-top: 1px solid var(--border, #2a2a3e);
-        margin: 20px 0;
-      }
+      .keys-divider { border: none; border-top: 1px solid var(--border, #2a2a3e); margin: 20px 0; }
+      #keysList { margin-top: 12px; }
+      #keysCard { position: relative; z-index: 1; }
 
-      #keysList {
-        margin-top: 12px;
+      /* NEW: Protection mode toggle */
+      .protection-toggle {
+        display: flex; align-items: flex-start; gap: 12px;
+        padding: 12px; margin-top: 16px;
+        background: var(--bg, #0a0a1a); border: 1px solid var(--border, #2a2a3e);
+        border-radius: 6px;
       }
+      .protection-toggle input[type="checkbox"] {
+        margin-top: 2px; width: 18px; height: 18px; cursor: pointer;
+      }
+      .protection-toggle label { cursor: pointer; flex: 1; }
+      .protection-toggle .label-title { font-weight: 600; margin-bottom: 4px; }
+      .protection-toggle .label-desc { font-size: 0.82rem; color: var(--muted, #888); }
     </style>
   </head>
   <body>
     <nav class="app-nav">
       <div class="brand">Dashboard</div>
-
       <div class="nav-links">
         <a href="dashboard.html" class="active">Dashboard</a>
         <a href="saved.html">Saved Scripts</a>
         <a href="admin.html" id="adminLink" class="hidden">Admin</a>
       </div>
-
       <div class="user-info">
         <span id="userEmail">Loading...</span>
         <button id="logoutBtn" class="secondary small">Logout</button>
@@ -204,71 +111,27 @@
 
       <div class="card">
         <label for="scriptName">Script Name</label>
-        <input
-          type="text"
-          id="scriptName"
-          placeholder="Enter script name: "
-          maxlength="100"
-        />
+        <input type="text" id="scriptName" placeholder="Enter script name: " maxlength="100" />
 
         <label for="scriptCode" style="margin-top: 18px">
           Lua Code
-          <span
-            id="charCount"
-            style="
-              float: right;
-              color: var(--muted);
-              font-weight: normal;
-              font-size: 0.82rem;
-            "
-            >0 characters</span
-          >
+          <span id="charCount" style="float: right; color: var(--muted); font-weight: normal; font-size: 0.82rem;">0 characters</span>
         </label>
-        <textarea
-          id="scriptCode"
-          placeholder="Your Lua code here: "
-          spellcheck="false"
-        ></textarea>
+        <textarea id="scriptCode" placeholder="Your Lua code here: " spellcheck="false"></textarea>
 
         <div class="row" style="justify-content: flex-start; margin-top: 12px">
-          <input
-            type="file"
-            id="fileUpload"
-            accept=".lua,.txt"
-            style="display: none"
-          />
-          <button type="button" id="uploadBtn" class="secondary small">
-            Upload File
-          </button>
-          <button type="button" id="clearBtn" class="secondary small">
-            Clear
-          </button>
+          <input type="file" id="fileUpload" accept=".lua,.txt" style="display: none" />
+          <button type="button" id="uploadBtn" class="secondary small">Upload File</button>
+          <button type="button" id="clearBtn" class="secondary small">Clear</button>
           <span id="fileName" class="muted" style="margin-left: 8px"></span>
         </div>
 
         <div style="margin-top: 20px">
           <label for="obfuscationLevel">
             Obfuscation Level
-            <span
-              class="muted"
-              style="font-weight: normal; font-size: 0.82rem; margin-left: 6px"
-              >(Luraph-inspired protection)</span
-            >
+            <span class="muted" style="font-weight: normal; font-size: 0.82rem; margin-left: 6px">(Luraph-inspired protection)</span>
           </label>
-          <select
-            id="obfuscationLevel"
-            style="
-              width: 100%;
-              padding: 10px 12px;
-              margin-top: 6px;
-              background: var(--card, #1a1a2e);
-              color: var(--text, #fff);
-              border: 1px solid var(--border, #2a2a3e);
-              border-radius: 6px;
-              font-size: 0.95rem;
-              cursor: pointer;
-            "
-          >
+          <select id="obfuscationLevel" style="width: 100%; padding: 10px 12px; margin-top: 6px; background: var(--card, #1a1a2e); color: var(--text, #fff); border: 1px solid var(--border, #2a2a3e); border-radius: 6px; font-size: 0.95rem; cursor: pointer;">
             <option value="none">None - save as plain text (no protection)</option>
             <option value="basic">Basic - remove comments and minify</option>
             <option value="medium" selected>Medium - string encryption + number encoding</option>
@@ -276,13 +139,21 @@
           </select>
         </div>
 
+        <!-- NEW: Protection mode toggle -->
+        <div class="protection-toggle">
+          <input type="checkbox" id="requireKey" checked />
+          <label for="requireKey">
+            <div class="label-title">Require license key</div>
+            <div class="label-desc">
+              When checked, this script needs a valid key to run. When unchecked,
+              it becomes a FREE loadstring (anyone with the URL can run it, no key required).
+            </div>
+          </label>
+        </div>
+
         <div class="row" style="margin-top: 18px; gap: 10px">
-          <button type="button" id="previewBtn" class="secondary" disabled>
-            Preview Output
-          </button>
-          <button type="button" id="saveBtn" class="primary" disabled>
-            Save Script
-          </button>
+          <button type="button" id="previewBtn" class="secondary" disabled>Preview Output</button>
+          <button type="button" id="saveBtn" class="primary" disabled>Save Script</button>
         </div>
 
         <div id="message" class="message hidden"></div>
@@ -291,79 +162,52 @@
       <div id="previewCard" class="card hidden">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
           <h2 style="margin: 0">Obfuscated Preview</h2>
-          <button type="button" id="closePreviewBtn" class="secondary small">
-            Close
-          </button>
+          <button type="button" id="closePreviewBtn" class="secondary small">Close</button>
         </div>
         <div id="previewStats" class="muted" style="font-size: 0.85rem; margin-bottom: 10px"></div>
         <div class="output-box" style="max-height: 400px; overflow: auto; padding: 12px; background: var(--bg, #0a0a1a); border-radius: 6px; font-family: 'Courier New', monospace; font-size: 0.78rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all">
           <code id="previewOutput"></code>
         </div>
         <div class="row" style="margin-top: 12px; gap: 10px">
-          <button type="button" id="copyPreviewBtn" class="secondary small">
-            Copy Obfuscated Code
-          </button>
+          <button type="button" id="copyPreviewBtn" class="secondary small">Copy Obfuscated Code</button>
         </div>
       </div>
 
       <div id="resultCard" class="card hidden">
         <h2>Script Saved!</h2>
-        <p style="color: var(--text-dim); margin-top: 8px; font-size: 0.9rem">
-          Your loadstring:
-        </p>
+        <p style="color: var(--text-dim); margin-top: 8px; font-size: 0.9rem">Your loadstring:</p>
         <div class="output-box" style="margin-top: 12px">
           <code id="loadstringOutput"></code>
         </div>
         <div class="row">
-          <button type="button" id="copyBtn" class="secondary small">
-            Copy Loadstring
-          </button>
-          <a href="saved.html" class="muted" style="font-size: 0.88rem">
-            View all saved scripts
-          </a>
+          <button type="button" id="copyBtn" class="secondary small">Copy Loadstring</button>
+          <a href="saved.html" class="muted" style="font-size: 0.88rem">View all saved scripts</a>
         </div>
       </div>
 
-      <!-- ==========================================
-           NEW: License Keys Management (Phase 1)
-           ========================================== -->
-      <div id="keysCard" class="card" style="scroll-margin-top: 20px">
+      <div id="keysCard" class="card">
         <h2>License Keys</h2>
         <p style="color: var(--text-dim); margin-top: 8px; font-size: 0.9rem">
-          Generate keys to protect your scripts. Each key can be locked to a specific
-          HWID and game (PlaceId), can expire, or have an execution cap.
-          Revoke anytime for instant kill switch.
+          Generate keys to protect your scripts. Note: keys only work for scripts saved with
+          "Require license key" checked. FREE scripts don't need or accept keys.
         </p>
 
         <div style="margin-top: 18px">
           <label for="keyScriptSelect">Script to protect</label>
-          <select id="keyScriptSelect">
-            <option value="">-- Select a script --</option>
-          </select>
+          <select id="keyScriptSelect"><option value="">-- Select a script --</option></select>
         </div>
 
         <div class="form-row" style="margin-top: 16px">
           <div class="form-group">
             <label for="keyPlaceIds">Allowed PlaceIds (optional)</label>
-            <input
-              type="text"
-              id="keyPlaceIds"
-              placeholder="123456789, 987654321"
-            />
+            <input type="text" id="keyPlaceIds" placeholder="123456789, 987654321" />
             <small>Comma-separated. Empty = any game.</small>
           </div>
-
           <div class="form-group">
             <label for="keyMaxExec">Max executions (optional)</label>
-            <input
-              type="number"
-              id="keyMaxExec"
-              placeholder="e.g. 1000"
-              min="1"
-            />
+            <input type="number" id="keyMaxExec" placeholder="e.g. 1000" min="1" />
             <small>Empty = unlimited.</small>
           </div>
-
           <div class="form-group">
             <label for="keyExpires">Expires on (optional)</label>
             <input type="datetime-local" id="keyExpires" />
@@ -372,9 +216,7 @@
         </div>
 
         <div class="row" style="margin-top: 8px">
-          <button type="button" id="generateKeyBtn" class="primary">
-            Generate New Key
-          </button>
+          <button type="button" id="generateKeyBtn" class="primary">Generate New Key</button>
         </div>
 
         <hr class="keys-divider" />
@@ -384,9 +226,7 @@
           Click "Copy Loader" to get the loadstring your users should run.
         </p>
 
-        <div id="keysList">
-          <p class="muted">Loading...</p>
-        </div>
+        <div id="keysList"><p class="muted">Loading...</p></div>
       </div>
     </div>
 
