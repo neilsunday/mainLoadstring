@@ -1,7 +1,7 @@
 {
   "name": "loadstring-gen",
-  "version": "3.0.0",
-  "description": "Roblox Loadstring Generator with AzureVM custom obfuscator",
+  "version": "3.1.0",
+  "description": "Roblox Loadstring Generator with AzureVM custom obfuscator + key/HWID/kill-switch protection",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -10,6 +10,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
     "express": "^4.19.2",
     "luaparse": "^0.3.1"
   }
