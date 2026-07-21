@@ -1,4 +1,4 @@
-// AzureVM Obfuscator â€” v9.3 (Phase 3 hotfix 3: Luau support with safe type annotation regex)
+// AzureVM Obfuscator â€” v9.4 (Phase 3 hotfix 4: strings protected BEFORE comment stripping)
 // Improvements over v8.1:
 //   1. Constants Pool with poison entries (was: unused/broken)
 //   2. Position + prev-byte dependent stream cipher (was: triple XOR only)
@@ -201,61 +201,128 @@ function preprocess(code){
 // v9.1: Convert Luau-specific syntax to plain Lua 5.1 so luaparse can handle it
 // Handles: compound assignments (+=, -=, *=, /=, ..=), continue statements, type annotations
 function luauToLua(code) {
-  // v9.3: Only strip type annotations in SAFE positions.
-  // Roblox code uses ':' EVERYWHERE for method calls (game:GetService(...)),
-  // so we cannot blindly strip ':Type' â€” must be careful about context.
+  // v9.4: Protect strings FIRST, then strip comments, then apply transforms.
+  // Bug fix: comments were stripped before strings, so '--' inside a string like
+  // Val.Text = '--' would be treated as a comment start, destroying the string.
 
-  // Protect strings + comments first
   const strings = [];
   let idx = 0;
-  const placeholder = (s) => {
-    const key = "___STR_" + (idx++) + "___";
-    strings.push({ key, value: s });
-    return key;
-  };
 
-  let work = code;
-  // Long-bracket comments
-  work = work.replace(/--\[(=*)\[[\s\S]*?\]\1\]/g, "");
-  // Line comments
-  work = work.replace(/--[^\n]*/g, "");
-  // Long-bracket strings
-  work = work.replace(/\[(=*)\[([\s\S]*?)\]\1\]/g, (m) => placeholder(m));
-  // Regular strings
-  work = work.replace(/"(?:[^"\\\n]|\\.)*"/g, (m) => placeholder(m));
-  work = work.replace(/'(?:[^'\\\n]|\\.)*'/g, (m) => placeholder(m));
+  // ---- Step 1: Protect strings first (BEFORE comment stripping) ----
+  // Use a character-by-character tokenizer instead of regex â€” this correctly handles
+  // all Lua string forms without confusion from '--' inside them.
+  let work = "";
+  let i = 0;
+  const len = code.length;
 
-  // ---- Compound assignments: a += b  â†’  a = a + b ----
+  while (i < len) {
+    const c = code[i];
+    const next = i + 1 < len ? code[i + 1] : "";
+
+    // Long-bracket comment: --[[ ... ]]  or  --[==[ ... ]==]
+    if (c === "-" && next === "-") {
+      // Check if it's a long-bracket comment
+      let j = i + 2;
+      if (code[j] === "[") {
+        let level = 0;
+        let k = j + 1;
+        while (code[k] === "=") { level++; k++; }
+        if (code[k] === "[") {
+          // Long comment â€” skip to end
+          const closer = "]" + "=".repeat(level) + "]";
+          const endIdx = code.indexOf(closer, k + 1);
+          if (endIdx > 0) { i = endIdx + closer.length; continue; }
+          i = len;
+          continue;
+        }
+      }
+      // Line comment â€” skip to newline
+      while (i < len && code[i] !== "\n") i++;
+      continue;
+    }
+
+    // Long-bracket string: [[ ... ]] or [==[ ... ]==]
+    if (c === "[") {
+      let level = 0, j = i + 1;
+      while (code[j] === "=") { level++; j++; }
+      if (code[j] === "[") {
+        const closer = "]" + "=".repeat(level) + "]";
+        const endIdx = code.indexOf(closer, j + 1);
+        if (endIdx > 0) {
+          const strContent = code.substring(i, endIdx + closer.length);
+          const key = "___STR_" + (idx++) + "___";
+          strings.push({ key, value: strContent });
+          work += key;
+          i = endIdx + closer.length;
+          continue;
+        }
+      }
+    }
+
+    // Regular string: " ... " or ' ... '
+    if (c === '"' || c === "'") {
+      const quote = c;
+      let strStart = i;
+      i++;
+      while (i < len) {
+        const ch = code[i];
+        if (ch === "\\" && i + 1 < len) { i += 2; continue; }
+        if (ch === quote) { i++; break; }
+        if (ch === "\n") { break; }
+        i++;
+      }
+      const strContent = code.substring(strStart, i);
+      const key = "___STR_" + (idx++) + "___";
+      strings.push({ key, value: strContent });
+      work += key;
+      continue;
+    }
+
+    // Backtick string (Luau interp) - just preserve as-is by protecting
+    if (c === "`") {
+      let strStart = i;
+      i++;
+      let bDepth = 0;
+      while (i < len) {
+        const ch = code[i];
+        if (ch === "\\" && i + 1 < len) { i += 2; continue; }
+        if (ch === "{") bDepth++;
+        else if (ch === "}") bDepth--;
+        else if (ch === "`" && bDepth === 0) { i++; break; }
+        i++;
+      }
+      const strContent = code.substring(strStart, i);
+      const key = "___STR_" + (idx++) + "___";
+      strings.push({ key, value: strContent });
+      work += key;
+      continue;
+    }
+
+    work += c;
+    i++;
+  }
+
+  // ---- Step 2: Now apply transformations on comment-stripped, string-protected code ----
+
   const IDENT = "[A-Za-z_][A-Za-z0-9_]*";
   const CHAIN = IDENT + "(?:\\s*[.:]\\s*" + IDENT + "|\\s*\\[[^\\]]+\\])*";
+
+  // Compound assignments: a += b  â†’  a = a + b
   const compoundRegex = new RegExp("(" + CHAIN + ")\\s*([+\\-*/%]|\\.\\.)=\\s*", "g");
   work = work.replace(compoundRegex, (m, lhs, op) => lhs + " = " + lhs + " " + op + " ");
 
-  // ---- continue â†’ commented out (parse-safe no-op) ----
+  // continue â†’ commented out (parse-safe no-op)
   work = work.replace(/\bcontinue\b/g, "--[[continue]]");
 
-  // ---- Type annotations (SAFE version) ----
-  // Only strip type annotations in these SPECIFIC contexts:
-  //   1. local x: Type = ...  â†’  local x = ...
-  //   2. local x: Type\n  â†’  local x\n  (declaration without init)
-  //   3. function name(param: Type, ...)  â†’  function name(param, ...)
-  //   4. function name(...): ReturnType  â†’  function name(...)
-  //   5. type Foo = ...  â†’  (line removed)
-  //   6. export type Foo = ...  â†’  (line removed)
-
-  // Rule 1 & 2: 'local IDENT : Type' â€” the ':Type' is a type annotation
-  // Match: local IDENT [, IDENT]* : Type [= or newline or end-of-statement]
-  // Simple case: single var
+  // Type annotations (safe version â€” only in specific contexts)
+  // Rule 1: local x: Type = ...  â†’  local x = ...
   work = work.replace(
-    /(\blocal\s+" + IDENT + "(?:\\s*,\\s*" + IDENT + ")*)\\s*:\\s*[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?(?:\\.[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?)*\\??/g,
+    new RegExp("(\\blocal\\s+" + IDENT + "(?:\\s*,\\s*" + IDENT + ")*)\\s*:\\s*[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?(?:\\.[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?)*\\??", "g"),
     "$1"
   );
 
-  // Rule 3: function param types
-  // Match inside parens: (name: Type, name: Type)
-  // Do this iteratively per paren group
+  // Rule 2: function params (name: Type, ...)
   work = work.replace(/\(([^()]*)\)/g, (m, inside) => {
-    // Split by comma at top level, strip type annotations from each param
     const cleaned = inside.replace(
       new RegExp("(" + IDENT + ")\\s*:\\s*[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?(?:\\.[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?)*\\??", "g"),
       "$1"
@@ -263,20 +330,19 @@ function luauToLua(code) {
     return "(" + cleaned + ")";
   });
 
-  // Rule 4: function return types: ): ReturnType (only after ) and before newline/end/=)
-  // Match: ) : IDENT ... at end of line or before keywords
+  // Rule 3: return types  ): ReturnType
   work = work.replace(
     /(\))\s*:\s*[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?(?:\.[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?)*\??(?=\s*(?:\n|--|\bthen\b|\bdo\b|\breturn\b|\blocal\b|\bif\b|\bfor\b|\bwhile\b|\brepeat\b|\bend\b|;|$))/g,
     "$1"
   );
 
-  // Rule 5: type aliases
+  // Rule 4: type Foo = ...  â†’  (removed)
   work = work.replace(/^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:<[^>]*>)?\s*=.*$/gm, "");
 
-  // Rule 6: export type
+  // Rule 5: export type
   work = work.replace(/^\s*export\s+type\s+.*$/gm, "");
 
-  // Restore protected strings
+  // ---- Step 3: Restore protected strings ----
   for (const s of strings) {
     work = work.split(s.key).join(s.value);
   }
