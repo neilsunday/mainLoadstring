@@ -1438,10 +1438,10 @@ function byteLevelTripleObfuscate(code,level,userId){
   return parts.join("; ");
 }
 
-async function obfuscate(luaCode,level,userId){
+async function obfuscateSingle(luaCode,level,userId){
   level=level||"medium";
   const _WM=pickWatermark();
-  const _DIAG="-- [OBF v11.0 patched: debug loader + no fake watermark]\n";
+  const _DIAG="-- [OBF v12.0 patched: auto-split + debug loader + no fake watermark]\n";
   try{
     let code=preprocess(luaCode);
     // v9.1: Preprocess Luau-specific syntax so luaparse can handle Roblox scripts
@@ -1533,6 +1533,142 @@ async function obfuscate(luaCode,level,userId){
       throw new Error("Failed to obfuscate: "+err.message);
     }
   }
+}
+
+
+// v12: auto-splitting wrapper.
+// Executors like Delta silently return nil from loadstring when the source is too large
+// (roughly > 250-300 KB per call on many builds). This wrapper obfuscates the whole
+// script first; if the output is safely small, ships it as-is; otherwise splits the
+// INPUT into chunks that each produce a safely-small obfuscated blob and emits a
+// multi-part loader that loadstring's each chunk in order.
+const _CHUNK_SAFE_BYTES = 180000;   // per-chunk obfuscated size ceiling (very conservative)
+const _MIN_CHUNKS = 1;
+
+function _splitLuaSource(code, parts){
+  // Split on newline boundaries closest to each ideal offset so we never cut a statement.
+  if (parts <= 1) return [code];
+  const step = Math.floor(code.length / parts);
+  const cuts = [0];
+  for (let i = 1; i < parts; i++){
+    const ideal = i * step;
+    // scan for the nearest newline within +/- 4KB of ideal
+    let cut = -1;
+    for (let j = 0; j < 4096 && (ideal - j) > cuts[cuts.length-1] + 1024; j++){
+      const a = ideal - j;
+      if (code[a] === "\n") { cut = a + 1; break; }
+      const b = ideal + j;
+      if (b < code.length && code[b] === "\n") { cut = b + 1; break; }
+    }
+    if (cut < 0) cut = ideal; // fallback â€” shouldn't happen for well-formed Lua
+    cuts.push(cut);
+  }
+  cuts.push(code.length);
+  const chunks = [];
+  for (let i = 0; i < cuts.length - 1; i++){
+    chunks.push(code.slice(cuts[i], cuts[i+1]));
+  }
+  return chunks;
+}
+
+function _makeLongBracket(payload){
+  // Find an = level that never appears as ]===] inside payload.
+  for (let lvl = 0; lvl < 20; lvl++){
+    const eq = "=".repeat(lvl);
+    const closer = "]" + eq + "]";
+    if (payload.indexOf(closer) < 0){
+      return "[" + eq + "[" + payload + closer;
+    }
+  }
+  // Fallback: quote-escape (very slow, only if payload has ]===...===] for every level)
+  return '"' + payload.replace(/\\/g,"\\\\").replace(/"/g,'\\"').replace(/\n/g,"\\n") + '"';
+}
+
+function _buildMultiPartLoader(chunks){
+  // Each chunk is already an obfuscated Lua source string; we just need to loadstring
+  // each one in order. We use a shared getLoader() and a simple sequential runner
+  // with warn() on any failure â€” identical error visibility to the single-chunk loader.
+  const parts = [];
+  parts.push("-- [OBF v12.0 multi-part loader â€” " + chunks.length + " chunks]");
+  parts.push([
+    "local function __obf_getload()",
+    "  local ok,fn = pcall(function()",
+    "    local env = (getgenv and getgenv()) or _G or {}",
+    "    if type(env.loadstring) == 'function' then return env.loadstring end",
+    "    if type(env.load)       == 'function' then return env.load end",
+    "    if syn    and type(syn.load)    == 'function' then return syn.load end",
+    "    if fluxus and type(fluxus.load) == 'function' then return fluxus.load end",
+    "    if krnl   and type(krnl.load)   == 'function' then return krnl.load end",
+    "    if delta  and type(delta.load)  == 'function' then return delta.load end",
+    "    if type(loadstring) == 'function' then return loadstring end",
+    "    if type(load)       == 'function' then return load end",
+    "    return nil",
+    "  end)",
+    "  if ok and type(fn) == 'function' then return fn end",
+    "  return nil",
+    "end",
+    "local __obf_L = __obf_getload()",
+    "if type(__obf_L) ~= 'function' then",
+    "  warn('[OBF] no loadstring/load available in this executor')",
+    "  return",
+    "end",
+    "local __obf_chunks = {}",
+  ].join("\n"));
+  chunks.forEach((c, i) => {
+    parts.push("__obf_chunks[" + (i+1) + "] = " + _makeLongBracket(c));
+  });
+  parts.push([
+    "for __obf_i = 1, #__obf_chunks do",
+    "  local __obf_src = __obf_chunks[__obf_i]",
+    "  local __obf_ok, __obf_fn = pcall(__obf_L, __obf_src)",
+    "  if not __obf_ok then",
+    "    warn('[OBF] chunk ' .. __obf_i .. ' loadstring threw:', __obf_fn)",
+    "  elseif type(__obf_fn) ~= 'function' then",
+    "    warn('[OBF] chunk ' .. __obf_i .. ' loadstring returned:', type(__obf_fn), '(size=' .. #__obf_src .. ')')",
+    "  else",
+    "    local __obf_run_ok, __obf_run_err = xpcall(__obf_fn, function(e) return tostring(e) .. '\\n' .. debug.traceback() end)",
+    "    if not __obf_run_ok then",
+    "      warn('[OBF] chunk ' .. __obf_i .. ' runtime error:', __obf_run_err)",
+    "    end",
+    "  end",
+    "end",
+  ].join("\n"));
+  return parts.join("\n");
+}
+
+async function obfuscate(luaCode, level, userId){
+  // First try single-shot; most inputs will not need splitting.
+  const single = await obfuscateSingle(luaCode, level, userId);
+  if (typeof single === "string" && single.length <= _CHUNK_SAFE_BYTES) {
+    return single;
+  }
+  // Estimate part count from single-shot expansion ratio, then round up with slack.
+  const ratio = (single && single.length) ? (single.length / Math.max(1, luaCode.length)) : 1.3;
+  let parts = Math.max(_MIN_CHUNKS, Math.ceil((single.length) / _CHUNK_SAFE_BYTES) + 1);
+  // Try increasing splits until every chunk lands under the ceiling.
+  for (let attempt = 0; attempt < 6; attempt++){
+    const chunks = _splitLuaSource(luaCode, parts);
+    const obfChunks = [];
+    let maxLen = 0;
+    let anyOversize = false;
+    for (const c of chunks){
+      const o = await obfuscateSingle(c, level, userId);
+      obfChunks.push(o);
+      if (o.length > maxLen) maxLen = o.length;
+      if (o.length > _CHUNK_SAFE_BYTES) anyOversize = true;
+    }
+    console.log("[obfuscator] multi-part attempt", attempt+1, "parts=" + parts, "maxChunkBytes=" + maxLen);
+    if (!anyOversize) {
+      return _buildMultiPartLoader(obfChunks);
+    }
+    // Otherwise split more aggressively
+    parts = Math.ceil(parts * 1.4);
+  }
+  // Give up and ship whatever we have; the loader itself will warn per failing chunk.
+  const chunks = _splitLuaSource(luaCode, parts);
+  const obfChunks = [];
+  for (const c of chunks) obfChunks.push(await obfuscateSingle(c, level, userId));
+  return _buildMultiPartLoader(obfChunks);
 }
 
 process.on("uncaughtException",(e)=>{console.error("[obfuscator] Uncaught:",e.message);});
