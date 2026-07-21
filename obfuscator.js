@@ -26,7 +26,6 @@ const ROBLOX_GLOBALS = new Set([
 
 const WORD_BINARY_OPS = new Set(["and","or",".."]);
 
-// v6.0 VM OPCODES (randomized each obfuscation)
 const OP_NAMES = ["PUSH_CONST","PUSH_NIL","PUSH_TRUE","PUSH_FALSE","PUSH_GLOBAL","SET_GLOBAL","DUP","POP","CALL","RETURN","ADD","SUB","MUL","DIV","MOD","POW","CONCAT","EQ","NEQ","LT","LE","GT","GE","NOT","NEG","LEN","JMP","JMP_IF_FALSE","JMP_IF_TRUE","NEW_TABLE","SET_INDEX","GET_INDEX","GET_MEMBER","SET_MEMBER","METHOD_CALL","HALT"];
 
 function randInt(min,max){return min+Math.floor(Math.random()*(max-min+1));}
@@ -39,8 +38,6 @@ function randHexName(len){
   return o;
 }
 
-// Randomize opcodes each run â€” same handler logic, different numeric codes
-// Deobfuscator can't hardcode opcode meanings
 function makeOpTable(){
   const nums = [];
   const seen = new Set();
@@ -53,7 +50,6 @@ function makeOpTable(){
   return table;
 }
 
-// v5.5 string-aware preprocessor (unchanged)
 function preprocess(code){
   code=code.replace(/\r\n/g,"\n").replace(/\r/g,"\n");
   let out="";
@@ -143,10 +139,6 @@ function aggressiveMinify(code){
   return out.trim();
 }
 
-// ============================================================
-// v6.0 VM COMPILER â€” compiles simple AST nodes to bytecode
-// Only handles VM-safe patterns; complex nodes fall through to text mode
-// ============================================================
 function vmCanCompile(node){
   if(!node)return false;
   const t=node.type;
@@ -202,12 +194,7 @@ function vmCompileExpr(node, bc, consts, globals, OP){
     vmCompileExpr(node.base,bc,consts,globals,OP);
     let idx=consts.findIndex(c=>c.type==="s"&&c.value===node.identifier.name);
     if(idx<0){consts.push({type:"s",value:node.identifier.name});idx=consts.length-1;}
-    if(node.indexer===":"){
-      // method access â€” treat like member for later METHOD_CALL
-      bc.push(OP.GET_MEMBER,idx);
-    } else {
-      bc.push(OP.GET_MEMBER,idx);
-    }
+    bc.push(OP.GET_MEMBER,idx);
     return;
   }
   if(t==="CallExpression"){
@@ -247,7 +234,6 @@ function vmCompileStmt(node,bc,consts,globals,OP){
   }
 }
 
-// Generate the VM interpreter as Lua code (randomized opcodes injected)
 function generateVMInterpreter(vmFn,OP){
   return "local function "+vmFn+"(bc,ks,gs,env) local st={} local sp=0 local function ps(v) sp=sp+1 st[sp]=v end local function pp() local v=st[sp] st[sp]=nil sp=sp-1 return v end local pc=1 while true do local op=bc[pc] pc=pc+1 "
     +"if op=="+OP.PUSH_CONST+" then ps(ks[bc[pc]+1]) pc=pc+1 "
@@ -289,9 +275,7 @@ function generateVMInterpreter(vmFn,OP){
     +"end end end";
 }
 
-// Encode bytecode as base64 string of packed bytes
 function packBytecode(bc){
-  // Simple pack: each int as 2 bytes big-endian (max 65535 per int)
   const bytes=[];
   for(const n of bc){
     const v = (typeof n === "number") ? Math.max(0, Math.min(65535, n|0)) : 0;
@@ -300,12 +284,10 @@ function packBytecode(bc){
   return Buffer.from(bytes).toString("base64");
 }
 
-// Generate the unpacker: takes base64 -> array of ints
 function makeBytecodeUnpacker(fnName){
   return "local function "+fnName+"(s) local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/' local d={} for i=1,#b do d[string.sub(b,i,i)]=i-1 end local o={} local pad=0 if string.sub(s,-2)=='==' then pad=2 elseif string.sub(s,-1)=='=' then pad=1 end s=string.gsub(s,'[^A-Za-z0-9+/=]','') local raw={} for i=1,#s,4 do local a=d[string.sub(s,i,i)] or 0 local b1=d[string.sub(s,i+1,i+1)] or 0 local c=d[string.sub(s,i+2,i+2)] or 0 local e=d[string.sub(s,i+3,i+3)] or 0 local n=bit32.bor(bit32.lshift(a,18),bit32.lshift(b1,12),bit32.lshift(c,6),e) table.insert(raw,bit32.band(bit32.rshift(n,16),0xff)) table.insert(raw,bit32.band(bit32.rshift(n,8),0xff)) table.insert(raw,bit32.band(n,0xff)) end for i=1,pad do table.remove(raw) end local out={} for i=1,#raw,2 do table.insert(out,bit32.bor(bit32.lshift(raw[i],8),raw[i+1] or 0)) end return out end";
 }
 
-// Encode constants as Lua table literal
 function serializeConsts(consts){
   const parts = consts.map(c=>{
     if(c.type==="s")return JSON.stringify(c.value);
@@ -319,9 +301,6 @@ function serializeGlobals(globals){
   return "{"+globals.map(g=>JSON.stringify(g)).join(",")+"}";
 }
 
-// ============================================================
-// v5.5 encryption primitives (unchanged)
-// ============================================================
 function tripleXorEncrypt(str,k1,k2,k3){
   const bytes=[];
   for(let i=0;i<str.length;i++){
@@ -534,51 +513,33 @@ function serialize(node){
   }
 }
 
-// ============================================================
-// v6.0 HYBRID VM WRAPPER
-// Wraps a subset of top-level statements in VM bytecode
-// Rest of the script stays in AST-serialized form
-// ============================================================
 function tryVmWrap(ast, level){
   if(!ast || !ast.body || ast.body.length === 0) return null;
-  
   const OP = makeOpTable();
   const bc = [];
   const consts = [];
   const globals = [];
-  const vmStatements = [];
   const passthrough = [];
-  
-  // Compile only VM-safe top-level call statements to bytecode
-  // Everything else goes through normal AST path
   let compiledCount = 0;
-  const MAX_VM_STATEMENTS = 30; // limit to keep bytecode manageable
-  
+  const MAX_VM_STATEMENTS = 30;
   for(const stmt of ast.body){
     if(compiledCount < MAX_VM_STATEMENTS && vmCanCompile(stmt)){
       vmCompileStmt(stmt, bc, consts, globals, OP);
       compiledCount++;
-      vmStatements.push(stmt);
     } else {
       passthrough.push(stmt);
     }
   }
-  
-  if(compiledCount === 0) return null; // nothing to VM-compile
-  
+  if(compiledCount === 0) return null;
   bc.push(OP.HALT);
-  
-  // Build the VM harness
   const vmFn = randHexName(6);
   const bcVar = randHexName(5);
   const ksVar = randHexName(5);
   const gsVar = randHexName(5);
   const unpackFn = randHexName(6);
-  
   const interp = generateVMInterpreter(vmFn, OP);
   const unpacker = makeBytecodeUnpacker(unpackFn);
   const packedBc = packBytecode(bc);
-  
   const vmHarness = [
     unpacker,
     interp,
@@ -587,7 +548,6 @@ function tryVmWrap(ast, level){
     "local "+gsVar+"="+serializeGlobals(globals),
     vmFn+"("+bcVar+","+ksVar+","+gsVar+",getfenv and getfenv() or _ENV)"
   ].join("; ");
-  
   return { vmHarness, passthrough, compiledCount };
 }
 
@@ -644,31 +604,32 @@ async function obfuscate(luaCode,level){
 
     const isMedium=level==="medium";
     const isMaximum=level==="maximum";
-    
-    // v6.0: Try VM wrapping for maximum level BEFORE encryption
-    // If VM can compile some top-level calls, extract them; rest goes through AST path
-    let vmPrefix = "";
+
+    // v6.1: VM harness stays OUTSIDE the byte-level encryption
+    // Attacker sees random opcodes + interpreter but no context on what runs
+    let vmOuterHarness = "";
     if(isMaximum){
       const vmResult = tryVmWrap(ast, level);
       if(vmResult && vmResult.compiledCount > 0){
-        vmPrefix = vmResult.vmHarness + "; ";
-        // Replace ast body with just the passthrough stmts
+        vmOuterHarness = vmResult.vmHarness;
         ast.body = vmResult.passthrough;
-        console.log("[obfuscator] VM-compiled",vmResult.compiledCount,"statements");
+        console.log("[obfuscator] VM-compiled", vmResult.compiledCount, "statements (outside encryption)");
       }
     }
-    
+
     const stringKey=randInt(30,230);
     const stringShift=randInt(0,10);
     const ctx={stringKey,stringShift,rename:isMaximum?new RenameCtx():null};
     walkAst(ast,ctx);
     let ob=serialize(ast);
     const decoder=makeStringDecoder("_D",stringKey,stringShift);
-    let combined=decoder+"; "+vmPrefix+ob;
+    let combined=decoder+"; "+ob;
 
     if(isMedium)return combined;
 
-    return byteLevelTripleObfuscate(combined,level);
+    const encrypted = byteLevelTripleObfuscate(combined, level);
+    // v6.1: prepend VM harness OUTSIDE encryption for real hybrid protection
+    return vmOuterHarness ? (vmOuterHarness + "; " + encrypted) : encrypted;
   }catch(err){
     console.error("[obfuscator] Error:",err.message);
     try{
