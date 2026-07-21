@@ -1,4 +1,5 @@
-// AzureVM Obfuscator (patched v10.4 â€” declaration-order tracking, no reordering
+// AzureVM Obfuscator (patched v10.5 â€” VM whitelist: Roblox/executor globals only
+// v10.4 â€” declaration-order tracking, no reordering
 // v10.3 â€” top-local tracking, method-call passthrough
 // v10.2 â€” method-call passthrough, executor-aware loader
 // v10.1 â€” executor-aware loader chain)
@@ -1176,9 +1177,11 @@ function tryVmWrap(ast, level){
   const passthrough = [];
   let compiledCount = 0;
 
-  // v10.3: Collect top-level local declarations to avoid mis-compiling
-  // locals as globals (which turn into env[name] lookups â†’ nil at runtime)
-  const topLocals = new Set();
+  // v10.5: Only compile calls that reference KNOWN globals (Roblox stdlib + executor).
+  // The VM harness executes BEFORE user's top-level declarations run, so any
+  // user-declared symbol â€” even top-level 'local function foo' â€” is nil at VM time.
+  // Whitelist approach: reject any reference to symbols not in this safe set.
+  const topLocals = new Set();  // kept for compatibility, unused for VM decisions
   for(const stmt of ast.body){
     if(stmt.type === "LocalStatement" && stmt.variables){
       for(const v of stmt.variables){
@@ -1278,6 +1281,17 @@ function tryVmWrap(ast, level){
     "cloneref","gethui","getnamecallmethod","setnamecallmethod","isexecutorclosure"];
   for(const g of EXECUTOR_GLOBALS2) declaredSoFar.add(g);
 
+  // v10.5: Build strict whitelist â€” only Roblox + executor globals are VM-safe
+  const SAFE_GLOBALS = new Set();
+  for(const g of ROBLOX_GLOBALS) SAFE_GLOBALS.add(g);
+  const EXTRA_SAFE = ["hookfunction","hookmetamethod","getgenv","getrenv","getsenv","getreg",
+    "getconnections","getgc","getinstances","getnilinstances","getscripts","getloadedmodules",
+    "getcallingscript","getrawmetatable","setrawmetatable","checkcaller","isreadonly","setreadonly",
+    "iscclosure","islclosure","newcclosure","identifyexecutor","lz4compress","lz4decompress",
+    "queue_on_teleport","syn","fluxus","krnl","delta","request","http_request","http",
+    "cloneref","gethui","getnamecallmethod","setnamecallmethod","isexecutorclosure"];
+  for(const g of EXTRA_SAFE) SAFE_GLOBALS.add(g);
+
   function _refsUndeclared(node){
     if(!node || typeof node !== "object") return false;
     if(Array.isArray(node)){
@@ -1285,7 +1299,9 @@ function tryVmWrap(ast, level){
       return false;
     }
     if(node.type === "Identifier"){
-      return !declaredSoFar.has(node.name);
+      // v10.5: Only Roblox/executor globals are safe â€” everything else is user-declared
+      // and lives in the encrypted payload that runs AFTER the VM harness.
+      return !SAFE_GLOBALS.has(node.name);
     }
     if(node.type === "FunctionDeclaration" || node.type === "FunctionExpression") return false;
     for(const k of Object.keys(node)){
