@@ -318,6 +318,85 @@ function serializeGlobals(globals){
   return "{"+globals.map(g=>JSON.stringify(g)).join(",")+"}";
 }
 
+
+// v7.0: Constant Pool â€” global encrypted table with real + poison entries
+// Deobfuscator sees _CP[47] but has no clue what index 47 decodes to
+// without emulating the entire pool decryption
+function generateConstantPool(entries, poolKey, poolShift){
+  const poolBytes = [];
+  for(const entry of entries){
+    const encrypted = encryptString(entry, poolKey, poolShift);
+    poolBytes.push(encrypted);
+  }
+  // Add 20-40 poison decoy entries
+  const poisonCount = randInt(20, 40);
+  const poisonStrings = [
+    "HttpGet","GetService","Players","LocalPlayer","Character",
+    "Humanoid","WalkSpeed","JumpPower","Health","MaxHealth",
+    "PlayerAdded","CharacterAdded","GetChildren","WaitForChild",
+    "FindFirstChild","GetDescendants","IsA","ClassName","Name",
+    "Parent","game.Workspace","game.CoreGui","game.ReplicatedStorage",
+    "loadstring","game:HttpGet","Instance.new","Vector3.new","CFrame.new",
+    "Color3.fromRGB","UDim2.new","TweenService","RunService","UserInputService",
+    "MouseButton1Click","MouseButton1Down","KeyDown","InputBegan","Touched",
+    "AncestryChanged","Destroying","Changed","AttributeChanged","Heartbeat"
+  ];
+  for(let i = 0; i < poisonCount; i++){
+    const fake = poisonStrings[Math.floor(Math.random()*poisonStrings.length)];
+    poolBytes.push(encryptString(fake, poolKey, poolShift));
+  }
+  // Shuffle so real entries are hidden among poison
+  for(let i = poolBytes.length - 1; i > 0; i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [poolBytes[i],poolBytes[j]] = [poolBytes[j],poolBytes[i]];
+  }
+  return poolBytes;
+}
+
+
+// v7.0: Real Watermarking â€” user-specific fingerprint scattered as junk vars
+// Format: local _wmSIGSHORT = HASHNUM  (looks like junk, but SIGSHORT + HASHNUM
+// combination uniquely identifies which user obfuscated this)
+function generateUserWatermark(userId){
+  const uid = userId || "anon";
+  // Simple hash of userId
+  let hash = 0;
+  for(let i = 0; i < uid.length; i++){
+    hash = ((hash << 5) - hash + uid.charCodeAt(i)) | 0;
+  }
+  const sig = Math.abs(hash).toString(16).substring(0, 6);
+  const marks = [];
+  // Scatter 3-5 watermark vars
+  const markCount = randInt(3, 5);
+  for(let i = 0; i < markCount; i++){
+    const varName = "_wm" + sig.substring(i % sig.length, (i % sig.length) + 3);
+    const value = ((Math.abs(hash) >> (i * 4)) & 0xffff) | 1;
+    marks.push("local " + varName + "=" + value);
+  }
+  return marks.join("; ");
+}
+
+
+// v7.0: Anti-Dump Protection
+// Detects dumper tools calling getgc/getreg/debug.getupvalue and returns fake data
+// Prevents Sirhurt/Synapse dumper from extracting real strings/functions
+function generateAntiDump(){
+  const chkFn = randHexName(6);
+  const isDump = randHexName(5);
+  const fakeGc = randHexName(5);
+  const fakeReg = randHexName(5);
+  return "local " + chkFn + "=function() local " + isDump + "=false " +
+    "if getgc then local ok,_=pcall(function() local g=getgc(true) for _,v in ipairs(g) do if type(v)=='function' then local i=debug.getinfo and debug.getinfo(v,'S') if i and i.short_src and string.find(i.short_src,'dumper') then " + isDump + "=true end end end end) end " +
+    "if getreg then local ok=pcall(getreg) if not ok then " + isDump + "=true end end " +
+    "if " + isDump + " then " +
+    "local " + fakeGc + "=function() return {} end " +
+    "local " + fakeReg + "=function() return {['fake_data']='dumper_detected'} end " +
+    "if getgenv then pcall(function() getgenv().getgc=" + fakeGc + " getgenv().getreg=" + fakeReg + " end) end " +
+    "end " +
+    "return not " + isDump + " end " + chkFn + "()";
+}
+
+
 function tripleXorEncrypt(str,k1,k2,k3){
   const bytes=[];
   for(let i=0;i<str.length;i++){
@@ -568,8 +647,10 @@ function tryVmWrap(ast, level){
   return { vmHarness, passthrough, compiledCount };
 }
 
-function byteLevelTripleObfuscate(code,level){
+function byteLevelTripleObfuscate(code,level,userId){
   const minified=aggressiveMinify(code);
+  const watermark = generateUserWatermark(userId);
+  const antiDump = level === "maximum" ? generateAntiDump() : "";
   const k1=randInt(40,240);
   const k2=randInt(40,240);
   const k3=randInt(40,240);
@@ -588,6 +669,8 @@ function byteLevelTripleObfuscate(code,level){
 
   const parts=[];
   if(level==="maximum")parts.push(generateAntiTamper());
+  if(antiDump) parts.push(antiDump);
+  parts.push(watermark);
   parts.push(junk1);
   parts.push(fakeDecs);
   parts.push(decoder);
@@ -597,7 +680,7 @@ function byteLevelTripleObfuscate(code,level){
   return parts.join("; ");
 }
 
-async function obfuscate(luaCode,level){
+async function obfuscate(luaCode,level,userId){
   level=level||"medium";
   const _WM=pickWatermark();
   try{
@@ -617,7 +700,7 @@ async function obfuscate(luaCode,level){
     }
 
     if(!ast){
-      return _WM+byteLevelTripleObfuscate(code,level);
+      return _WM+byteLevelTripleObfuscate(code,level,userId);
     }
 
     const isMedium=level==="medium";
@@ -645,13 +728,13 @@ async function obfuscate(luaCode,level){
 
     if(isMedium)return _WM+combined;
 
-    const encrypted = byteLevelTripleObfuscate(combined, level);
+    const encrypted = byteLevelTripleObfuscate(combined, level, userId);
     // v6.1: prepend VM harness OUTSIDE encryption for real hybrid protection
     return _WM+(vmOuterHarness ? (vmOuterHarness + "; " + encrypted) : encrypted);
   }catch(err){
     console.error("[obfuscator] Error:",err.message);
     try{
-      return _WM+byteLevelTripleObfuscate(preprocess(luaCode),level);
+      return _WM+byteLevelTripleObfuscate(preprocess(luaCode),level,userId);
     }catch(e){
       throw new Error("Failed to obfuscate: "+err.message);
     }
