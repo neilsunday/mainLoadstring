@@ -1,4 +1,4 @@
-// AzureVM Obfuscator â€” v9.6 (Phase 3 hotfix 6: fixed block tracker â€” goto/label counts match)
+// AzureVM Obfuscator â€” v9.7 (Phase 3 hotfix 7: safer anti-tamper + robust loadstring fallback)
 // Improvements over v8.1:
 //   1. Constants Pool with poison entries (was: unused/broken)
 //   2. Position + prev-byte dependent stream cipher (was: triple XOR only)
@@ -969,26 +969,25 @@ function generateOpaquePredicate(payload){
   const c1=randChoice(conds);
   const c2=randChoice(conds);
   const junkV=randHexName(4);
-  return "if "+c1+" and "+c2+" then "+payload+" else local "+junkV+"="+randInt(1,999)+"*"+randInt(1,999)+" end";
+  // v9.7: wrap payload in pcall so nil-indexing errors don't crash whole script
+  // Roblox executors are inconsistent about global availability
+  return "if "+c1+" and "+c2+" then pcall(function() "+payload+" end) else local "+junkV+"="+randInt(1,999)+"*"+randInt(1,999)+" end";
 }
 
 function generateAntiTamper(){
   const wrapper=randHexName(6);
   const chk1=randHexName(5);
   const chk2=randHexName(5);
-  const chk3=randHexName(5);
   const flag=randHexName(4);
-  // v8.1: actual tamper response â€” infinite loop halts execution if env is wrong
-  // Also checks for hookfunction/hookmetamethod tampering (Synapse/Fluxus hooks)
+  // v9.7: NO longer invokes hookfunction as a test (conflicts with user scripts that
+  // hook things themselves). Just check for existence and expected type/behavior of core Lua.
   return "local "+wrapper+"=function() local "+flag+"=true "+
     "local "+chk1+"=pcall(function() return bit32.bxor(15,15)==0 end) "+
     "local "+chk2+"=pcall(function() return (type(game)=='userdata') or (type(game)=='table') or true end) "+
-    "local "+chk3+"=true "+
-    "if hookfunction then local _ok=pcall(function() local _f=function() return 1 end local _h=hookfunction(_f,function() return 2 end) if _f()~=2 then "+chk3+"=false end end) if not _ok then "+chk3+"=false end end "+
     "if not "+chk1+" then "+flag+"=false end "+
     "if not "+chk2+" then "+flag+"=false end "+
-    "if not "+chk3+" then "+flag+"=false end "+
-    "if not "+flag+" then while true do end end "+  // <-- real tamper response
+    // Soft tamper response â€” instead of infinite loop that could softlock Roblox,
+    // just returns false. Downstream code checks _L existence anyway.
     "return "+flag+" end "+wrapper+"()";
 }
 
