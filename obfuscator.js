@@ -1,3 +1,14 @@
+// AzureVM Obfuscator v12.0 - Phase 1 patched
+// Applied fixes:
+//   P0.1  Fixed `const code` self-reference in obfuscate() main flow
+//   P0.2  Fixed `effectiveIsMaximum` used-before-declared (TDZ ReferenceError)
+//   P0.3  Fixed HALT dispatch: `elseif op=` -> `elseif op==`
+//   P1.1  Polymorphic opcodes verified active (was silently disabled by P0.2)
+//   P1.2  VM dispatch branches now shuffled per run (real + junk intermixed)
+//   P1.4  Removed dead makeOpTable() (replaced by makeRandomizedOpTable)
+// Effect: main obfuscation path (v13/v14/v16 features, VM wrap on maximum)
+// now actually runs instead of throwing TDZ and falling back to minifier.
+//
 // AzureVM Obfuscator v11.4 - line-break minifier for executor compatibility
 // v11.4 changes:
 // - Aggressive minify now inserts newlines every ~500 chars at safe boundaries
@@ -161,17 +172,7 @@ function makeStreamCipherDecoder(fnName, key1, key2, key3, iv){
   "end";
 }
 
-function makeOpTable(){
-  const nums = [];
-  const seen = new Set();
-  while(nums.length < OP_NAMES.length){
-    const n = randInt(1, 250);
-    if(!seen.has(n)){ seen.add(n); nums.push(n); }
-  }
-  const table = {};
-  OP_NAMES.forEach((name,i)=>{ table[name] = nums[i]; });
-  return table;
-}
+// P1.4 removed: makeOpTable() dead - superseded by makeRandomizedOpTable() (v14.0)
 
 function preprocess(code){
   code=code.replace(/\r\n/g,"\n").replace(/\r/g,"\n");
@@ -743,68 +744,108 @@ function vmCompileStmt(node,bc,consts,globals,OP){
 }
 
 function generateVMInterpreter(vmFn,OP,junkOpNames){
-  return "local function "+vmFn+"(bc,ks,gs,env) local st={} local sp=0 local function ps(v) sp=sp+1 st[sp]=v end local function pp() local v=st[sp] st[sp]=nil sp=sp-1 return v end local pc=1 while true do local op=bc[pc] pc=pc+1 "
-    +"if op=="+OP.PUSH_CONST+" then ps(ks[bc[pc]+1]) pc=pc+1 "
-    +"elseif op=="+OP.PUSH_NIL+" then ps(nil) "
-    +"elseif op=="+OP.PUSH_TRUE+" then ps(true) "
-    +"elseif op=="+OP.PUSH_FALSE+" then ps(false) "
-    +"elseif op=="+OP.PUSH_GLOBAL+" then ps(env[gs[bc[pc]+1]]) pc=pc+1 "
-    +"elseif op=="+OP.SET_GLOBAL+" then env[gs[bc[pc]+1]]=pp() pc=pc+1 "
-    +"elseif op=="+OP.DUP+" then ps(st[sp]) "
-    +"elseif op=="+OP.POP+" then pp() "
-    +"elseif op=="+OP.CALL+" then local na=bc[pc] pc=pc+1 local nr=bc[pc] pc=pc+1 local a={} for i=na,1,-1 do a[i]=pp() end local f=pp() local r={f(unpack(a))} if nr>0 then for i=1,nr do ps(r[i]) end end "
-    +"elseif op=="+OP.RETURN+" then return "
-    +"elseif op=="+OP.ADD+" then local b=pp() local a=pp() ps(a+b) "
-    +"elseif op=="+OP.SUB+" then local b=pp() local a=pp() ps(a-b) "
-    +"elseif op=="+OP.MUL+" then local b=pp() local a=pp() ps(a*b) "
-    +"elseif op=="+OP.DIV+" then local b=pp() local a=pp() ps(a/b) "
-    +"elseif op=="+OP.MOD+" then local b=pp() local a=pp() ps(a%b) "
-    +"elseif op=="+OP.POW+" then local b=pp() local a=pp() ps(a^b) "
-    +"elseif op=="+OP.CONCAT+" then local b=pp() local a=pp() ps(a..b) "
-    +"elseif op=="+OP.EQ+" then local b=pp() local a=pp() ps(a==b) "
-    +"elseif op=="+OP.NEQ+" then local b=pp() local a=pp() ps(a~=b) "
-    +"elseif op=="+OP.LT+" then local b=pp() local a=pp() ps(a<b) "
-    +"elseif op=="+OP.LE+" then local b=pp() local a=pp() ps(a<=b) "
-    +"elseif op=="+OP.GT+" then local b=pp() local a=pp() ps(a>b) "
-    +"elseif op=="+OP.GE+" then local b=pp() local a=pp() ps(a>=b) "
-    +"elseif op=="+OP.NOT+" then ps(not pp()) "
-    +"elseif op=="+OP.NEG+" then ps(-pp()) "
-    +"elseif op=="+OP.LEN+" then ps(#pp()) "
-    +"elseif op=="+OP.JMP+" then pc=pc+bc[pc] "
-    +"elseif op=="+OP.JMP_IF_FALSE+" then local v=pp() local o=bc[pc] pc=pc+1 if not v then pc=pc+o end "
-    +"elseif op=="+OP.JMP_IF_TRUE+" then local v=pp() local o=bc[pc] pc=pc+1 if v then pc=pc+o end "
-    +"elseif op=="+OP.NEW_TABLE+" then ps({}) "
-    +"elseif op=="+OP.SET_INDEX+" then local v=pp() local k=pp() local t=st[sp] t[k]=v "
-    +"elseif op=="+OP.GET_INDEX+" then local k=pp() local t=pp() ps(t[k]) "
-    +"elseif op=="+OP.GET_MEMBER+" then local m=ks[bc[pc]+1] pc=pc+1 local t=pp() ps(t[m]) "
-    +"elseif op=="+OP.SET_MEMBER+" then local m=ks[bc[pc]+1] pc=pc+1 local v=pp() local t=pp() t[m]=v "
-    +"elseif op=="+OP.METHOD_CALL+" then local m=ks[bc[pc]+1] pc=pc+1 local na=bc[pc] pc=pc+1 local nr=bc[pc] pc=pc+1 local a={} for i=na,1,-1 do a[i]=pp() end local t=pp() local r={t[m](t,unpack(a))} if nr>0 then for i=1,nr do ps(r[i]) end end "
-    +"elseif op="+OP.HALT+" then break "
-    +generateJunkOpHandlers(OP, junkOpNames || [])
-    // v9.0: Dummy opcode handlers - - - - - - - - - - - - - dispatch table looks richer than it is
-    +"elseif op=="+OP.NOP_A+" then local _n=1+2 "
-    +"elseif op=="+OP.NOP_B+" then local _n=bit32.band(15,15) "
-    +"elseif op=="+OP.NOP_C+" then local _n=math.floor(3.14) "
-    +"elseif op=="+OP.NOP_D+" then local _n=#'x' "
-    +"elseif op=="+OP.NOP_E+" then local _n=string.byte('a') "
-    +"elseif op=="+OP.SWAP+" then local a=pp() local b=pp() ps(a) ps(b) "
-    +"elseif op=="+OP.ROT3+" then local a=pp() local b=pp() local c=pp() ps(b) ps(a) ps(c) "
-    +"elseif op=="+OP.PUSH_ZERO+" then ps(0) "
-    +"elseif op=="+OP.PUSH_ONE+" then ps(1) "
-    +"elseif op=="+OP.PUSH_NEG_ONE+" then ps(-1) "
-    +"elseif op=="+OP.INC+" then local a=pp() ps(a+1) "
-    +"elseif op=="+OP.DEC+" then local a=pp() ps(a-1) "
-    +"elseif op=="+OP.DOUBLE+" then local a=pp() ps(a*2) "
-    +"elseif op=="+OP.HALVE+" then local a=pp() ps(a/2) "
-    +"elseif op=="+OP.SQUARE+" then local a=pp() ps(a*a) "
-    +"elseif op=="+OP.STR_LEN+" then local a=pp() ps(#tostring(a)) "
-    +"elseif op=="+OP.STR_UPPER+" then local a=pp() ps(string.upper(tostring(a))) "
-    +"elseif op=="+OP.STR_LOWER+" then local a=pp() ps(string.lower(tostring(a))) "
-    +"elseif op=="+OP.STR_REVERSE+" then local a=pp() ps(string.reverse(tostring(a))) "
-    +"elseif op=="+OP.BITWISE_XOR+" then local b=pp() local a=pp() ps(bit32.bxor(a,b)) "
-    +"end end end";
-}
+  // P1.2: Real + junk branches are shuffled per run so the dispatcher's
+  // static structure differs across obfuscations. Semantics unchanged - only
+  // the source order of the elseif chain varies. The first branch keyword
+  // becomes "if"; all subsequent branches use "elseif". HALT check restored
+  // to "op==" (was "op=" - see P0.3).
+  const realBranches = [
+    ["PUSH_CONST",   "ps(ks[bc[pc]+1]) pc=pc+1"],
+    ["PUSH_NIL",     "ps(nil)"],
+    ["PUSH_TRUE",    "ps(true)"],
+    ["PUSH_FALSE",   "ps(false)"],
+    ["PUSH_GLOBAL",  "ps(env[gs[bc[pc]+1]]) pc=pc+1"],
+    ["SET_GLOBAL",   "env[gs[bc[pc]+1]]=pp() pc=pc+1"],
+    ["DUP",          "ps(st[sp])"],
+    ["POP",          "pp()"],
+    ["CALL",         "local na=bc[pc] pc=pc+1 local nr=bc[pc] pc=pc+1 local a={} for i=na,1,-1 do a[i]=pp() end local f=pp() local r={f(unpack(a))} if nr>0 then for i=1,nr do ps(r[i]) end end"],
+    ["RETURN",       "return"],
+    ["ADD",          "local b=pp() local a=pp() ps(a+b)"],
+    ["SUB",          "local b=pp() local a=pp() ps(a-b)"],
+    ["MUL",          "local b=pp() local a=pp() ps(a*b)"],
+    ["DIV",          "local b=pp() local a=pp() ps(a/b)"],
+    ["MOD",          "local b=pp() local a=pp() ps(a%b)"],
+    ["POW",          "local b=pp() local a=pp() ps(a^b)"],
+    ["CONCAT",       "local b=pp() local a=pp() ps(a..b)"],
+    ["EQ",           "local b=pp() local a=pp() ps(a==b)"],
+    ["NEQ",          "local b=pp() local a=pp() ps(a~=b)"],
+    ["LT",           "local b=pp() local a=pp() ps(a<b)"],
+    ["LE",           "local b=pp() local a=pp() ps(a<=b)"],
+    ["GT",           "local b=pp() local a=pp() ps(a>b)"],
+    ["GE",           "local b=pp() local a=pp() ps(a>=b)"],
+    ["NOT",          "ps(not pp())"],
+    ["NEG",          "ps(-pp())"],
+    ["LEN",          "ps(#pp())"],
+    ["JMP",          "pc=pc+bc[pc]"],
+    ["JMP_IF_FALSE", "local v=pp() local o=bc[pc] pc=pc+1 if not v then pc=pc+o end"],
+    ["JMP_IF_TRUE",  "local v=pp() local o=bc[pc] pc=pc+1 if v then pc=pc+o end"],
+    ["NEW_TABLE",    "ps({})"],
+    ["SET_INDEX",    "local v=pp() local k=pp() local t=st[sp] t[k]=v"],
+    ["GET_INDEX",    "local k=pp() local t=pp() ps(t[k])"],
+    ["GET_MEMBER",   "local m=ks[bc[pc]+1] pc=pc+1 local t=pp() ps(t[m])"],
+    ["SET_MEMBER",   "local m=ks[bc[pc]+1] pc=pc+1 local v=pp() local t=pp() t[m]=v"],
+    ["METHOD_CALL",  "local m=ks[bc[pc]+1] pc=pc+1 local na=bc[pc] pc=pc+1 local nr=bc[pc] pc=pc+1 local a={} for i=na,1,-1 do a[i]=pp() end local t=pp() local r={t[m](t,unpack(a))} if nr>0 then for i=1,nr do ps(r[i]) end end"],
+    ["HALT",         "break"],
+    // v9.0 dummy opcodes - never emitted, present in dispatcher
+    ["NOP_A",        "local _n=1+2"],
+    ["NOP_B",        "local _n=bit32.band(15,15)"],
+    ["NOP_C",        "local _n=math.floor(3.14)"],
+    ["NOP_D",        "local _n=#'x'"],
+    ["NOP_E",        "local _n=string.byte('a')"],
+    ["SWAP",         "local a=pp() local b=pp() ps(a) ps(b)"],
+    ["ROT3",         "local a=pp() local b=pp() local c=pp() ps(b) ps(a) ps(c)"],
+    ["PUSH_ZERO",    "ps(0)"],
+    ["PUSH_ONE",     "ps(1)"],
+    ["PUSH_NEG_ONE", "ps(-1)"],
+    ["INC",          "local a=pp() ps(a+1)"],
+    ["DEC",          "local a=pp() ps(a-1)"],
+    ["DOUBLE",       "local a=pp() ps(a*2)"],
+    ["HALVE",        "local a=pp() ps(a/2)"],
+    ["SQUARE",       "local a=pp() ps(a*a)"],
+    ["STR_LEN",      "local a=pp() ps(#tostring(a))"],
+    ["STR_UPPER",    "local a=pp() ps(string.upper(tostring(a)))"],
+    ["STR_LOWER",    "local a=pp() ps(string.lower(tostring(a)))"],
+    ["STR_REVERSE",  "local a=pp() ps(string.reverse(tostring(a)))"],
+    ["BITWISE_XOR",  "local b=pp() local a=pp() ps(bit32.bxor(a,b))"]
+  ];
 
+  // Junk branches with per-run random bodies
+  const junkBranches = [];
+  for (const name of (junkOpNames || [])) {
+    const body = randChoice([
+      "local _j=bit32.bxor(" + randInt(1,255) + "," + randInt(1,255) + ")",
+      "local _j=math.floor(" + randInt(100,9999) + "/" + randInt(2,9) + ")",
+      "local _j=string.byte('" + randChoice(["x","a","z","q","m","n"]) + "')",
+      "local _j=#'" + randChoice(["abc","xyzq","mnop","test"]) + "'"
+    ]);
+    junkBranches.push([name, body]);
+  }
+
+  // Combine + Fisher-Yates shuffle (crypto-random via _secRand)
+  const allBranches = realBranches.concat(junkBranches);
+  for (let i = allBranches.length - 1; i > 0; i--) {
+    const j = _secRand(0, i);
+    const tmp = allBranches[i]; allBranches[i] = allBranches[j]; allBranches[j] = tmp;
+  }
+
+  const header = "local function " + vmFn +
+    "(bc,ks,gs,env) local st={} local sp=0 " +
+    "local function ps(v) sp=sp+1 st[sp]=v end " +
+    "local function pp() local v=st[sp] st[sp]=nil sp=sp-1 return v end " +
+    "local pc=1 while true do local op=bc[pc] pc=pc+1 ";
+
+  let dispatch = "";
+  let emittedCount = 0;
+  for (const [name, body] of allBranches) {
+    const opNum = OP[name];
+    if (opNum == null) continue;
+    const keyword = emittedCount === 0 ? "if" : "elseif";
+    dispatch += keyword + " op==" + opNum + " then " + body + " ";
+    emittedCount++;
+  }
+
+  return header + dispatch + "end end end";
+}
 function packBytecode(bc){
   // v8.1: 24-bit packing prevents silent truncation for large const pools
   const bytes=[];
@@ -2698,24 +2739,31 @@ async function obfuscate(luaCode,level,userId){
       console.log("[obfuscator v16]   " + reason);
     }
 
-    // Apply strategy overrides
-    if (strategy.baseLevelOverride === "medium" && isMaximum) {
-      console.log("[obfuscator v16] Auto-tuning: maximum - â€™ medium (safer for this script)");
-      effectiveIsMaximum = false;
-    }
-
-    // Capture fingerprint of PRE-obfuscation code for post-check
-    const preFingerprint = semanticFingerprint(code);
-
+    // === P0 FIX: hoist base var declarations ABOVE any first-use ===
+    // Previously `code`, `isMaximum`, and `effectiveIsMaximum` were used
+    // before their declarations, causing TDZ ReferenceError that made the
+    // main path silently fall back to the byte-level minifier.
+    // We ONLY hoist the base declarations here; the actual downgrade LOGIC
+    // stays in its original position (below profileScript) because it
+    // depends on `profile` and `strategy` which are declared later.
     const code = analysis.convertedCode;
     const ast = analysis.ast;
 
     if(level==="none")return _WM+code;
     if(level==="basic")return _WM+aggressiveMinify(code);
 
+    const isMedium = level==="medium";
+    const isMaximum = level==="maximum";
+    let effectiveIsMaximum = isMaximum;  // may be downgraded further below
 
-    const isMedium=level==="medium";
-    const isMaximum=level==="maximum";
+    // Apply strategy overrides
+    if (strategy.baseLevelOverride === "medium" && isMaximum) {
+      console.log("[obfuscator v16] Auto-tuning: maximum to medium (safer for this script)");
+      effectiveIsMaximum = false;
+    }
+
+    // Capture fingerprint of PRE-obfuscation code for post-check
+    const preFingerprint = semanticFingerprint(code);
 
     // v6.1: VM harness stays OUTSIDE the byte-level encryption
     // Attacker sees random opcodes + interpreter but no context on what runs
@@ -2753,13 +2801,11 @@ async function obfuscate(luaCode,level,userId){
         profile.hotspots[profile.hotspots.length-1].depth + ")");
     }
 
-    // === v13.0 ADAPTIVE STRATEGY DOWNGRADE ===
-    // If the script has extreme complexity + uses hooks, force lighter obfuscation
-    // to avoid runtime breakage of sensitive constructs.
-    let effectiveIsMaximum = isMaximum;
+    // === v13.0 ADAPTIVE STRATEGY DOWNGRADE (hoisted P0 fix) ===
+    // Actual downgrade logic runs HERE (after profile is available).
     if (profile.riskTier === "extreme" && (profile.hasHookfunction || profile.hasHookmetamethod)) {
       if (isMaximum) {
-        console.log("[obfuscator v13] Auto-downgrading maximum- â€™medium (extreme risk + hooks detected)");
+        console.log("[obfuscator v13] Auto-downgrading maximum to medium (extreme risk + hooks detected)");
         effectiveIsMaximum = false;
       }
     }
