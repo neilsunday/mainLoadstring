@@ -1,4 +1,4 @@
-// AzureVM Obfuscator â€” v9.1 (Phase 3 hotfix: Luau support + fallback bug fix)
+// AzureVM Obfuscator â€” v9.3 (Phase 3 hotfix 3: Luau support with safe type annotation regex)
 // Improvements over v8.1:
 //   1. Constants Pool with poison entries (was: unused/broken)
 //   2. Position + prev-byte dependent stream cipher (was: triple XOR only)
@@ -201,7 +201,11 @@ function preprocess(code){
 // v9.1: Convert Luau-specific syntax to plain Lua 5.1 so luaparse can handle it
 // Handles: compound assignments (+=, -=, *=, /=, ..=), continue statements, type annotations
 function luauToLua(code) {
-  // Skip string literals when applying replacements â€” protect them first
+  // v9.3: Only strip type annotations in SAFE positions.
+  // Roblox code uses ':' EVERYWHERE for method calls (game:GetService(...)),
+  // so we cannot blindly strip ':Type' â€” must be careful about context.
+
+  // Protect strings + comments first
   const strings = [];
   let idx = 0;
   const placeholder = (s) => {
@@ -210,48 +214,67 @@ function luauToLua(code) {
     return key;
   };
 
-  // Extract short strings (double-quoted, single-quoted) to protect them
   let work = code;
+  // Long-bracket comments
+  work = work.replace(/--\[(=*)\[[\s\S]*?\]\1\]/g, "");
+  // Line comments
+  work = work.replace(/--[^\n]*/g, "");
+  // Long-bracket strings
+  work = work.replace(/\[(=*)\[([\s\S]*?)\]\1\]/g, (m) => placeholder(m));
+  // Regular strings
   work = work.replace(/"(?:[^"\\\n]|\\.)*"/g, (m) => placeholder(m));
   work = work.replace(/'(?:[^'\\\n]|\\.)*'/g, (m) => placeholder(m));
-  // Long bracket strings
-  work = work.replace(/\[(=*)\[([\s\S]*?)\]\1\]/g, (m) => placeholder(m));
-  // Comments
-  work = work.replace(/--\[(=*)\[[\s\S]*?\]\1\]/g, "");
-  work = work.replace(/--[^\n]*/g, "");
 
   // ---- Compound assignments: a += b  â†’  a = a + b ----
-  // Must match: identifier or member expression on left
   const IDENT = "[A-Za-z_][A-Za-z0-9_]*";
   const CHAIN = IDENT + "(?:\\s*[.:]\\s*" + IDENT + "|\\s*\\[[^\\]]+\\])*";
   const compoundRegex = new RegExp("(" + CHAIN + ")\\s*([+\\-*/%]|\\.\\.)=\\s*", "g");
-  work = work.replace(compoundRegex, (m, lhs, op) => {
-    // Only rewrite if this is really compound (not ==, <=, >=, ~=, +=)
-    // The regex already excludes those by the char class
-    return lhs + " = " + lhs + " " + op + " ";
+  work = work.replace(compoundRegex, (m, lhs, op) => lhs + " = " + lhs + " " + op + " ");
+
+  // ---- continue â†’ commented out (parse-safe no-op) ----
+  work = work.replace(/\bcontinue\b/g, "--[[continue]]");
+
+  // ---- Type annotations (SAFE version) ----
+  // Only strip type annotations in these SPECIFIC contexts:
+  //   1. local x: Type = ...  â†’  local x = ...
+  //   2. local x: Type\n  â†’  local x\n  (declaration without init)
+  //   3. function name(param: Type, ...)  â†’  function name(param, ...)
+  //   4. function name(...): ReturnType  â†’  function name(...)
+  //   5. type Foo = ...  â†’  (line removed)
+  //   6. export type Foo = ...  â†’  (line removed)
+
+  // Rule 1 & 2: 'local IDENT : Type' â€” the ':Type' is a type annotation
+  // Match: local IDENT [, IDENT]* : Type [= or newline or end-of-statement]
+  // Simple case: single var
+  work = work.replace(
+    /(\blocal\s+" + IDENT + "(?:\\s*,\\s*" + IDENT + ")*)\\s*:\\s*[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?(?:\\.[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?)*\\??/g,
+    "$1"
+  );
+
+  // Rule 3: function param types
+  // Match inside parens: (name: Type, name: Type)
+  // Do this iteratively per paren group
+  work = work.replace(/\(([^()]*)\)/g, (m, inside) => {
+    // Split by comma at top level, strip type annotations from each param
+    const cleaned = inside.replace(
+      new RegExp("(" + IDENT + ")\\s*:\\s*[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?(?:\\.[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?)*\\??", "g"),
+      "$1"
+    );
+    return "(" + cleaned + ")";
   });
 
-  // ---- continue â†’ goto continue_N + label ----
-  // Simplest: replace 'continue' with 'do end' (no-op) then it fails anyway
-  // Better: use goto in Lua 5.2+, but we're on 5.1. Use per-loop label trick.
-  // Simplest safe fix: convert 'continue' inside for/while loops to nested if wrapper.
-  // Since that's complex, let's do the SIMPLE approach: replace continue with a marker
-  // that's harmless. In practice, we can convert 'continue' â†’ 'goto __continue' 
-  // and add ::__continue:: at end of each loop body. That needs AST-level work.
-  //
-  // Pragmatic fallback: try Lua 5.3 parser first (supports goto). If script uses continue,
-  // rewrite continue â†’ do return end (bail out of iteration) â€” NOT semantically identical
-  // but keeps parse working. User should test.
-  //
-  // For now: convert continue â†’ goto continue_label (Lua 5.3 syntax)
-  // luaparse with luaVersion 5.3 will accept this
-  work = work.replace(/\bcontinue\b/g, "goto __continue__");
+  // Rule 4: function return types: ): ReturnType (only after ) and before newline/end/=)
+  // Match: ) : IDENT ... at end of line or before keywords
+  work = work.replace(
+    /(\))\s*:\s*[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?(?:\.[A-Za-z_][A-Za-z0-9_]*(?:<[^>]*>)?)*\??(?=\s*(?:\n|--|\bthen\b|\bdo\b|\breturn\b|\blocal\b|\bif\b|\bfor\b|\bwhile\b|\brepeat\b|\bend\b|;|$))/g,
+    "$1"
+  );
 
-  // ---- Type annotations: local x: Type = ... â†’ local x = ... ----
-  // Match: local IDENT : Type = ...  OR  function(param: Type)
-  work = work.replace(/(local\s+" + IDENT + ")\\s*:\\s*" + IDENT + "(\\s*=)/g, "$1$2");
-  work = work.replace(/(\(\s*" + IDENT + ")\\s*:\\s*" + IDENT + "/g, "$1");
-  work = work.replace(/(,\\s*" + IDENT + ")\\s*:\\s*" + IDENT + "/g, "$1");
+  // Rule 5: type aliases
+  work = work.replace(/^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:<[^>]*>)?\s*=.*$/gm, "");
+
+  // Rule 6: export type
+  work = work.replace(/^\s*export\s+type\s+.*$/gm, "");
 
   // Restore protected strings
   for (const s of strings) {
