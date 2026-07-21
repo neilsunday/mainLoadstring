@@ -11,14 +11,6 @@
 //   - Continue labels: safer function-boundary check
 //   - Better parse-error reporting: exact line + context in logs
 //   - Downgrades gracefully with loud warnings instead of silent byte-level fallback
-// v10.6 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â disabled buggy string encryption
-// v10.5 ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â VM whitelist: Roblox/executor globals only
-// v10.4 ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â declaration-order tracking, no reordering
-// v10.3 ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â top-local tracking, method-call passthrough
-// v10.2 ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â method-call passthrough, executor-aware loader
-// v10.1 ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â executor-aware loader chain)
-// Original:  ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â v10.0 (Complete rewrite: simple exec_core, no nested returns, no CFF wrap)
-// Improvements over v8.1:
 //   1. Constants Pool with poison entries (was: unused/broken)
 //   2. Position + prev-byte dependent stream cipher (was: triple XOR only)
 //   3. VM expanded to 55+ opcodes with dummy variants (was: 35)
@@ -1117,67 +1109,147 @@ function encodeNumber(n){
   }
 }
 
+// v15.0: Scope-aware RenameCtx
+// Each nested scope (function/block) gets its own local map. When looking up
+// a name, we walk from innermost to outermost scope. When declaring a new
+// local, it goes into the current scope only â€” so `local dragging` in
+// function A doesn't conflict with `local dragging` in function B.
 class RenameCtx{
   constructor(externalSet){
-    this.map=new Map();
-    this.counter=0;
-    // v11.3: extra whitelist of identifiers this script depends on but doesn't declare.
-    // These are auto-detected from the AST ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â filesystem calls, executor globals,
-    // Roblox datatypes, anything the runtime provides.
+    // Stack of scope maps. The top of stack is the innermost active scope.
+    this.scopes = [new Map()];  // start with a global-ish scope for top-level locals
+    this.counter = 0;
     this.externals = externalSet || new Set();
   }
-  rename(name){
-    if(ROBLOX_GLOBALS.has(name))return name;
-    if(this.externals.has(name))return name;  // v11.3: auto-detected externals
-    if(this.map.has(name))return this.map.get(name);
-    const n=randHexName(6)+"_"+this.counter.toString(16);
+
+  pushScope(){
+    this.scopes.push(new Map());
+  }
+
+  popScope(){
+    if(this.scopes.length > 1){
+      this.scopes.pop();
+    }
+  }
+
+  declare(name){
+    if(ROBLOX_GLOBALS.has(name)) return name;
+    if(this.externals.has(name)) return name;
+    const n = randHexName(6) + "_" + this.counter.toString(16);
     this.counter++;
-    this.map.set(name,n);
+    this.scopes[this.scopes.length - 1].set(name, n);
     return n;
   }
+
+  lookup(name){
+    if(ROBLOX_GLOBALS.has(name)) return name;
+    if(this.externals.has(name)) return name;
+    for(let i = this.scopes.length - 1; i >= 0; i--){
+      if(this.scopes[i].has(name)){
+        return this.scopes[i].get(name);
+      }
+    }
+    return name;
+  }
+
+  rename(name){
+    if(ROBLOX_GLOBALS.has(name)) return name;
+    if(this.externals.has(name)) return name;
+    const cur = this.scopes[this.scopes.length - 1];
+    if(cur.has(name)) return cur.get(name);
+    return this.declare(name);
+  }
+
+  get map(){
+    const self = this;
+    return {
+      has: (name) => {
+        if(ROBLOX_GLOBALS.has(name)) return false;
+        if(self.externals.has(name)) return false;
+        for(let i = self.scopes.length - 1; i >= 0; i--){
+          if(self.scopes[i].has(name)) return true;
+        }
+        return false;
+      },
+      get: (name) => self.lookup(name),
+    };
+  }
+}
 }
 
 function walkAst(node,ctx){
   if(!node||typeof node!=="object")return;
-  // v10.6: DISABLED string encryption ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â was producing literal "null" tokens
-  // in output when encryptString returned empty bytes or node.value became stale.
-  // Strings now pass through serialize as JSON.stringify(node.value) directly.
-  // if(node.type==="StringLiteral"&&typeof node.value==="string"){
-  //   node.__obf={type:"str",bytes:encryptString(node.value,ctx.stringKey,ctx.stringShift)};
-  //   return;
-  // }
+
   if(node.type==="NumericLiteral"&&typeof node.value==="number"){
     node.__obf={type:"num",expr:encodeNumber(node.value)};
     return;
   }
-  if(ctx.rename){
-    if(node.type==="LocalStatement"&&Array.isArray(node.variables)){
-      node.variables.forEach(v=>{if(v.type==="Identifier"&&v.name)v.name=ctx.rename.rename(v.name);});
-    }
-    if(node.type==="FunctionDeclaration"){
-      if(node.isLocal&&node.identifier&&node.identifier.type==="Identifier"){
-        node.identifier.name=ctx.rename.rename(node.identifier.name);
-      }
-      if(Array.isArray(node.parameters)){
-        node.parameters.forEach(p=>{if(p.type==="Identifier"&&p.name)p.name=ctx.rename.rename(p.name);});
-      }
-    }
-    if(node.type==="ForNumericStatement"&&node.variable){
-      node.variable.name=ctx.rename.rename(node.variable.name);
-    }
-    if(node.type==="ForGenericStatement"&&Array.isArray(node.variables)){
-      node.variables.forEach(v=>{v.name=ctx.rename.rename(v.name);});
+
+  // v15.0: Scope management for function/loop bodies
+  const opensNewScope = ctx.rename && (
+    node.type==="FunctionDeclaration" ||
+    node.type==="FunctionExpression"
+  );
+
+  // For local function declarations, declare the name in the PARENT scope
+  // BEFORE opening the new function scope (so recursive calls work).
+  if(ctx.rename && node.type==="FunctionDeclaration"
+     && node.isLocal && node.identifier && node.identifier.type==="Identifier"){
+    node.identifier.name = ctx.rename.declare(node.identifier.name);
+  }
+
+  if(opensNewScope){
+    ctx.rename.pushScope();
+    if(Array.isArray(node.parameters)){
+      node.parameters.forEach(p=>{
+        if(p.type==="Identifier"&&p.name) p.name=ctx.rename.declare(p.name);
+      });
     }
   }
+
+  const opensLoopScope = ctx.rename && (
+    node.type==="ForNumericStatement" ||
+    node.type==="ForGenericStatement"
+  );
+  if(opensLoopScope){
+    ctx.rename.pushScope();
+    if(node.type==="ForNumericStatement" && node.variable && node.variable.name){
+      node.variable.name = ctx.rename.declare(node.variable.name);
+    }
+    if(node.type==="ForGenericStatement" && Array.isArray(node.variables)){
+      node.variables.forEach(v=>{
+        if(v.name) v.name = ctx.rename.declare(v.name);
+      });
+    }
+  }
+
+  if(ctx.rename){
+    if(node.type==="LocalStatement"&&Array.isArray(node.variables)){
+      node.variables.forEach(v=>{
+        if(v.type==="Identifier"&&v.name) v.name=ctx.rename.declare(v.name);
+      });
+    }
+  }
+
   for(const k in node){
     if(k==="loc"||k==="range"||k==="__obf")continue;
+    // Skip re-processing the parameter/variable arrays we already handled
+    if(opensNewScope && k==="parameters") continue;
+    if(opensLoopScope && (k==="variable" || k==="variables")) continue;
+    if(ctx.rename && node.type==="LocalStatement" && k==="variables") continue;
+    if(ctx.rename && node.type==="FunctionDeclaration" && k==="identifier" && node.isLocal) continue;
+
     const c=node[k];
     if(Array.isArray(c))c.forEach(x=>walkAst(x,ctx));
     else if(c&&typeof c==="object")walkAst(c,ctx);
   }
-  if(ctx.rename&&node.type==="Identifier"&&node.name&&ctx.rename.map.has(node.name)){
-    node.name=ctx.rename.map.get(node.name);
+
+  if(ctx.rename&&node.type==="Identifier"&&node.name){
+    node.name = ctx.rename.lookup(node.name);
   }
+
+  if(opensNewScope) ctx.rename.popScope();
+  if(opensLoopScope) ctx.rename.popScope();
 }
 
 function serializeBlock(stmts){
