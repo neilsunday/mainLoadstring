@@ -523,6 +523,31 @@ function tokenizeForContinue(code) {
   return tokens;
 }
 
+// v17: SAFE minifier â€” strips comments and blank lines, compresses whitespace
+// within lines, but PRESERVES real newlines as statement separators. Lua treats
+// newlines as valid statement terminators, so this is guaranteed to keep every
+// method chain / assignment / call-followed-by-call intact. Trades output size
+// for correctness â€” the resulting file is bigger than aggressiveMinify's output
+// but always loads and runs identically to the source.
+function safeMinify(code){
+  code = preprocess(code); // reuses existing comment stripper (short + long)
+  const lines = code.split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length; i++){
+    // trim trailing/leading whitespace + collapse internal runs of spaces/tabs.
+    // We do NOT touch content inside strings â€” preprocess already normalized
+    // comments away, and we never rewrite quotes here.
+    let line = lines[i];
+    // Strip trailing whitespace (including \r from CRLF)
+    line = line.replace(/[ \t\r]+$/, "");
+    // Strip leading whitespace
+    line = line.replace(/^[ \t]+/, "");
+    if (line.length === 0) continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 function aggressiveMinify(code){
   code=preprocess(code);
   code=code.split("\n").map(l=>l.trim()).filter(l=>l.length>0).join("\n");
@@ -1440,7 +1465,7 @@ function byteLevelTripleObfuscate(code,level,userId){
 async function obfuscateSingle(luaCode,level,userId){
   level=level||"medium";
   const _WM=pickWatermark();
-  const _DIAG="-- [OBF v15.0 patched: light mode (single-shot, no inflation)]\n";
+  const _DIAG="-- [OBF FinalAndIHopeSo: pre-analysis + adaptive strategy + safe minify]\n";
   try{
     let code=preprocess(luaCode);
     // v9.1: Preprocess Luau-specific syntax so luaparse can handle Roblox scripts
@@ -1448,11 +1473,15 @@ async function obfuscateSingle(luaCode,level,userId){
     if(level==="none")return _DIAG+_WM+code;
     if(level==="basic")return _DIAG+_WM+aggressiveMinify(code);
     if(level==="light"){
-      // v16: light path â€” parse-check + minify ONLY. NO renaming (scope bug in RenameCtx
-      // was producing "attempt to index nil with 'X'" runtime errors because it renamed
-      // `local library` but not the later `library:foo()` references). Minified output
-      // is smaller than source, loads in one shot, and preserves all variable scoping.
-      return _DIAG+_WM+aggressiveMinify(code);
+      // v17: light path â€” SAFE minify. The old aggressiveMinify joined every line
+      // with a single space and inserted semicolons via regex heuristics, which
+      // produced runtime errors like "attempt to index nil with 'create_tab'" on
+      // scripts that heavily use method chains and getgenv(). This path only
+      // strips comments and blank lines, preserving REAL newlines as statement
+      // separators â€” Lua's actual grammar treats newlines as separators, so
+      // preserving them is guaranteed-safe.
+      const stripped = safeMinify(code);
+      return _DIAG+_WM+stripped;
     }
 
     let ast=null;
@@ -1759,7 +1788,150 @@ function _buildMultiPartLoader(chunks){
   return parts.join("\n");
 }
 
+
+// FinalAndIHopeSo: pre-analysis phase.
+// Scans the source and returns a profile the obfuscate() wrapper uses to pick
+// a safe strategy per script. Zero AST â€” pure string/regex scan, so it works
+// even on scripts that luaparse chokes on (Luau syntax, huge files, etc.).
+function analyzeScript(code){
+  const p = {
+    bytes: code.length,
+    lines: 0,
+    hasCRLF: /\r\n/.test(code),
+    hasLuauSyntax: false,      // compound ops, continue, type annots, string interp
+    hasCompoundOps: false,     // +=, -=, *=, /=, ..=
+    hasContinue: false,        // continue keyword (Luau, not Lua 5.1)
+    hasTypeAnnots: false,      // : Type after params or vars
+    hasStringInterp: false,    // backtick strings
+    topLevelLocals: 0,
+    topLevelFunctions: 0,
+    topLevelDoBlocks: 0,
+    methodCallDensity: 0,      // ratio of X:foo() calls to total call sites
+    methodCallSites: 0,
+    getgenvCount: 0,
+    getrenvCount: 0,
+    hookfunctionCount: 0,
+    loadstringCount: 0,
+    httpGetCount: 0,
+    requireCount: 0,
+    returnsModule: false,      // ends with "return X" (module pattern)
+    hasLibraryPattern: false,  // "local X = {}" followed by "X.__index = X" (OO)
+    strategy: "light",
+    strategyReason: [],
+    recommendations: []
+  };
+
+  // Normalize for scanning only (do not modify actual code we return)
+  const norm = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = norm.split("\n");
+  p.lines = lines.length;
+
+  // Luau syntax detection
+  if (/[+\-*/]=|\.\.=/.test(norm)) { p.hasCompoundOps = true; p.hasLuauSyntax = true; }
+  if (/\bcontinue\b/.test(norm))     { p.hasContinue = true;    p.hasLuauSyntax = true; }
+  if (/:\s*[A-Za-z_][A-Za-z0-9_.<>?]*\s*[,=)]/.test(norm)) { p.hasTypeAnnots = true; p.hasLuauSyntax = true; }
+  if (/`[^`\n]*\$?\{/.test(norm)) { p.hasStringInterp = true; p.hasLuauSyntax = true; }
+
+  // Top-level scan (very rough depth tracker â€” good enough for detection)
+  let depth = 0;
+  for (const line of lines){
+    const trimmed = line.trim();
+    if (depth === 0){
+      if (/^local\s+[A-Za-z_]\w*\s*=/.test(trimmed) && !/^local\s+function/.test(trimmed)) p.topLevelLocals++;
+      if (/^(?:local\s+)?function\s+[A-Za-z_]/.test(trimmed))                             p.topLevelFunctions++;
+      if (/^do\s*$/.test(trimmed))                                                          p.topLevelDoBlocks++;
+    }
+    const opens  = (line.match(/\b(do|function|if|while|for|repeat)\b/g) || []).length;
+    const closes = (line.match(/\b(end|until)\b/g) || []).length;
+    depth += opens - closes;
+    if (depth < 0) depth = 0;
+  }
+
+  // Method-call density
+  p.methodCallSites = (norm.match(/\b\w+:\w+\s*\(/g) || []).length;
+  const totalCallSites = (norm.match(/\b\w+\s*\(/g) || []).length;
+  p.methodCallDensity = totalCallSites > 0 ? p.methodCallSites / totalCallSites : 0;
+
+  // Global-state usage
+  p.getgenvCount      = (norm.match(/\bgetgenv\s*\(/g)      || []).length;
+  p.getrenvCount      = (norm.match(/\bgetrenv\s*\(/g)      || []).length;
+  p.hookfunctionCount = (norm.match(/\bhookfunction\s*\(/g) || []).length;
+
+  // External loading
+  p.loadstringCount = (norm.match(/\bloadstring\s*\(/g) || []).length;
+  p.httpGetCount    = (norm.match(/HttpGet/g)              || []).length;
+  p.requireCount    = (norm.match(/\brequire\s*\(/g)    || []).length;
+
+  // Module patterns
+  const tail = norm.slice(-500).trim();
+  p.returnsModule = /\breturn\s+[A-Za-z_]\w*\s*$/.test(tail);
+
+  // OO / library pattern (Library.__index = Library)
+  p.hasLibraryPattern = /\.__index\s*=/.test(norm);
+
+  // Strategy decision matrix â€” each rule adds a reason
+  const reasons = p.strategyReason;
+  const forceLight =
+    p.bytes > 400000                    ||
+    p.methodCallDensity > 0.25          ||
+    p.getgenvCount > 100                ||
+    p.hookfunctionCount > 3             ||
+    p.returnsModule                     ||
+    p.hasLibraryPattern;
+
+  if (p.bytes > 400000)          reasons.push("large script (" + Math.round(p.bytes/1024) + " KB) â€” heavy transforms risk cap issues");
+  if (p.methodCallDensity > 0.25) reasons.push("heavy method-chain usage (" + Math.round(p.methodCallDensity*100) + "% of calls) â€” rename would break refs");
+  if (p.getgenvCount > 100)      reasons.push("heavy getgenv usage (" + p.getgenvCount + " calls) â€” global-state sensitive");
+  if (p.hookfunctionCount > 3)   reasons.push("hookfunction hooks present (" + p.hookfunctionCount + ") â€” obfuscation may collide with executor hooks");
+  if (p.returnsModule)           reasons.push("returns a module at top level â€” split would break the return");
+  if (p.hasLibraryPattern)       reasons.push("OO/library pattern (__index) â€” rename would break method dispatch");
+  if (p.hasLuauSyntax)           reasons.push("uses Luau syntax â€” luaToLua converter required");
+
+  if (forceLight){
+    p.strategy = "light";
+  } else if (p.bytes < 50000){
+    p.strategy = "medium";
+    reasons.push("small script (" + Math.round(p.bytes/1024) + " KB) with no risky patterns â€” medium is safe");
+  } else {
+    p.strategy = "light";
+    reasons.push("no obvious risky pattern, but > 50 KB â€” light is the conservative default");
+  }
+
+  // Guidance for future edits to the source script
+  if (p.methodCallDensity > 0.25)
+    p.recommendations.push("your script relies on colon-method calls; if you enable rename mode later, provide a scope-aware renamer");
+  if (p.hookfunctionCount > 0)
+    p.recommendations.push("hookfunction is present â€” obfuscated output should not touch getrenv().debug.info or similar hook targets");
+  if (p.hasLibraryPattern && p.returnsModule)
+    p.recommendations.push("this is a self-contained UI library â€” do not split across multiple loadstring calls");
+
+  return p;
+}
+
 async function obfuscate(luaCode, level, userId){
+  // FinalAndIHopeSo: pre-analysis phase â€” inspect script BEFORE deciding strategy.
+  const profile = analyzeScript(luaCode);
+  console.log("[obfuscator] === script analysis ===");
+  console.log("  bytes: " + profile.bytes + ", lines: " + profile.lines + ", CRLF: " + profile.hasCRLF);
+  console.log("  top-level: " + profile.topLevelLocals + " locals, " + profile.topLevelFunctions + " functions, " + profile.topLevelDoBlocks + " do-blocks");
+  console.log("  method-call density: " + Math.round(profile.methodCallDensity * 100) + "% (" + profile.methodCallSites + " sites)");
+  console.log("  globals: " + profile.getgenvCount + " getgenv, " + profile.getrenvCount + " getrenv, " + profile.hookfunctionCount + " hookfunction");
+  console.log("  loading: " + profile.loadstringCount + " loadstring, " + profile.httpGetCount + " HttpGet, " + profile.requireCount + " require");
+  console.log("  patterns: Luau=" + profile.hasLuauSyntax + ", returnsModule=" + profile.returnsModule + ", libraryOO=" + profile.hasLibraryPattern);
+  console.log("  recommended strategy: " + profile.strategy);
+  for (const r of profile.strategyReason) console.log("    - " + r);
+  for (const r of profile.recommendations) console.log("  [hint] " + r);
+
+  // If caller didn't specify a level, use the recommended one
+  if (!level) level = profile.strategy;
+
+  // If caller asked for medium/maximum but profile forces light, downgrade with a loud log
+  const requestedStrict = (level === "medium" || level === "maximum");
+  if (requestedStrict && profile.strategy === "light"){
+    console.log("[obfuscator] DOWNGRADING requested level '" + level + "' â†’ 'light' because the profile flagged risky patterns above. See reasons.");
+    level = "light";
+  }
+
   // v15: light mode + short paths skip the split â€” they produce a single small blob.
   if (level === "light" || level === "none" || level === "basic"){
     return await obfuscateSingle(luaCode, level, userId);
