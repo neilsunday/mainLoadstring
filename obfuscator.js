@@ -1,4 +1,12 @@
-// AzureVM Obfuscator v14.0 - Phase 3 patched
+// AzureVM Obfuscator v15.0 - Phase 3C added (Multi-layer VM)
+// Applied fixes (this batch):
+//   3C  Multi-layer VM: outer 6-opcode meta-VM reconstructs inner bc[] at runtime
+//       - Per-run random opcode numbers, XOR key, position multiplier, rotate amount
+//       - Byte-level rotate + position-dependent XOR encryption of inner bytestream
+//       - ADVANCE no-op injected for pattern noise (~20% frequency)
+//       - Auto-fallback to single-layer for tiny programs (<9 bc entries)
+//       - Attacker must reverse BOTH VMs to extract inner bytecode
+// Previous v14.0 (Phase 3A+3B):
 // Applied fixes (this batch):
 //   3A  VM dispatcher rewritten as table lookup + closures (no more if/elseif chain)
 //       - Real + junk opcodes shuffled at emit time, each is a captured closure
@@ -910,6 +918,179 @@ function makeBytecodeUnpacker(fnName){
   return "local function "+fnName+"(s) local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/' local d={} for i=1,#b do d[string.sub(b,i,i)]=i-1 end local pad=0 if string.sub(s,-2)=='==' then pad=2 elseif string.sub(s,-1)=='=' then pad=1 end s=string.gsub(s,'[^A-Za-z0-9+/=]','') local raw={} for i=1,#s,4 do local a=d[string.sub(s,i,i)] or 0 local b1=d[string.sub(s,i+1,i+1)] or 0 local c=d[string.sub(s,i+2,i+2)] or 0 local e=d[string.sub(s,i+3,i+3)] or 0 local n=bit32.bor(bit32.lshift(a,18),bit32.lshift(b1,12),bit32.lshift(c,6),e) table.insert(raw,bit32.band(bit32.rshift(n,16),0xff)) table.insert(raw,bit32.band(bit32.rshift(n,8),0xff)) table.insert(raw,bit32.band(n,0xff)) end for i=1,pad do table.remove(raw) end local out={} for i=1,#raw,3 do local h=raw[i] or 0 local m=raw[i+1] or 0 local l=raw[i+2] or 0 table.insert(out,bit32.bor(bit32.lshift(h,16),bit32.lshift(m,8),l)) end return out end";
 }
 
+// v15.0 (3C): Multi-layer VM helpers.
+// buildOuterVmProgram encrypts the inner bytecode array into a scrambled
+// bytestream + a program of outer VM ops that decrypts+emits each byte.
+// The result: attacker never sees the raw inner bc[] in the output.
+function buildOuterVmProgram(innerBc){
+  // Per-run random parameters (encryption keys, rotate amounts, positions)
+  const outerKey = _secRand(30, 220);
+  const outerMult = _secRand(3, 13);        // pos multiplier for XOR key evolution
+  const rotShift = _secRand(1, 7);          // byte rotation amount (1-7 bits)
+  const rotOp = _secRand(3, 3);             // outer op number for SHIFT (kept 3 for now)
+
+  // Outer opcodes - shuffled at emit time for polymorphism
+  const OP_FETCH = _secRand(10, 40);
+  const OP_XOR = _secRand(50, 80);
+  const OP_SHIFT = _secRand(90, 120);
+  const OP_EMIT = _secRand(130, 160);
+  const OP_ADVANCE = _secRand(170, 200);
+  const OP_HALT = _secRand(210, 250);
+
+  // Ensure all outer opcodes are unique
+  const opSet = new Set([OP_FETCH, OP_XOR, OP_SHIFT, OP_EMIT, OP_ADVANCE, OP_HALT]);
+  if(opSet.size !== 6){
+    // Rare collision - re-roll deterministically
+    return buildOuterVmProgram(innerBc);
+  }
+
+  // Convert innerBc (which is a plain int array, values 0..0xffffff) to
+  // per-byte stream. innerBc uses 24-bit packing (same as packBytecode).
+  const rawBytes = [];
+  for(const n of innerBc){
+    let v = (typeof n === "number") ? Math.max(0, n|0) : 0;
+    if(v > 0xffffff) v = 0xffffff;
+    rawBytes.push((v>>16)&0xff, (v>>8)&0xff, v&0xff);
+  }
+
+  // Encrypt each byte using SAME formula the outer VM will decrypt with.
+  // Encryption: for pos i (0-indexed), encrypted = rotateRight(rawByte, rotShift) XOR ((outerKey + i*outerMult) & 0xff)
+  // Decryption: reverse - XOR first, then rotateLeft(rotShift).
+  const encBytes = [];
+  for(let i = 0; i < rawBytes.length; i++){
+    const rb = rawBytes[i] & 0xff;
+    // Right rotate first (byte-level)
+    const rotated = ((rb >> rotShift) | (rb << (8 - rotShift))) & 0xff;
+    // XOR with position-dependent key
+    const enc = rotated ^ ((outerKey + i * outerMult) & 0xff);
+    encBytes.push(enc & 0xff);
+  }
+
+  // Build the outer VM program.
+  // Pattern per byte: FETCH, XOR, SHIFT, EMIT. Optional ADVANCE (no-op) injected
+  // for noise between real ops.
+  // Emit as a Lua table of {op, ...operands} pseudo-instructions.
+  const program = [];
+  for(let i = 0; i < encBytes.length; i++){
+    program.push(OP_FETCH);
+    program.push(OP_XOR);
+    program.push(OP_SHIFT);
+    program.push(OP_EMIT);
+    // 20% chance to inject an ADVANCE no-op for pattern noise
+    if(_secRand(0, 99) < 20) program.push(OP_ADVANCE);
+  }
+  program.push(OP_HALT);
+
+  // Base64-encode both the program and the encrypted bytestream
+  const progBase64 = Buffer.from(program).toString("base64");
+  const streamBase64 = Buffer.from(encBytes).toString("base64");
+
+  return {
+    progBase64,
+    streamBase64,
+    outerKey,
+    outerMult,
+    rotShift,
+    opFetch: OP_FETCH,
+    opXor: OP_XOR,
+    opShift: OP_SHIFT,
+    opEmit: OP_EMIT,
+    opAdvance: OP_ADVANCE,
+    opHalt: OP_HALT
+  };
+}
+
+// v15.0 (3C): Emit the Lua source for the outer VM.
+// Takes the outer program parameters + the inner VM function name to
+// hand off to once the inner bc[] is reconstructed.
+function generateOuterVmSource(outerProg, innerVmFn, ksVar, gsVar){
+  const decodeFn = randHexName(6);          // outer VM runner
+  const b64Fn = randHexName(6);             // base64 -> byte-table decoder
+  const progVar = randHexName(5);
+  const streamVar = randHexName(5);
+  const bcVar = randHexName(5);
+  const posVar = randHexName(4);
+  const pcVar = randHexName(4);
+  const aVar = randHexName(4);
+
+  // Base64 decoder for byte tables (produces 1 byte per source unit).
+  // Standard b64 -> uint8[]. Reused by both outer program and stream decode.
+  const b64Decoder = "local function " + b64Fn + "(s) " +
+    "local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/' " +
+    "local d={} for i=1,#b do d[string.sub(b,i,i)]=i-1 end " +
+    "local pad=0 " +
+    "if string.sub(s,-2)=='==' then pad=2 elseif string.sub(s,-1)=='=' then pad=1 end " +
+    "s=string.gsub(s,'[^A-Za-z0-9+/=]','') " +
+    "local raw={} " +
+    "for i=1,#s,4 do " +
+      "local a=d[string.sub(s,i,i)] or 0 " +
+      "local b1=d[string.sub(s,i+1,i+1)] or 0 " +
+      "local c=d[string.sub(s,i+2,i+2)] or 0 " +
+      "local e=d[string.sub(s,i+3,i+3)] or 0 " +
+      "local n=bit32.bor(bit32.lshift(a,18),bit32.lshift(b1,12),bit32.lshift(c,6),e) " +
+      "table.insert(raw,bit32.band(bit32.rshift(n,16),0xff)) " +
+      "table.insert(raw,bit32.band(bit32.rshift(n,8),0xff)) " +
+      "table.insert(raw,bit32.band(n,0xff)) " +
+    "end " +
+    "for i=1,pad do table.remove(raw) end " +
+    "return raw " +
+    "end";
+
+  // Outer VM runner. Decodes base64 program + stream, walks the program,
+  // reconstructs inner bc[], then hands off to inner VM.
+  //
+  // NOTE: bc[] uses 24-bit values (packed 3 bytes per int). We reassemble
+  // from every 3 decrypted bytes.
+  const runner = "local function " + decodeFn + "() " +
+    "local prog=" + b64Fn + "(" + progVar + ") " +
+    "local stream=" + b64Fn + "(" + streamVar + ") " +
+    "local rawBytes={} " +
+    "local " + posVar + "=0 " +      // outer stream position (0-indexed byte counter)
+    "local " + pcVar + "=1 " +       // outer program counter (1-indexed Lua)
+    "local " + aVar + "=0 " +        // register A (holds current byte being processed)
+    "local progLen=#prog " +
+    "local rotShift=" + outerProg.rotShift + " " +
+    "local invRot=8-rotShift " +
+    "while " + pcVar + "<=progLen do " +
+      "local op=prog[" + pcVar + "] " +
+      pcVar + "=" + pcVar + "+1 " +
+      "if op==" + outerProg.opFetch + " then " +
+        aVar + "=stream[" + posVar + "+1] or 0 " +
+      "elseif op==" + outerProg.opXor + " then " +
+        aVar + "=bit32.bxor(" + aVar + ",(" + outerProg.outerKey + "+" + posVar + "*" + outerProg.outerMult + ")%256) " +
+      "elseif op==" + outerProg.opShift + " then " +
+        // Rotate left by rotShift (undoing the right-rotate done at encrypt)
+        aVar + "=bit32.band(bit32.bor(bit32.lshift(" + aVar + ",rotShift),bit32.rshift(" + aVar + ",invRot)),0xff) " +
+      "elseif op==" + outerProg.opEmit + " then " +
+        "table.insert(rawBytes," + aVar + ") " +
+        posVar + "=" + posVar + "+1 " +
+      "elseif op==" + outerProg.opAdvance + " then " +
+        // No-op (padding for pattern noise)
+      "elseif op==" + outerProg.opHalt + " then " +
+        "break " +
+      "end " +
+    "end " +
+    // Reassemble 24-bit ints from 3-byte groups
+    "local " + bcVar + "={} " +
+    "for i=1,#rawBytes,3 do " +
+      "local h=rawBytes[i] or 0 " +
+      "local m=rawBytes[i+1] or 0 " +
+      "local l=rawBytes[i+2] or 0 " +
+      "table.insert(" + bcVar + ",bit32.bor(bit32.lshift(h,16),bit32.lshift(m,8),l)) " +
+    "end " +
+    // Handoff to inner VM
+    innerVmFn + "(" + bcVar + "," + ksVar + "," + gsVar + ",getfenv and getfenv() or _ENV) " +
+    "end";
+
+  const streamDecl = "local " + progVar + "=\"" + outerProg.progBase64 + "\"; " +
+    "local " + streamVar + "=\"" + outerProg.streamBase64 + "\"";
+
+  return {
+    outerSource: b64Decoder + "; " + streamDecl + "; " + runner + "; " + decodeFn + "()",
+    decodeFnName: decodeFn
+  };
+}
+
 function serializeConsts(consts){
   // v13.0 (2A): Numeric consts get math-expression obfuscation via encodeNumber.
   // Strings stay as JSON literals here (they're already encrypted by walkAst
@@ -1757,16 +1938,35 @@ function tryVmWrap(ast, level, extraSafeGlobals){
   const gsVar = randHexName(5);
   const unpackFn = randHexName(6);
   const interp = generateVMInterpreter(vmFn, OP, junkOpNames);
-  const unpacker = makeBytecodeUnpacker(unpackFn);
-  const packedBc = packBytecode(bc);
-  const vmHarness = [
-    unpacker,
-    interp,
-    "local "+bcVar+"="+unpackFn+"(\""+packedBc+"\")",
-    "local "+ksVar+"="+serializeConsts(consts),
-    "local "+gsVar+"="+serializeGlobals(globals),
-    vmFn+"("+bcVar+","+ksVar+","+gsVar+",getfenv and getfenv() or _ENV)"
-  ].join("; ");
+  // v15.0 (3C): Multi-layer VM. Wrap the inner bc[] with an outer meta-VM
+  // that reconstructs bc[] at runtime from an encrypted bytestream.
+  // The old single-layer path (base64 + unpack) is still available but
+  // superseded by the multi-layer path when compiledCount >= 3
+  // (small programs skip outer VM to avoid overhead-for-nothing).
+  const useMultiLayer = bc.length >= 9;  // ~3 statements minimum (3 ops each avg)
+  let vmHarness;
+  if(useMultiLayer){
+    const outerProg = buildOuterVmProgram(bc);
+    const { outerSource } = generateOuterVmSource(outerProg, vmFn, ksVar, gsVar);
+    vmHarness = [
+      interp,  // inner VM interpreter
+      "local "+ksVar+"="+serializeConsts(consts),
+      "local "+gsVar+"="+serializeGlobals(globals),
+      outerSource  // outer VM decodes bc[] and calls inner VM automatically
+    ].join("; ");
+  } else {
+    // Fallback: single-layer for very small programs (overhead not worth it)
+    const unpacker = makeBytecodeUnpacker(unpackFn);
+    const packedBc = packBytecode(bc);
+    vmHarness = [
+      unpacker,
+      interp,
+      "local "+bcVar+"="+unpackFn+"(\""+packedBc+"\")",
+      "local "+ksVar+"="+serializeConsts(consts),
+      "local "+gsVar+"="+serializeGlobals(globals),
+      vmFn+"("+bcVar+","+ksVar+","+gsVar+",getfenv and getfenv() or _ENV)"
+    ].join("; ");
+  }
   return { vmHarness, passthrough, compiledCount };
 }
 
