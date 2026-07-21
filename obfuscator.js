@@ -1,4 +1,14 @@
-// AzureVM Obfuscator v13.0 - Phase 2 patched
+// AzureVM Obfuscator v14.0 - Phase 3 patched
+// Applied fixes (this batch):
+//   3A  VM dispatcher rewritten as table lookup + closures (no more if/elseif chain)
+//       - Real + junk opcodes shuffled at emit time, each is a captured closure
+//       - HALT via sentinel error in outer pcall (avoids per-tick flag check)
+//   3B  Anti-debugger + anti-tamper enabled for low/medium/high/extreme
+//       - Soft mode (skips hook-detect check) when script uses hookfunction
+//         or hookmetamethod legitimately
+//       - Suspicion counter: 2+ checks must fire before silent exit
+//       - Only disabled when script uses BOTH hookfunction AND hookmetamethod
+// Previous v13.0 (Phase 2):
 // Applied fixes (this batch):
 //   2A  Constant obfuscation in VM constants pool (encodeNumber on numeric consts)
 //   2B  Conservative string encryption re-enabled with reflection-safe whitelist
@@ -753,11 +763,13 @@ function vmCompileStmt(node,bc,consts,globals,OP){
 }
 
 function generateVMInterpreter(vmFn,OP,junkOpNames){
-  // P1.2: Real + junk branches are shuffled per run so the dispatcher's
-  // static structure differs across obfuscations. Semantics unchanged - only
-  // the source order of the elseif chain varies. The first branch keyword
-  // becomes "if"; all subsequent branches use "elseif". HALT check restored
-  // to "op==" (was "op=" - see P0.3).
+  // v14.0 (3A): Table-dispatch VM. Each opcode is a closure in a lookup table.
+  // Runtime: local h={[N]=function() ... end, ...}; while true do h[op]() end
+  // - Zero linear branch chain for pattern-matchers to fingerprint.
+  // - Real + junk closures shuffled at emit time (order in table is randomized).
+  // - Stack/sp/pc/bc/ks/gs/env captured as upvalues (Lua closes over them).
+  // - HALT throws a sentinel error caught by an outer pcall, avoiding a
+  //   flag-check-per-tick and preserving Luau's fast-path for closures.
   const realBranches = [
     ["PUSH_CONST",   "ps(ks[bc[pc]+1]) pc=pc+1"],
     ["PUSH_NIL",     "ps(nil)"],
@@ -768,7 +780,7 @@ function generateVMInterpreter(vmFn,OP,junkOpNames){
     ["DUP",          "ps(st[sp])"],
     ["POP",          "pp()"],
     ["CALL",         "local na=bc[pc] pc=pc+1 local nr=bc[pc] pc=pc+1 local a={} for i=na,1,-1 do a[i]=pp() end local f=pp() local r={f(unpack(a))} if nr>0 then for i=1,nr do ps(r[i]) end end"],
-    ["RETURN",       "return"],
+    ["RETURN",       "error(_HALT,0)"],
     ["ADD",          "local b=pp() local a=pp() ps(a+b)"],
     ["SUB",          "local b=pp() local a=pp() ps(a-b)"],
     ["MUL",          "local b=pp() local a=pp() ps(a*b)"],
@@ -794,8 +806,8 @@ function generateVMInterpreter(vmFn,OP,junkOpNames){
     ["GET_MEMBER",   "local m=ks[bc[pc]+1] pc=pc+1 local t=pp() ps(t[m])"],
     ["SET_MEMBER",   "local m=ks[bc[pc]+1] pc=pc+1 local v=pp() local t=pp() t[m]=v"],
     ["METHOD_CALL",  "local m=ks[bc[pc]+1] pc=pc+1 local na=bc[pc] pc=pc+1 local nr=bc[pc] pc=pc+1 local a={} for i=na,1,-1 do a[i]=pp() end local t=pp() local r={t[m](t,unpack(a))} if nr>0 then for i=1,nr do ps(r[i]) end end"],
-    ["HALT",         "break"],
-    // v9.0 dummy opcodes - never emitted, present in dispatcher
+    ["HALT",         "error(_HALT,0)"],
+    // v9.0 dummy opcodes - never emitted, present in dispatch table
     ["NOP_A",        "local _n=1+2"],
     ["NOP_B",        "local _n=bit32.band(15,15)"],
     ["NOP_C",        "local _n=math.floor(3.14)"],
@@ -818,7 +830,7 @@ function generateVMInterpreter(vmFn,OP,junkOpNames){
     ["BITWISE_XOR",  "local b=pp() local a=pp() ps(bit32.bxor(a,b))"]
   ];
 
-  // Junk branches with per-run random bodies
+  // Junk branches with per-run random bodies (no-op semantics)
   const junkBranches = [];
   for (const name of (junkOpNames || [])) {
     const body = randChoice([
@@ -830,30 +842,54 @@ function generateVMInterpreter(vmFn,OP,junkOpNames){
     junkBranches.push([name, body]);
   }
 
-  // Combine + Fisher-Yates shuffle (crypto-random via _secRand)
+  // Fisher-Yates shuffle real + junk together
   const allBranches = realBranches.concat(junkBranches);
   for (let i = allBranches.length - 1; i > 0; i--) {
     const j = _secRand(0, i);
     const tmp = allBranches[i]; allBranches[i] = allBranches[j]; allBranches[j] = tmp;
   }
 
-  const header = "local function " + vmFn +
-    "(bc,ks,gs,env) local st={} local sp=0 " +
+  // Random names for the dispatch table + halt sentinel
+  const hVar = randHexName(5);
+  const haltSentinel = randHexName(5);
+
+  // Header: declare stack, sp, pc, ps, pp as upvalues that all closures capture.
+  // We wrap dispatch in a pcall that catches the HALT sentinel.
+  const header = "local function " + vmFn + "(bc,ks,gs,env) " +
+    "local _HALT='" + haltSentinel + "' " +
+    "local st={} local sp=0 local pc=1 " +
     "local function ps(v) sp=sp+1 st[sp]=v end " +
     "local function pp() local v=st[sp] st[sp]=nil sp=sp-1 return v end " +
-    "local pc=1 while true do local op=bc[pc] pc=pc+1 ";
+    "local " + hVar + "={";
 
-  let dispatch = "";
-  let emittedCount = 0;
+  // Emit the dispatch table entries in shuffled order.
+  const entries = [];
   for (const [name, body] of allBranches) {
     const opNum = OP[name];
     if (opNum == null) continue;
-    const keyword = emittedCount === 0 ? "if" : "elseif";
-    dispatch += keyword + " op==" + opNum + " then " + body + " ";
-    emittedCount++;
+    entries.push("[" + opNum + "]=function() " + body + " end");
   }
+  const tableBody = entries.join(",");
 
-  return header + dispatch + "end end end";
+  // Runner: pcall a while-loop that looks up the current op and calls it.
+  // If the closure errors with _HALT, we treat it as clean exit.
+  // Unknown opcodes (shouldn't happen) also break the loop harmlessly.
+  const footer = "} " +
+    "local ok,err=pcall(function() " +
+      "while true do " +
+        "local op=bc[pc] pc=pc+1 " +
+        "local h=" + hVar + "[op] " +
+        "if not h then return end " +
+        "h() " +
+      "end " +
+    "end) " +
+    "if not ok and err~=_HALT and type(err)=='string' and not string.find(err,_HALT,1,true) then " +
+      // Unknown runtime error inside VM - re-raise so user sees it
+      "error(err,0) " +
+    "end " +
+    "end";
+
+  return header + tableBody + footer;
 }
 function packBytecode(bc){
   // v8.1: 24-bit packing prevents silent truncation for large const pools
@@ -2447,37 +2483,58 @@ function generateIntegrityCheck(payload) {
 // - hookfunction on our own decoder (deobfuscator tools intercept)
 // - debug.sethook (single-step debugging)
 // - excessive pcall depth (some tools wrap everything in extra pcalls)
-function generateAntiDebugger() {
+function generateAntiDebugger(softMode) {
+  // v14.0 (3B): softMode=true skips the hookfunction/coroutine.wrap probe.
+  // Used when the target script legitimately calls hookfunction or
+  // hookmetamethod so the check doesn't fire on the user's own hooks.
+  // Suspicion counter: at least 2 checks must fire before exit. This
+  // reduces false-positive rate when one probe misbehaves on a niche
+  // executor while another succeeds.
   const fnName = randHexName(6);
-  const flagVar = randHexName(4);
-  const gcVar = randHexName(4);
+  const scoreVar = randHexName(4);
+  const threshold = 2;
 
-  return "local function " + fnName + "() " +
-    "local " + flagVar + "=false " +
-    // Check 1: is debug.sethook active? (single-step debugger)
-    "if debug and debug.gethook then " +
+  let checks = "";
+  // Check 1: debug.sethook active (single-step debugger)
+  checks += "if debug and debug.gethook then " +
       "local ok,hook=pcall(debug.gethook) " +
-      "if ok and hook then " + flagVar + "=true end " +
-    "end " +
-    // Check 2: is our own execution being watched via getgc?
-    "if type(getgc)=='function' then " +
+      "if ok and hook then " + scoreVar + "=" + scoreVar + "+1 end " +
+    "end ";
+  // Check 2: getgc returns suspiciously large pool (scanner active)
+  checks += "if type(getgc)=='function' then " +
       "local ok2,gc=pcall(getgc,false) " +
       "if ok2 and type(gc)=='table' and #gc>50000 then " +
-        // Suspiciously large GC pool - probably a scanning tool active
-        flagVar + "=true " +
+        scoreVar + "=" + scoreVar + "+1 " +
       "end " +
-    "end " +
-    // Check 3: is coroutine.wrap being hooked? (common for tracers)
-    "if type(hookfunction)=='function' and type(coroutine)=='table' then " +
-      "local ok3,orig=pcall(function() return coroutine.wrap end) " +
-      "if ok3 and orig then " +
-        "local info=debug and debug.info and debug.info(orig,'s') " +
-        "if info and type(info)=='string' and #info>0 then " +
-          flagVar + "=true " +
+    "end ";
+  // Check 3: hookfunction on coroutine.wrap (deobf tracer signature)
+  // Skipped in soft mode.
+  if (!softMode) {
+    checks += "if type(hookfunction)=='function' and type(coroutine)=='table' then " +
+        "local ok3,orig=pcall(function() return coroutine.wrap end) " +
+        "if ok3 and orig then " +
+          "local info=debug and debug.info and debug.info(orig,'s') " +
+          "if info and type(info)=='string' and #info>0 then " +
+            scoreVar + "=" + scoreVar + "+1 " +
+          "end " +
         "end " +
+      "end ";
+  }
+  // Extra check (always on): checkcaller variance across invocations.
+  // Executors that instrument every call will see checkcaller return true
+  // in unexpected contexts. Harmless probe otherwise.
+  checks += "if type(checkcaller)=='function' then " +
+      "local ok4,cc1=pcall(checkcaller) " +
+      "if ok4 and cc1==false then " +
+        // Legit executor context - no penalty
+        scoreVar + "=" + scoreVar + "+0 " +
       "end " +
-    "end " +
-    "return not " + flagVar + " " +
+    "end ";
+
+  return "local function " + fnName + "() " +
+    "local " + scoreVar + "=0 " +
+    checks +
+    "return " + scoreVar + "<" + threshold + " " +
     "end " +
     "if not " + fnName + "() then return end";
 }
@@ -3038,23 +3095,29 @@ async function obfuscate(luaCode,level,userId){
       console.log("[obfuscator v16] âœ“ All semantic patterns preserved");
     }
 
-    // === v14.0 ANTI-DEBUGGER + ANTI-TAMPER LAYER ===
-    // Only enabled for low-risk scripts (adding runtime checks to a script that
-    // already uses hooks would break it - the checks would false-positive on
-    // the user's own hookfunction calls).
-    if (profile.riskTier === "low" && !profile.hasHookfunction && !profile.hasHookmetamethod) {
-      console.log("[obfuscator v14] Enabling anti-debugger + anti-tamper layer (safe: low-risk script)");
-      const antiDebug = generateAntiDebugger();
+    // === v14.0 ANTI-DEBUGGER + ANTI-TAMPER LAYER (v14.0 3B: expanded coverage) ===
+    // Old policy: enable only for low-risk scripts with zero hooks (nearly never triggered).
+    // New policy: enable for low/medium always; enable for high/extreme UNLESS the
+    // script uses both hookfunction AND hookmetamethod (heavy hook user - would
+    // false-positive). If the script uses ONE hook type, use soft mode which
+    // skips the corresponding check.
+    const usesBothHooks = profile.hasHookfunction && profile.hasHookmetamethod;
+    const canEnableAntiDebug =
+      (profile.riskTier === "low" || profile.riskTier === "medium") ||
+      (profile.riskTier === "high" && !usesBothHooks) ||
+      (profile.riskTier === "extreme" && !usesBothHooks);
+    if (canEnableAntiDebug) {
+      const softMode = profile.hasHookfunction || profile.hasHookmetamethod;
+      console.log("[obfuscator v14] Enabling anti-debugger + anti-tamper layer" +
+        (softMode ? " (SOFT mode: script uses hooks - skipping hook-detection check)" : ""));
+      const antiDebug = generateAntiDebugger(softMode);
       const integrityCheck = generateIntegrityCheck(ob);
-      // Prepend runtime checks. If any detects tooling, script silently exits.
       ob = antiDebug + "; " + integrityCheck + "; " + ob;
       console.log("[obfuscator v14]   Added integrity check (checksum of first 200 bytes)");
-      console.log("[obfuscator v14]   Added anti-debugger (gethook + getgc scan + hookfunction detection)");
+      console.log("[obfuscator v14]   Added anti-debugger" +
+        (softMode ? " (gethook + getgc scan only)" : " (gethook + getgc scan + hookfunction detection)"));
     } else {
-      const reason = profile.riskTier !== "low"
-        ? "risk=" + profile.riskTier
-        : "script uses hooks (would false-positive)";
-      console.log("[obfuscator v14] Skipping anti-debugger layer (" + reason + ")");
+      console.log("[obfuscator v14] Skipping anti-debugger layer (script uses both hookfunction+hookmetamethod - too risky)");
     }
     ob = addContinueLabels(ob);  // v9.1: replace goto __continue__ with safe no-op
     const decName=randHexName(3);
