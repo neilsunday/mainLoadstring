@@ -1440,7 +1440,7 @@ function byteLevelTripleObfuscate(code,level,userId){
 async function obfuscateSingle(luaCode,level,userId){
   level=level||"medium";
   const _WM=pickWatermark();
-  const _DIAG="-- [OBF v13.0 patched: auto-split + verbose error capture]\n";
+  const _DIAG="-- [OBF v14.0 patched: smart split at top-level statement boundaries]\n";
   try{
     let code=preprocess(luaCode);
     // v9.1: Preprocess Luau-specific syntax so luaparse can handle Roblox scripts
@@ -1544,29 +1544,148 @@ async function obfuscateSingle(luaCode,level,userId){
 const _CHUNK_SAFE_BYTES = 180000;   // per-chunk obfuscated size ceiling (very conservative)
 const _MIN_CHUNKS = 1;
 
+function _findTopLevelBoundaries(code){
+  // Walk the source with a Lua-aware tokenizer, tracking block depth,
+  // paren/bracket depth, and string/comment state. Return every offset
+  // where depth == 0 AND we are just past a statement terminator (newline,
+  // semicolon, or 'end'/'until' that closed a top-level block).
+  //
+  // block-openers: do, function, if, while, for, repeat
+  // block-closers: end, until (repeat is closed by until, others by end)
+  // We increment blockDepth on each opener and decrement on each closer.
+  const boundaries = [0];
+  let i = 0;
+  const N = code.length;
+  let blockDepth = 0;    // do/function/if/while/for/repeat balance
+  let parenDepth = 0;    // ( ) balance
+  let brackDepth = 0;    // [ ] balance (not long-bracket strings)
+  let braceDepth = 0;    // { } balance
+  // Skip whitespace/comments and check identifier keywords properly.
+  function isIdChar(c){ return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_'; }
+  while (i < N){
+    const c = code[i];
+    const n = i + 1 < N ? code[i+1] : "";
+    // Long-bracket comment or string: --[[ ... ]] or [[ ... ]] (with optional = levels)
+    if (c === '-' && n === '-'){
+      let j = i + 2;
+      if (code[j] === '['){
+        let lvl = 0, k = j + 1;
+        while (code[k] === '=') { lvl++; k++; }
+        if (code[k] === '['){
+          const closer = ']' + '='.repeat(lvl) + ']';
+          const end = code.indexOf(closer, k + 1);
+          if (end > 0) { i = end + closer.length; continue; }
+          i = N; continue;
+        }
+      }
+      while (i < N && code[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '['){
+      let lvl = 0, j = i + 1;
+      while (code[j] === '=') { lvl++; j++; }
+      if (code[j] === '['){
+        const closer = ']' + '='.repeat(lvl) + ']';
+        const end = code.indexOf(closer, j + 1);
+        if (end > 0) { i = end + closer.length; continue; }
+      }
+      brackDepth++; i++; continue;
+    }
+    if (c === ']'){ brackDepth--; i++; continue; }
+    if (c === '"' || c === "'"){
+      const q = c;
+      i++;
+      while (i < N){
+        if (code[i] === '\\'){ i += 2; continue; }
+        if (code[i] === q){ i++; break; }
+        if (code[i] === '\n') { i++; break; }
+        i++;
+      }
+      continue;
+    }
+    if (c === '(') { parenDepth++; i++; continue; }
+    if (c === ')') { parenDepth--; i++; continue; }
+    if (c === '{') { braceDepth++; i++; continue; }
+    if (c === '}') { braceDepth--; i++; continue; }
+    // Keyword scan â€” only when at word boundary
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_'){
+      let j = i;
+      while (j < N && isIdChar(code[j])) j++;
+      const word = code.slice(i, j);
+      // Opener keywords
+      if (word === 'do' || word === 'function' || word === 'if' || word === 'while' || word === 'for' || word === 'repeat'){
+        // 'for' with generic/numeric form and 'while ... do' both add ONE depth on the opener
+        // BUT 'while X do' â†’ 'while' does not open, 'do' does. Same for 'for X do'.
+        // 'if X then' â€” 'if' does not open, 'then' does... except 'elseif X then' also opens? no â€”
+        // 'then' just resumes body. We over-approximate by counting only 'do','function','if','repeat'.
+        // 'while' and 'for' don't add depth here; their 'do' will.
+        if (word === 'do' || word === 'function' || word === 'if' || word === 'repeat'){
+          blockDepth++;
+        }
+      } else if (word === 'end' || word === 'until'){
+        blockDepth--;
+        // After this end/until, we may be at a top-level boundary.
+        i = j;
+        if (blockDepth === 0 && parenDepth === 0 && brackDepth === 0 && braceDepth === 0){
+          // Skip trailing whitespace/semicolons up to the next line
+          while (i < N && (code[i] === ' ' || code[i] === '\t' || code[i] === ';' || code[i] === '\r')) i++;
+          if (code[i] === '\n') { i++; boundaries.push(i); continue; }
+          boundaries.push(i);
+        }
+        continue;
+      }
+      i = j; continue;
+    }
+    // Statement terminators at top level
+    if (c === '\n'){
+      if (blockDepth === 0 && parenDepth === 0 && brackDepth === 0 && braceDepth === 0){
+        boundaries.push(i + 1);
+      }
+      i++; continue;
+    }
+    if (c === ';' && blockDepth === 0 && parenDepth === 0 && brackDepth === 0 && braceDepth === 0){
+      i++;
+      while (i < N && (code[i] === ' ' || code[i] === '\t' || code[i] === '\r')) i++;
+      boundaries.push(i);
+      continue;
+    }
+    i++;
+  }
+  // Dedupe & sort
+  const uniq = Array.from(new Set(boundaries)).sort((a,b)=>a-b);
+  return uniq;
+}
+
 function _splitLuaSource(code, parts){
-  // Split on newline boundaries closest to each ideal offset so we never cut a statement.
   if (parts <= 1) return [code];
+  const boundaries = _findTopLevelBoundaries(code);
+  boundaries.push(code.length);
+  if (boundaries.length < parts + 1){
+    console.warn("[obfuscator] not enough top-level boundaries (" + boundaries.length + ") for " + parts + " parts â€” using fewer parts");
+    parts = Math.max(1, boundaries.length - 1);
+  }
   const step = Math.floor(code.length / parts);
   const cuts = [0];
   for (let i = 1; i < parts; i++){
     const ideal = i * step;
-    // scan for the nearest newline within +/- 4KB of ideal
-    let cut = -1;
-    for (let j = 0; j < 4096 && (ideal - j) > cuts[cuts.length-1] + 1024; j++){
-      const a = ideal - j;
-      if (code[a] === "\n") { cut = a + 1; break; }
-      const b = ideal + j;
-      if (b < code.length && code[b] === "\n") { cut = b + 1; break; }
+    // Pick the boundary closest to ideal that is > previous cut
+    let best = -1;
+    let bestDist = Infinity;
+    for (const b of boundaries){
+      if (b <= cuts[cuts.length - 1]) continue;
+      if (b >= code.length) continue;
+      const d = Math.abs(b - ideal);
+      if (d < bestDist){ bestDist = d; best = b; }
     }
-    if (cut < 0) cut = ideal; // fallback â€” shouldn't happen for well-formed Lua
-    cuts.push(cut);
+    if (best < 0) break;
+    cuts.push(best);
   }
   cuts.push(code.length);
   const chunks = [];
   for (let i = 0; i < cuts.length - 1; i++){
     chunks.push(code.slice(cuts[i], cuts[i+1]));
   }
+  console.log("[obfuscator] smart split â€” parts:", chunks.length, "sizes:", chunks.map(c=>c.length));
   return chunks;
 }
 
@@ -1588,7 +1707,7 @@ function _buildMultiPartLoader(chunks){
   // each one in order. We use a shared getLoader() and a simple sequential runner
   // with warn() on any failure â€” identical error visibility to the single-chunk loader.
   const parts = [];
-  parts.push("-- [OBF v13.0 multi-part loader â€” " + chunks.length + " chunks]");
+  parts.push("-- [OBF v14.0 multi-part loader â€” " + chunks.length + " chunks]");
   parts.push([
     "local function __obf_getload()",
     "  local ok,fn = pcall(function()",
