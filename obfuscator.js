@@ -1,4 +1,5 @@
-// AzureVM Obfuscator (patched v10.5 â€” VM whitelist: Roblox/executor globals only
+// AzureVM Obfuscator (patched v10.6 â€” disabled buggy string encryption
+// v10.5 â€” VM whitelist: Roblox/executor globals only
 // v10.4 â€” declaration-order tracking, no reordering
 // v10.3 â€” top-local tracking, method-call passthrough
 // v10.2 â€” method-call passthrough, executor-aware loader
@@ -1059,10 +1060,13 @@ class RenameCtx{
 
 function walkAst(node,ctx){
   if(!node||typeof node!=="object")return;
-  if(node.type==="StringLiteral"&&typeof node.value==="string"){
-    node.__obf={type:"str",bytes:encryptString(node.value,ctx.stringKey,ctx.stringShift)};
-    return;
-  }
+  // v10.6: DISABLED string encryption â€” was producing literal "null" tokens
+  // in output when encryptString returned empty bytes or node.value became stale.
+  // Strings now pass through serialize as JSON.stringify(node.value) directly.
+  // if(node.type==="StringLiteral"&&typeof node.value==="string"){
+  //   node.__obf={type:"str",bytes:encryptString(node.value,ctx.stringKey,ctx.stringShift)};
+  //   return;
+  // }
   if(node.type==="NumericLiteral"&&typeof node.value==="number"){
     node.__obf={type:"num",expr:encodeNumber(node.value)};
     return;
@@ -1130,7 +1134,7 @@ function serialize(node){
     case "StringCallExpression":return serialize(node.base)+"("+serialize(node.argument)+")";
     case "TableCallExpression":return serialize(node.base)+"("+serialize(node.arguments)+")";
     case "Identifier":return node.name;
-    case "StringLiteral":return JSON.stringify(node.value);
+    case "StringLiteral":return JSON.stringify(typeof node.value==="string"?node.value:(node.raw?node.raw.slice(1,-1):""));
     case "NumericLiteral":return String(node.value);
     case "BooleanLiteral":return node.value?"true":"false";
     case "NilLiteral":return "nil";
