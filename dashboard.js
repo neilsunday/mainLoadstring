@@ -45,6 +45,9 @@ const previewBtn = document.getElementById("previewBtn");
 const messageDiv = document.getElementById("message");
 const obfuscationLevelSelect = document.getElementById("obfuscationLevel");
 
+// NEW: Key requirement toggle
+const requireKeyCheckbox = document.getElementById("requireKey");
+
 const previewCard = document.getElementById("previewCard");
 const previewStats = document.getElementById("previewStats");
 const previewOutput = document.getElementById("previewOutput");
@@ -55,7 +58,7 @@ const resultCard = document.getElementById("resultCard");
 const loadstringOutput = document.getElementById("loadstringOutput");
 const copyBtn = document.getElementById("copyBtn");
 
-// NEW: Key management elements (add these to dashboard.html)
+// Key management elements
 const keysCard = document.getElementById("keysCard");
 const keysList = document.getElementById("keysList");
 const generateKeyBtn = document.getElementById("generateKeyBtn");
@@ -72,23 +75,16 @@ let lastSavedScriptId = null;
   await handleOAuthCallback();
   const user = await requireAuth();
   if (!user) return;
-
   currentUser = user;
   if (userEmailEl) userEmailEl.textContent = user.email;
-
-  // NEW: Load existing keys on page load
   await loadUserKeys();
 })();
 
 logoutBtn?.addEventListener("click", async () => {
   logoutBtn.disabled = true;
   logoutBtn.textContent = "Logging out...";
-  try {
-    await sb.auth.signOut();
-  } catch (err) {}
-  finally {
-    window.location.href = "index.html";
-  }
+  try { await sb.auth.signOut(); } catch (err) {}
+  finally { window.location.href = "index.html"; }
 });
 
 function updateUI() {
@@ -100,49 +96,32 @@ function updateUI() {
 }
 
 scriptCodeInput.addEventListener("input", updateUI);
-
-uploadBtn.addEventListener("click", () => {
-  fileUpload.click();
-});
+uploadBtn.addEventListener("click", () => fileUpload.click());
 
 fileUpload.addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (!file) return;
-
-  if (file.size > MAX_SCRIPT_SIZE) {
-    showMessage("File too large. Max 10MB.", "error");
-    return;
-  }
-
+  if (file.size > MAX_SCRIPT_SIZE) { showMessage("File too large. Max 10MB.", "error"); return; }
   const allowedTypes = [".lua", ".txt"];
   const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
-  if (!allowedTypes.includes(ext)) {
-    showMessage("Only .lua or .txt files allowed.", "error");
-    return;
-  }
-
+  if (!allowedTypes.includes(ext)) { showMessage("Only .lua or .txt files allowed.", "error"); return; }
   const reader = new FileReader();
   reader.onload = (event) => {
     scriptCodeInput.value = event.target.result;
     fileNameEl.textContent = `Loaded: ${file.name}`;
-
     if (!scriptNameInput.value.trim()) {
       const nameWithoutExt = file.name.replace(/\.(lua|txt)$/i, "");
       scriptNameInput.value = nameWithoutExt;
     }
-
     updateUI();
     showMessage(`Loaded "${file.name}"`, "success");
   };
-  reader.onerror = () => {
-    showMessage("Failed to read file.", "error");
-  };
+  reader.onerror = () => showMessage("Failed to read file.", "error");
   reader.readAsText(file);
 });
 
 clearBtn.addEventListener("click", () => {
   if (!scriptCodeInput.value && !scriptNameInput.value) return;
-
   if (confirm("Clear the script editor?")) {
     scriptNameInput.value = "";
     scriptCodeInput.value = "";
@@ -156,39 +135,33 @@ clearBtn.addEventListener("click", () => {
 });
 
 function generateId(length = 8) {
-  const chars =
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   let id = "";
   const array = new Uint8Array(length);
   crypto.getRandomValues(array);
-  for (let i = 0; i < length; i++) {
-    id += chars[array[i] % chars.length];
-  }
+  for (let i = 0; i < length; i++) id += chars[array[i] % chars.length];
   return id;
 }
 
-// NEW: Generate license key (KEY-XXXX-YYYY-ZZZZ format)
 function generateLicenseKey() {
   const chunks = [];
   for (let i = 0; i < 4; i++) {
     const bytes = new Uint8Array(4);
     crypto.getRandomValues(bytes);
     chunks.push(
-      Array.from(bytes)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("")
-        .toUpperCase()
+      Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase()
     );
   }
   return "KEY-" + chunks.join("-");
 }
 
+// FREE loadstring (no key)
 function buildLoadstring(scriptId) {
   const rawUrl = `${window.location.origin}/s/${scriptId}`;
   return `loadstring(game:HttpGet("${rawUrl}"))()`;
 }
 
-// NEW: Loadstring with key/HWID/PlaceId auto-injection
+// PROTECTED loadstring (with key + HWID + PlaceId)
 function buildProtectedLoadstring(scriptId, key) {
   const baseUrl = `${window.location.origin}/s/${scriptId}`;
   return `local _k="${key}"
@@ -201,27 +174,18 @@ async function obfuscateCode(code, level) {
   if (level === "none") {
     return { code, elapsed: 0, originalSize: code.length, obfuscatedSize: code.length };
   }
-
   const response = await fetch(OBFUSCATE_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code, level }),
   });
-
   if (!response.ok) {
     let errMsg = "Obfuscation failed";
-    try {
-      const errData = await response.json();
-      errMsg = errData.error || errMsg;
-    } catch (e) {}
+    try { const errData = await response.json(); errMsg = errData.error || errMsg; } catch (e) {}
     throw new Error(errMsg);
   }
-
   const data = await response.json();
-  if (!data.success || !data.code) {
-    throw new Error(data.error || "Obfuscation returned no code");
-  }
-
+  if (!data.success || !data.code) throw new Error(data.error || "Obfuscation returned no code");
   return {
     code: data.code,
     elapsed: data.elapsed_ms,
@@ -233,18 +197,9 @@ async function obfuscateCode(code, level) {
 previewBtn.addEventListener("click", async () => {
   const code = scriptCodeInput.value;
   const level = obfuscationLevelSelect.value;
-
   hideMessage();
-
-  if (!code.trim()) {
-    showMessage("Wala kang na-paste na code.", "error");
-    return;
-  }
-
-  if (code.length > MAX_SCRIPT_SIZE) {
-    showMessage("Script too long. Max 10MB.", "error");
-    return;
-  }
+  if (!code.trim()) { showMessage("Wala kang na-paste na code.", "error"); return; }
+  if (code.length > MAX_SCRIPT_SIZE) { showMessage("Script too long. Max 10MB.", "error"); return; }
 
   previewBtn.disabled = true;
   const originalText = previewBtn.textContent;
@@ -253,19 +208,15 @@ previewBtn.addEventListener("click", async () => {
   try {
     const result = await obfuscateCode(code, level);
     lastPreviewedCode = result.code;
-
     const ratio = result.obfuscatedSize / result.originalSize;
     const ratioStr = ratio.toFixed(2);
-    const statsText =
-      level === "none"
-        ? `Level: none | ${result.originalSize.toLocaleString()} chars (no changes)`
-        : `Level: ${level} | ${result.originalSize.toLocaleString()} chars -> ${result.obfuscatedSize.toLocaleString()} chars (${ratioStr}x) | Generated in ${result.elapsed}ms`;
-
+    const statsText = level === "none"
+      ? `Level: none | ${result.originalSize.toLocaleString()} chars (no changes)`
+      : `Level: ${level} | ${result.originalSize.toLocaleString()} chars -> ${result.obfuscatedSize.toLocaleString()} chars (${ratioStr}x) | Generated in ${result.elapsed}ms`;
     previewStats.textContent = statsText;
     previewOutput.textContent = result.code;
     previewCard.classList.remove("hidden");
     previewCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
-
     showMessage(`Preview ready. Review below, then click Save Script.`, "success");
   } catch (err) {
     showMessage(err.message || "Failed to preview.", "error");
@@ -297,18 +248,12 @@ saveBtn.addEventListener("click", async () => {
   const name = scriptNameInput.value.trim();
   const code = scriptCodeInput.value;
   const level = obfuscationLevelSelect ? obfuscationLevelSelect.value : "none";
+  // NEW: read the checkbox
+  const requireKey = requireKeyCheckbox ? requireKeyCheckbox.checked : true;
 
   hideMessage();
-
-  if (!code.trim()) {
-    showMessage("Wala kang na-paste na code.", "error");
-    return;
-  }
-
-  if (code.length > MAX_SCRIPT_SIZE) {
-    showMessage("Script too long. Max 10MB.", "error");
-    return;
-  }
+  if (!code.trim()) { showMessage("Wala kang na-paste na code.", "error"); return; }
+  if (code.length > MAX_SCRIPT_SIZE) { showMessage("Script too long. Max 10MB.", "error"); return; }
 
   saveBtn.disabled = true;
   const originalText = saveBtn.textContent;
@@ -316,7 +261,6 @@ saveBtn.addEventListener("click", async () => {
   try {
     let finalCode = code;
     let sizeInfo = "";
-
     if (level !== "none") {
       saveBtn.textContent = "Obfuscating...";
       showMessage(`Obfuscating with level: ${level}...`, "info");
@@ -331,40 +275,35 @@ saveBtn.addEventListener("click", async () => {
     let scriptId = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       const id = generateId(8);
+      // NEW: save key_required flag with the script
       const { error } = await sb.from("scripts").insert({
         id,
         user_id: currentUser.id,
         name: name || null,
         code: finalCode,
+        key_required: requireKey,
       });
-
-      if (!error) {
-        scriptId = id;
-        break;
-      }
-
-      if (error.code !== "23505") {
-        throw error;
-      }
+      if (!error) { scriptId = id; break; }
+      if (error.code !== "23505") throw error;
     }
 
-    if (!scriptId) {
-      throw new Error("Could not generate a unique ID. Try again.");
-    }
+    if (!scriptId) throw new Error("Could not generate a unique ID. Try again.");
 
     lastSavedScriptId = scriptId;
+    // NEW: show the RIGHT loader based on protection mode
     const loadstring = buildLoadstring(scriptId);
-
     loadstringOutput.textContent = loadstring;
     resultCard.classList.remove("hidden");
     resultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
+    const modeInfo = requireKey
+      ? ` Generate a key below to enable protection.`
+      : ` Script is FREE (no key required) - anyone can run this loadstring.`;
     showMessage(
-      `Script saved! ID: ${scriptId} | Level: ${level}${sizeInfo}. Generate a key below to enable protection.`,
+      `Script saved! ID: ${scriptId} | Level: ${level}${sizeInfo}.${modeInfo}`,
       "success",
     );
 
-    // NEW: Refresh script list in key management dropdown
     await refreshScriptOptions();
   } catch (err) {
     showMessage(err.message || "Failed to save script.", "error");
@@ -380,51 +319,40 @@ copyBtn.addEventListener("click", async () => {
     await navigator.clipboard.writeText(loadstringOutput.textContent);
     const originalText = copyBtn.textContent;
     copyBtn.textContent = "Copied!";
-    setTimeout(() => {
-      copyBtn.textContent = originalText;
-    }, 1500);
+    setTimeout(() => { copyBtn.textContent = originalText; }, 1500);
   } catch (err) {
     showMessage("Failed to copy. Select and copy manually.", "error");
   }
 });
 
 // ============================================================================
-// NEW: KEY MANAGEMENT SECTION
+// KEY MANAGEMENT (unchanged from previous version)
 // ============================================================================
 
-// Refresh script dropdown for key generation
 async function refreshScriptOptions() {
   if (!keyScriptSelect) return;
-
   const { data: scripts, error } = await sb
     .from("scripts")
-    .select("id, name, created_at")
+    .select("id, name, created_at, key_required")
     .eq("user_id", currentUser.id)
     .order("created_at", { ascending: false });
-
-  if (error) {
-    console.error("Failed to load scripts:", error);
-    return;
-  }
+  if (error) { console.error("Failed to load scripts:", error); return; }
 
   keyScriptSelect.innerHTML = '<option value="">-- Select a script --</option>';
   (scripts || []).forEach((s) => {
     const opt = document.createElement("option");
     opt.value = s.id;
-    opt.textContent = `${s.name || "(unnamed)"} - ${s.id}`;
+    const mode = s.key_required === false ? " [FREE]" : "";
+    opt.textContent = `${s.name || "(unnamed)"} - ${s.id}${mode}`;
+    if (s.key_required === false) opt.disabled = true; // can't generate key for free script
     keyScriptSelect.appendChild(opt);
   });
 
-  // Auto-select just-saved script
-  if (lastSavedScriptId) {
-    keyScriptSelect.value = lastSavedScriptId;
-  }
+  if (lastSavedScriptId) keyScriptSelect.value = lastSavedScriptId;
 }
 
-// Load all keys for current user
 async function loadUserKeys() {
   if (!keysList) return;
-
   await refreshScriptOptions();
 
   const { data: keys, error } = await sb
@@ -444,11 +372,7 @@ async function loadUserKeys() {
     return;
   }
 
-  keysList.innerHTML = keys
-    .map((k) => renderKeyRow(k))
-    .join("");
-
-  // Wire up action buttons
+  keysList.innerHTML = keys.map((k) => renderKeyRow(k)).join("");
   keysList.querySelectorAll("[data-action]").forEach((btn) => {
     btn.addEventListener("click", handleKeyAction);
   });
@@ -466,17 +390,9 @@ function renderKeyRow(k) {
     ? `<code class="hwid">${k.hwid.substring(0, 16)}...</code>`
     : '<span class="muted">Not bound yet</span>';
 
-  const placeIds = k.place_id_whitelist?.length
-    ? k.place_id_whitelist.join(", ")
-    : "Any game";
-
-  const execInfo = k.max_executions
-    ? `${k.execution_count} / ${k.max_executions}`
-    : `${k.execution_count} / âˆž`;
-
-  const expiresInfo = k.expires_at
-    ? new Date(k.expires_at).toLocaleDateString()
-    : "Never";
+  const placeIds = k.place_id_whitelist?.length ? k.place_id_whitelist.join(", ") : "Any game";
+  const execInfo = k.max_executions ? `${k.execution_count} / ${k.max_executions}` : `${k.execution_count} / unlimited`;
+  const expiresInfo = k.expires_at ? new Date(k.expires_at).toLocaleDateString() : "Never";
 
   return `
     <div class="key-row">
@@ -494,11 +410,9 @@ function renderKeyRow(k) {
       <div class="key-actions">
         <button data-action="copy-loader" data-key="${k.key}" data-script="${k.script_id}">Copy Loader</button>
         <button data-action="reset-hwid" data-key="${k.key}" ${!k.hwid ? "disabled" : ""}>Reset HWID</button>
-        ${
-          k.revoked
-            ? `<button data-action="unrevoke" data-key="${k.key}">Unrevoke</button>`
-            : `<button data-action="revoke" data-key="${k.key}" class="danger">Kill (Revoke)</button>`
-        }
+        ${k.revoked
+          ? `<button data-action="unrevoke" data-key="${k.key}">Unrevoke</button>`
+          : `<button data-action="revoke" data-key="${k.key}" class="danger">Kill (Revoke)</button>`}
         <button data-action="delete" data-key="${k.key}" class="danger">Delete</button>
       </div>
     </div>
@@ -513,7 +427,6 @@ async function handleKeyAction(e) {
 
   try {
     btn.disabled = true;
-
     switch (action) {
       case "copy-loader": {
         const loader = buildProtectedLoadstring(scriptId, key);
@@ -523,58 +436,36 @@ async function handleKeyAction(e) {
         setTimeout(() => (btn.textContent = orig), 1500);
         break;
       }
-
       case "reset-hwid": {
-        if (!confirm("Reset HWID for this key? User can rebind on next use.")) {
-          break;
-        }
-        const { error } = await sb
-          .from("user_keys")
-          .update({ hwid: null, first_used_at: null })
-          .eq("key", key)
-          .eq("owner_id", currentUser.id);
+        if (!confirm("Reset HWID for this key? User can rebind on next use.")) break;
+        const { error } = await sb.from("user_keys").update({ hwid: null, first_used_at: null })
+          .eq("key", key).eq("owner_id", currentUser.id);
         if (error) throw error;
         showMessage("HWID reset. User can now rebind.", "success");
         await loadUserKeys();
         break;
       }
-
       case "revoke": {
-        if (!confirm("KILL this key? Script will stop working for the user immediately.")) {
-          break;
-        }
-        const { error } = await sb
-          .from("user_keys")
-          .update({ revoked: true })
-          .eq("key", key)
-          .eq("owner_id", currentUser.id);
+        if (!confirm("KILL this key? Script will stop working for the user immediately.")) break;
+        const { error } = await sb.from("user_keys").update({ revoked: true })
+          .eq("key", key).eq("owner_id", currentUser.id);
         if (error) throw error;
         showMessage("Key revoked (kill switch activated).", "success");
         await loadUserKeys();
         break;
       }
-
       case "unrevoke": {
-        const { error } = await sb
-          .from("user_keys")
-          .update({ revoked: false })
-          .eq("key", key)
-          .eq("owner_id", currentUser.id);
+        const { error } = await sb.from("user_keys").update({ revoked: false })
+          .eq("key", key).eq("owner_id", currentUser.id);
         if (error) throw error;
         showMessage("Key unrevoked.", "success");
         await loadUserKeys();
         break;
       }
-
       case "delete": {
-        if (!confirm("PERMANENTLY delete this key? Cannot be undone.")) {
-          break;
-        }
-        const { error } = await sb
-          .from("user_keys")
-          .delete()
-          .eq("key", key)
-          .eq("owner_id", currentUser.id);
+        if (!confirm("PERMANENTLY delete this key? Cannot be undone.")) break;
+        const { error } = await sb.from("user_keys").delete()
+          .eq("key", key).eq("owner_id", currentUser.id);
         if (error) throw error;
         showMessage("Key deleted.", "success");
         await loadUserKeys();
@@ -588,32 +479,21 @@ async function handleKeyAction(e) {
   }
 }
 
-// Generate key button handler
 generateKeyBtn?.addEventListener("click", async () => {
   hideMessage();
-
   const scriptId = keyScriptSelect?.value;
-  if (!scriptId) {
-    showMessage("Select a script first.", "error");
-    return;
-  }
+  if (!scriptId) { showMessage("Select a script first.", "error"); return; }
 
-  // Parse PlaceIds (comma-separated, optional)
   let placeIds = null;
   const placeIdsRaw = (keyPlaceIdsInput?.value || "").trim();
   if (placeIdsRaw) {
-    placeIds = placeIdsRaw
-      .split(",")
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => !isNaN(n) && n > 0);
+    placeIds = placeIdsRaw.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n > 0);
     if (placeIds.length === 0) placeIds = null;
   }
 
-  // Parse max executions (optional)
   const maxExec = parseInt(keyMaxExecInput?.value || "", 10);
   const maxExecutions = !isNaN(maxExec) && maxExec > 0 ? maxExec : null;
 
-  // Parse expiration date (optional)
   const expiresRaw = keyExpiresInput?.value || "";
   const expiresAt = expiresRaw ? new Date(expiresRaw).toISOString() : null;
 
@@ -623,7 +503,6 @@ generateKeyBtn?.addEventListener("click", async () => {
 
   try {
     const key = generateLicenseKey();
-
     const { error } = await sb.from("user_keys").insert({
       key,
       owner_id: currentUser.id,
@@ -632,16 +511,11 @@ generateKeyBtn?.addEventListener("click", async () => {
       max_executions: maxExecutions,
       expires_at: expiresAt,
     });
-
     if (error) throw error;
-
     showMessage(`Key generated: ${key}`, "success");
-
-    // Reset form
     if (keyPlaceIdsInput) keyPlaceIdsInput.value = "";
     if (keyMaxExecInput) keyMaxExecInput.value = "";
     if (keyExpiresInput) keyExpiresInput.value = "";
-
     await loadUserKeys();
   } catch (err) {
     showMessage(err.message || "Failed to generate key.", "error");
@@ -656,7 +530,6 @@ function showMessage(text, type = "info") {
   messageDiv.className = `message ${type}`;
   messageDiv.classList.remove("hidden");
 }
-
 function hideMessage() {
   messageDiv.classList.add("hidden");
   messageDiv.textContent = "";
