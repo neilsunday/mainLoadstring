@@ -1,16 +1,16 @@
-// AzureVM Obfuscator (patched v10.6 Ã¢â‚¬â€ disabled buggy string encryption
-// v10.5 Ã¢â‚¬â€ VM whitelist: Roblox/executor globals only
-// v10.4 Ã¢â‚¬â€ declaration-order tracking, no reordering
-// v10.3 Ã¢â‚¬â€ top-local tracking, method-call passthrough
-// v10.2 Ã¢â‚¬â€ method-call passthrough, executor-aware loader
-// v10.1 Ã¢â‚¬â€ executor-aware loader chain)
-// Original:  ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â v10.0 (Complete rewrite: simple exec_core, no nested returns, no CFF wrap)
+// AzureVM Obfuscator (patched v10.6 â€” disabled buggy string encryption
+// v10.5 â€” VM whitelist: Roblox/executor globals only
+// v10.4 â€” declaration-order tracking, no reordering
+// v10.3 â€” top-local tracking, method-call passthrough
+// v10.2 â€” method-call passthrough, executor-aware loader
+// v10.1 â€” executor-aware loader chain)
+// Original:  Ã¢â‚¬â€ v10.0 (Complete rewrite: simple exec_core, no nested returns, no CFF wrap)
 // Improvements over v8.1:
 //   1. Constants Pool with poison entries (was: unused/broken)
 //   2. Position + prev-byte dependent stream cipher (was: triple XOR only)
 //   3. VM expanded to 55+ opcodes with dummy variants (was: 35)
 //   4. Randomized base64 alphabet per obfuscation (was: standard)
-//   5. Junk with real side effects ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â DCE-resistant (was: pure locals)
+//   5. Junk with real side effects ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â DCE-resistant (was: pure locals)
 //   6. Higher VM cap: 500 + smart sensitive-first sorting (was: 200)
 const luaparse = require("luaparse");
 const crypto = require("crypto");
@@ -40,7 +40,7 @@ const ROBLOX_GLOBALS = new Set([
 
 const WORD_BINARY_OPS = new Set(["and","or",".."]);
 
-// v6.2: Fake watermark rotation ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â decoy to mislead attackers into using
+// v6.2: Fake watermark rotation ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â decoy to mislead attackers into using
 // wrong deobfuscator tools (Luraph/Luarmor/IronBrew deobs won't help here)
 const _FAKE_WATERMARKS = [
   "-- This file was protected using Luraph Obfuscator v14.8 [https://lura.ph/]",
@@ -52,18 +52,18 @@ const _FAKE_WATERMARKS = [
   "-- MoonSec V3 [https://moonsec.dev/]"
 ];
 function pickWatermark(){
-  return ""; /* v11: watermark stripped */
+  return _FAKE_WATERMARKS[_secRand(0,_FAKE_WATERMARKS.length-1)]+"\n";
 }
 
 
 
-// v9.0: Expanded from 35 to 55+ opcodes ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â dummy variants confuse pattern analysis
+// v9.0: Expanded from 35 to 55+ opcodes ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â dummy variants confuse pattern analysis
 const OP_NAMES = [
   "PUSH_CONST","PUSH_NIL","PUSH_TRUE","PUSH_FALSE","PUSH_GLOBAL","SET_GLOBAL",
   "DUP","POP","CALL","RETURN","ADD","SUB","MUL","DIV","MOD","POW","CONCAT",
   "EQ","NEQ","LT","LE","GT","GE","NOT","NEG","LEN","JMP","JMP_IF_FALSE","JMP_IF_TRUE",
   "NEW_TABLE","SET_INDEX","GET_INDEX","GET_MEMBER","SET_MEMBER","METHOD_CALL","HALT",
-  // Dummy opcodes ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â never emitted by compiler but present in interpreter
+  // Dummy opcodes ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â never emitted by compiler but present in interpreter
   "NOP_A","NOP_B","NOP_C","NOP_D","NOP_E",
   "SWAP","ROT3","PUSH_ZERO","PUSH_ONE","PUSH_NEG_ONE",
   "INC","DEC","DOUBLE","HALVE","SQUARE",
@@ -86,7 +86,7 @@ function randHexName(len){
   return o;
 }
 
-// v9.0: Custom base64 alphabet ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â shuffled per obfuscation for anti-pattern-matching
+// v9.0: Custom base64 alphabet ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â shuffled per obfuscation for anti-pattern-matching
 const B64_STD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 function makeCustomB64Alphabet(){
   const arr = B64_STD.split("");
@@ -97,7 +97,7 @@ function makeCustomB64Alphabet(){
   return arr.join("");
 }
 
-// v9.0: Stream cipher ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â position + prev-byte feedback (ChaCha20-inspired)
+// v9.0: Stream cipher ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â position + prev-byte feedback (ChaCha20-inspired)
 // Much harder to reverse than static XOR because each byte depends on the last
 function streamCipherEncrypt(str, key1, key2, key3, iv){
   const bytes = [];
@@ -209,8 +209,8 @@ function preprocess(code){
 function luauToLua(code) {
   // v9.5 fixes:
   //   - Compound assignment precedence: wrap RHS in parens
-  //     Before: a += b or c   ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢  a = a + b or c   (WRONG: parses as (a+b) or c)
-  //     After:  a += b or c   ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢  a = a + (b or c) (correct)
+  //     Before: a += b or c   ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢  a = a + b or c   (WRONG: parses as (a+b) or c)
+  //     After:  a += b or c   ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢  a = a + (b or c) (correct)
   //   - continue: convert to 'goto __continue_N__' and inject matching label before loop's 'end'
   //     This preserves semantic behavior (actually skips iteration in Lua 5.3)
 
@@ -316,11 +316,11 @@ function luauToLua(code) {
     "g"
   );
   work = work.replace(compoundRegex, (m, lhs, op, rhs) => {
-    // Wrap RHS in parens to preserve semantics: a += b or c  ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢  a = a + (b or c)
+    // Wrap RHS in parens to preserve semantics: a += b or c  ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢  a = a + (b or c)
     return lhs + " = " + lhs + " " + op + " (" + rhs.trim() + ")";
   });
 
-  // ---- Step 3: continue ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ goto __continue_N__ + inject matching labels ----
+  // ---- Step 3: continue ÃƒÂ¢Ã¢â‚¬ Ã¢â‚¬â„¢ goto __continue_N__ + inject matching labels ----
   // Strategy: assign a unique counter per loop, replace 'continue' inside with goto,
   // then inject ::__continue_N__:: before the 'end' of each loop that has a continue.
   //
@@ -391,7 +391,7 @@ function injectContinueLabels(code) {
     if (t.kind === "keyword") {
       const kw = t.value;
 
-      // Opening block keywords ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â each pushes exactly ONE block
+      // Opening block keywords ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â each pushes exactly ONE block
       if (kw === "for" || kw === "while") {
         blockStack.push({ type: "pending_loop", labelName: null, needsLabel: false, kw });
       } else if (kw === "repeat") {
@@ -411,22 +411,22 @@ function injectContinueLabels(code) {
           blockStack.push({ type: "do", labelName: null, needsLabel: false, kw });
         }
       } else if (kw === "then") {
-        // 'then' is part of if/elseif clause ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â no block push
+        // 'then' is part of if/elseif clause ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no block push
         // But 'if X then' needs to open the if body; the block for 'if' was already pushed
       } else if (kw === "elseif") {
-        // Continuation of if ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â no block change
+        // Continuation of if ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no block change
       } else if (kw === "else") {
-        // Continuation of if ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â no block change
+        // Continuation of if ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no block change
       } else if (kw === "end") {
         // Close the topmost block (regardless of type: for/while/if/function/do)
         const closing = blockStack.pop();
         if (closing && closing.type === "loop" && closing.needsLabel) {
           result.push({ kind: "raw", value: " ::" + closing.labelName + ":: " });
         }
-        // Note: 'repeat' loops close with 'until', not 'end' ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â handled below
+        // Note: 'repeat' loops close with 'until', not 'end' ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â handled below
       } else if (kw === "until") {
         // Close a repeat_loop
-        // If the top block isn't a repeat_loop, we have a bug ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â but pop anyway to stay in sync
+        // If the top block isn't a repeat_loop, we have a bug ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â but pop anyway to stay in sync
         const closing = blockStack.pop();
         if (closing && closing.type === "repeat_loop" && closing.needsLabel) {
           // For 'repeat body until cond', the label goes BEFORE 'until'
@@ -452,7 +452,7 @@ function injectContinueLabels(code) {
           result.push({ kind: "raw", value: "goto " + loopBlock.labelName });
           continue;
         } else {
-          // continue outside a loop ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â safe no-op
+          // continue outside a loop ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â safe no-op
           result.push({ kind: "raw", value: "--[[continue]]" });
           continue;
         }
@@ -501,7 +501,7 @@ function tokenizeForContinue(code) {
       while (j < len && /[a-zA-Z0-9_]/.test(code[j])) j++;
       const word = code.substring(i, j);
       if (keywords.has(word)) {
-        // Check word boundary ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â must not be preceded by identifier char
+        // Check word boundary ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â must not be preceded by identifier char
         const prevChar = i > 0 ? code[i - 1] : " ";
         if (!/[a-zA-Z0-9_]/.test(prevChar)) {
           flushBuffer();
@@ -521,31 +521,6 @@ function tokenizeForContinue(code) {
 
   flushBuffer();
   return tokens;
-}
-
-// v17: SAFE minifier â€” strips comments and blank lines, compresses whitespace
-// within lines, but PRESERVES real newlines as statement separators. Lua treats
-// newlines as valid statement terminators, so this is guaranteed to keep every
-// method chain / assignment / call-followed-by-call intact. Trades output size
-// for correctness â€” the resulting file is bigger than aggressiveMinify's output
-// but always loads and runs identically to the source.
-function safeMinify(code){
-  code = preprocess(code); // reuses existing comment stripper (short + long)
-  const lines = code.split("\n");
-  const out = [];
-  for (let i = 0; i < lines.length; i++){
-    // trim trailing/leading whitespace + collapse internal runs of spaces/tabs.
-    // We do NOT touch content inside strings â€” preprocess already normalized
-    // comments away, and we never rewrite quotes here.
-    let line = lines[i];
-    // Strip trailing whitespace (including \r from CRLF)
-    line = line.replace(/[ \t\r]+$/, "");
-    // Strip leading whitespace
-    line = line.replace(/^[ \t]+/, "");
-    if (line.length === 0) continue;
-    out.push(line);
-  }
-  return out.join("\n");
 }
 
 function aggressiveMinify(code){
@@ -580,7 +555,7 @@ function vmCanCompile(node){
   if(t==="CallStatement"){
     const e=node.expression;
     if(!e)return false;
-    // v10.2 FIX: Reject method calls (obj:method()) Ã¢â‚¬â€ VM compiler treats them
+    // v10.2 FIX: Reject method calls (obj:method()) â€” VM compiler treats them
     // as regular calls, which loses the 'self' arg and turns the method name
     // into a global lookup, causing 'attempt to index nil with <method>' crashes.
     if(e.type==="CallExpression"){
@@ -735,7 +710,7 @@ function generateVMInterpreter(vmFn,OP){
     +"elseif op=="+OP.SET_MEMBER+" then local m=ks[bc[pc]+1] pc=pc+1 local v=pp() local t=pp() t[m]=v "
     +"elseif op=="+OP.METHOD_CALL+" then local m=ks[bc[pc]+1] pc=pc+1 local na=bc[pc] pc=pc+1 local nr=bc[pc] pc=pc+1 local a={} for i=na,1,-1 do a[i]=pp() end local t=pp() local r={t[m](t,unpack(a))} if nr>0 then for i=1,nr do ps(r[i]) end end "
     +"elseif op=="+OP.HALT+" then break "
-    // v9.0: Dummy opcode handlers ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â dispatch table looks richer than it is
+    // v9.0: Dummy opcode handlers ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â dispatch table looks richer than it is
     +"elseif op=="+OP.NOP_A+" then local _n=1+2 "
     +"elseif op=="+OP.NOP_B+" then local _n=bit32.band(15,15) "
     +"elseif op=="+OP.NOP_C+" then local _n=math.floor(3.14) "
@@ -792,7 +767,7 @@ function serializeGlobals(globals){
 }
 
 
-// v7.0: Constant Pool ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â global encrypted table with real + poison entries
+// v7.0: Constant Pool ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â global encrypted table with real + poison entries
 // Deobfuscator sees _CP[47] but has no clue what index 47 decodes to
 // without emulating the entire pool decryption
 function generateConstantPool(entries, poolKey, poolShift, fnName, varName){
@@ -804,7 +779,7 @@ function generateConstantPool(entries, poolKey, poolShift, fnName, varName){
     allEntries.push({real: true, value: entry});
   }
 
-  // 20-40 poison decoy entries ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â realistic Roblox strings to waste analyst time
+  // 20-40 poison decoy entries ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â realistic Roblox strings to waste analyst time
   const poisonStrings = [
     "HttpGet","GetService","Players","LocalPlayer","Character","Humanoid",
     "WalkSpeed","JumpPower","Health","MaxHealth","TeleportService","MarketplaceService",
@@ -840,7 +815,7 @@ function generateConstantPool(entries, poolKey, poolShift, fnName, varName){
 }
 
 
-// v7.0: Real Watermarking ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â user-specific fingerprint scattered as junk vars
+// v7.0: Real Watermarking ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â user-specific fingerprint scattered as junk vars
 // Format: local _wmSIGSHORT = HASHNUM  (looks like junk, but SIGSHORT + HASHNUM
 // combination uniquely identifies which user obfuscated this)
 function generateUserWatermark(userId){
@@ -855,7 +830,7 @@ function generateUserWatermark(userId){
   // Scatter 3-5 watermark vars
   const markCount = randInt(3, 5);
   for(let i = 0; i < markCount; i++){
-    // Random prefix per var ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â no regex signature
+    // Random prefix per var ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no regex signature
     const varName = randHexName(2) + sig.substring(i % sig.length, (i % sig.length) + 3) + randHexName(2);
     const value = ((Math.abs(hash) >> (i * 4)) & 0xffff) | 1;
     marks.push("local " + varName + "=" + value);
@@ -885,7 +860,7 @@ function generateAntiDump(){
 
 
 
-// v8.0: Control Flow Flattening ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â wraps execution in state-machine dispatcher
+// v8.0: Control Flow Flattening ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â wraps execution in state-machine dispatcher
 // Deobfuscator sees while-loop with random state numbers, can't determine flow order
 function generateCFFDispatcher(payloadStates){
   const stateVar = randHexName(5);
@@ -920,7 +895,7 @@ function generateCFFDispatcher(payloadStates){
       dispatcher += doneFlag + "=true ";
     }
   });
-  // Fake state branches (never reached ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â dead code)
+  // Fake state branches (never reached ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â dead code)
   fakeStates.forEach(s=>{
     dispatcher += "elseif " + stateVar + "==" + s.stateNum + " then " + s.code + "; " + stateVar + "=" + s.nextState + " ";
   });
@@ -929,7 +904,7 @@ function generateCFFDispatcher(payloadStates){
 }
 
 
-// v8.0: Self-Modifying Bytecode ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â bytecode is XOR-scrambled at rest
+// v8.0: Self-Modifying Bytecode ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â bytecode is XOR-scrambled at rest
 // Runtime unscrambles it just before execution. Static disassembly = garbage.
 function scrambleBytecode(bcArr, scrambleKey){
   const scrambled = bcArr.map((byte, i) => (byte ^ (scrambleKey + (i % 23))) & 0xff);
@@ -941,7 +916,7 @@ function generateBytecodeUnscrambler(fnName, scrambleKey){
 }
 
 
-// v8.0: String Chunking ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â splits strings into pieces, concats at runtime
+// v8.0: String Chunking ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â splits strings into pieces, concats at runtime
 // Adds junk function calls between chunks to disrupt pattern matching
 function chunkString(str){
   if(str.length < 6) return null; // too short to chunk usefully
@@ -997,7 +972,7 @@ function makeFakeDecoders(count){
   return decoders.join(" ");
 }
 
-// v9.0: DCE-resistant junk ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â writes to shared table so dead-code elimination
+// v9.0: DCE-resistant junk ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â writes to shared table so dead-code elimination
 // can't prove the writes are unused. Attacker can't strip these safely.
 function generateJunkOps(count, sharedTable){
   const ops=[];
@@ -1085,7 +1060,7 @@ class RenameCtx{
 
 function walkAst(node,ctx){
   if(!node||typeof node!=="object")return;
-  // v10.6: DISABLED string encryption Ã¢â‚¬â€ was producing literal "null" tokens
+  // v10.6: DISABLED string encryption â€” was producing literal "null" tokens
   // in output when encryptString returned empty bytes or node.value became stale.
   // Strings now pass through serialize as JSON.stringify(node.value) directly.
   // if(node.type==="StringLiteral"&&typeof node.value==="string"){
@@ -1132,7 +1107,7 @@ function serializeBlock(stmts){
 
 // v9.1: Add ::__continue__:: label at end of loop bodies so 'goto __continue__' works
 function addContinueLabels(luaCode) {
-  // v9.5: no-op ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â continue labels are now injected in luauToLua's injectContinueLabels
+  // v9.5: no-op ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â continue labels are now injected in luauToLua's injectContinueLabels
   return luaCode;
 }
 
@@ -1208,7 +1183,7 @@ function tryVmWrap(ast, level){
 
   // v10.5: Only compile calls that reference KNOWN globals (Roblox stdlib + executor).
   // The VM harness executes BEFORE user's top-level declarations run, so any
-  // user-declared symbol Ã¢â‚¬â€ even top-level 'local function foo' Ã¢â‚¬â€ is nil at VM time.
+  // user-declared symbol â€” even top-level 'local function foo' â€” is nil at VM time.
   // Whitelist approach: reject any reference to symbols not in this safe set.
   const topLocals = new Set();  // kept for compatibility, unused for VM decisions
   for(const stmt of ast.body){
@@ -1221,7 +1196,7 @@ function tryVmWrap(ast, level){
       topLocals.add(stmt.identifier.name);
     } else if(stmt.type === "FunctionDeclaration" && stmt.identifier
               && stmt.identifier.type === "Identifier"){
-      // global function declaration Ã¢â‚¬â€ treat as available
+      // global function declaration â€” treat as available
       topLocals.add(stmt.identifier.name);
     } else if(stmt.type === "AssignmentStatement" && stmt.variables){
       // assignments like foo = ... make foo available as global
@@ -1230,7 +1205,7 @@ function tryVmWrap(ast, level){
       }
     }
   }
-  // Add ROBLOX_GLOBALS to the set Ã¢â‚¬â€ these are always safe as env[name]
+  // Add ROBLOX_GLOBALS to the set â€” these are always safe as env[name]
   for(const g of ROBLOX_GLOBALS) topLocals.add(g);
   // Also common Luau/Roblox names likely to be globals via getgenv or the executor
   const EXECUTOR_GLOBALS = ["hookfunction","hookmetamethod","getgenv","getrenv","getsenv","getreg",
@@ -1252,7 +1227,7 @@ function tryVmWrap(ast, level){
     if(node.type === "Identifier"){
       return !topLocals.has(node.name);
     }
-    // Don't descend into function bodies Ã¢â‚¬â€ locals inside are their own scope
+    // Don't descend into function bodies â€” locals inside are their own scope
     if(node.type === "FunctionDeclaration" || node.type === "FunctionExpression") return false;
     for(const k of Object.keys(node)){
       if(k === "type" || k === "loc" || k === "range") continue;
@@ -1262,7 +1237,7 @@ function tryVmWrap(ast, level){
   }
   const MAX_VM_STATEMENTS = 500; // v9.0: raised from 200
 
-  // v9.0: Prioritize sensitive statements ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â calls to HttpGet, loadstring, GetService, etc.
+  // v9.0: Prioritize sensitive statements ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â calls to HttpGet, loadstring, GetService, etc.
   const SENSITIVE_KEYWORDS = new Set([
     "HttpGet","HttpPost","loadstring","load","GetService","FindFirstChild",
     "WaitForChild","HttpGetAsync","PostAsync","RequestAsync","identifyexecutor",
@@ -1276,7 +1251,7 @@ function tryVmWrap(ast, level){
     }
     return score;
   }
-  // v10.4: Disabled sensitivity reordering Ã¢â‚¬â€ it hoists calls BEFORE their
+  // v10.4: Disabled sensitivity reordering â€” it hoists calls BEFORE their
   // 'local function' declarations, causing 'attempt to call a nil value'.
   // Preserving original order keeps declaration-before-use semantics intact.
   //
@@ -1284,7 +1259,7 @@ function tryVmWrap(ast, level){
   // function declared earlier in the same top-level scope compiles safely,
   // but a call to a function declared LATER falls through to passthrough.
   const declaredSoFar = new Set(topLocals);
-  // Remove things that appear AFTER their first usage Ã¢â‚¬â€ start empty of body-declared items
+  // Remove things that appear AFTER their first usage â€” start empty of body-declared items
   // and re-add as we encounter them in order
   const bodyLocalNames = new Set();
   for(const stmt of ast.body){
@@ -1297,7 +1272,7 @@ function tryVmWrap(ast, level){
       for(const v of stmt.variables) if(v && v.type === "Identifier") bodyLocalNames.add(v.name);
     }
   }
-  // Remove body-declared names from declaredSoFar Ã¢â‚¬â€ they only become available
+  // Remove body-declared names from declaredSoFar â€” they only become available
   // as we walk past their declaration
   for(const n of bodyLocalNames) declaredSoFar.delete(n);
   // Keep ROBLOX_GLOBALS + executor globals always available
@@ -1310,7 +1285,7 @@ function tryVmWrap(ast, level){
     "cloneref","gethui","getnamecallmethod","setnamecallmethod","isexecutorclosure"];
   for(const g of EXECUTOR_GLOBALS2) declaredSoFar.add(g);
 
-  // v10.5: Build strict whitelist Ã¢â‚¬â€ only Roblox + executor globals are VM-safe
+  // v10.5: Build strict whitelist â€” only Roblox + executor globals are VM-safe
   const SAFE_GLOBALS = new Set();
   for(const g of ROBLOX_GLOBALS) SAFE_GLOBALS.add(g);
   const EXTRA_SAFE = ["hookfunction","hookmetamethod","getgenv","getrenv","getsenv","getreg",
@@ -1328,7 +1303,7 @@ function tryVmWrap(ast, level){
       return false;
     }
     if(node.type === "Identifier"){
-      // v10.5: Only Roblox/executor globals are safe Ã¢â‚¬â€ everything else is user-declared
+      // v10.5: Only Roblox/executor globals are safe â€” everything else is user-declared
       // and lives in the encrypted payload that runs AFTER the VM harness.
       return !SAFE_GLOBALS.has(node.name);
     }
@@ -1389,7 +1364,7 @@ function byteLevelTripleObfuscate(code,level,userId){
   const sharedJunkVar = "_" + randHexName(4);
   const junkTablePreamble = "local " + sharedJunkVar + "={}";
   const watermark = generateUserWatermark(userId);
-  // v9.8: antiDump disabled ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â iterating getgc() on scripts with 1000+ functions crashes some executors
+  // v9.8: antiDump disabled ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â iterating getgc() on scripts with 1000+ functions crashes some executors
   const antiDump = "";
   const k1=randInt(40,240);
   const k2=randInt(40,240);
@@ -1405,7 +1380,7 @@ function byteLevelTripleObfuscate(code,level,userId){
   const junk1=generateJunkOps(randInt(10,20), sharedJunkVar);
   const junk2=generateJunkOps(randInt(5,15), sharedJunkVar);
 
-  // Random 3-letter tag per obfuscation ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â no brand leak
+  // Random 3-letter tag per obfuscation ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no brand leak
   const _tagA = String.fromCharCode(65+randInt(0,25));
   const _tagB = String.fromCharCode(65+randInt(0,25));
   const _tagC = String.fromCharCode(65+randInt(0,25));
@@ -1435,16 +1410,14 @@ function byteLevelTripleObfuscate(code,level,userId){
     "local function "+runFn+"() "+
       "local _L="+getLoaderFn+"() "+
       "if type(_L)~='function' then "+
-        "warn('[OBF] no loadstring/load available in this executor') "+
+        // Silent fail â€” no error message, no crash
         "return "+
       "end "+
-      "local ok_dec,src=pcall("+realDec+","+strVar+") "+
-      "if not ok_dec then warn('[OBF] decoder threw:', src) return end "+
-      "if type(src)~='string' then warn('[OBF] decoder returned non-string:', type(src)) return end "+
-      "local compiled,lerr=_L(src) "+
-      "if type(compiled)~='function' then warn('[OBF] loadstring failed. err=', lerr, 'srcLen=', #src, 'srcHead=', string.sub(src,1,80)) return end "+
-      "local ok_run,run_err=xpcall(compiled, function(e) return tostring(e)..'\\n'..debug.traceback() end) "+
-      "if not ok_run then warn('[OBF] payload runtime error:', run_err) end "+
+      "local src="+realDec+"("+strVar+") "+
+      "if type(src)~='string' then return end "+
+      "local ok,compiled=pcall(_L,src) "+
+      "if not ok or type(compiled)~='function' then return end "+
+      "pcall(compiled) "+
     "end "+
     runFn+"()"
 
@@ -1462,27 +1435,15 @@ function byteLevelTripleObfuscate(code,level,userId){
   return parts.join("; ");
 }
 
-async function obfuscateSingle(luaCode,level,userId){
+async function obfuscate(luaCode,level,userId){
   level=level||"medium";
   const _WM=pickWatermark();
-  const _DIAG="-- [OBF FinalAndIHopeSo: pre-analysis + adaptive strategy + safe minify]\n";
   try{
     let code=preprocess(luaCode);
     // v9.1: Preprocess Luau-specific syntax so luaparse can handle Roblox scripts
     code = luauToLua(code);
-    if(level==="none")return _DIAG+_WM+code;
-    if(level==="basic")return _DIAG+_WM+aggressiveMinify(code);
-    if(level==="light"){
-      // v17: light path â€” SAFE minify. The old aggressiveMinify joined every line
-      // with a single space and inserted semicolons via regex heuristics, which
-      // produced runtime errors like "attempt to index nil with 'create_tab'" on
-      // scripts that heavily use method chains and getgenv(). This path only
-      // strips comments and blank lines, preserving REAL newlines as statement
-      // separators â€” Lua's actual grammar treats newlines as separators, so
-      // preserving them is guaranteed-safe.
-      const stripped = safeMinify(code);
-      return _DIAG+_WM+stripped;
-    }
+    if(level==="none")return _WM+code;
+    if(level==="basic")return _WM+aggressiveMinify(code);
 
     let ast=null;
     let parseErrMsg = "";
@@ -1500,9 +1461,9 @@ async function obfuscateSingle(luaCode,level,userId){
 
     if(!ast){
       console.warn("[obfuscator] Falling back to byte-level (no AST). Script size:", code.length);
-      // v9.1: byte-level fallback works for ANY input ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â even if AST parse fails
+      // v9.1: byte-level fallback works for ANY input ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â even if AST parse fails
       try {
-        return _DIAG+_WM+byteLevelTripleObfuscate(code,level,userId);
+        return _WM+byteLevelTripleObfuscate(code,level,userId);
       } catch(fbErr) {
         console.error("[obfuscator] Byte-level fallback ALSO failed:", fbErr.message);
         // Last resort: just return minified code
@@ -1547,7 +1508,7 @@ async function obfuscateSingle(luaCode,level,userId){
 
     let combined=poolPreamble+decoder+"; "+ob;
 
-    if(isMedium)return _DIAG+_WM+combined;
+    if(isMedium)return _WM+combined;
 
     const encrypted = byteLevelTripleObfuscate(combined, level, userId);
     // v8.0: Wrap in Control Flow Flattening state machine (maximum only)
@@ -1563,411 +1524,11 @@ async function obfuscateSingle(luaCode,level,userId){
   }catch(err){
     console.error("[obfuscator] Error:",err.message);
     try{
-      return _DIAG+_WM+byteLevelTripleObfuscate(preprocess(luaCode),level,userId);
+      return _WM+byteLevelTripleObfuscate(preprocess(luaCode),level,userId);
     }catch(e){
       throw new Error("Failed to obfuscate: "+err.message);
     }
   }
-}
-
-
-// v12: auto-splitting wrapper.
-// Executors like Delta silently return nil from loadstring when the source is too large
-// (roughly > 250-300 KB per call on many builds). This wrapper obfuscates the whole
-// script first; if the output is safely small, ships it as-is; otherwise splits the
-// INPUT into chunks that each produce a safely-small obfuscated blob and emits a
-// multi-part loader that loadstring's each chunk in order.
-const _CHUNK_SAFE_BYTES = 180000;   // per-chunk obfuscated size ceiling (very conservative)
-const _MIN_CHUNKS = 1;
-
-function _findTopLevelBoundaries(code){
-  // Walk the source with a Lua-aware tokenizer, tracking block depth,
-  // paren/bracket depth, and string/comment state. Return every offset
-  // where depth == 0 AND we are just past a statement terminator (newline,
-  // semicolon, or 'end'/'until' that closed a top-level block).
-  //
-  // block-openers: do, function, if, while, for, repeat
-  // block-closers: end, until (repeat is closed by until, others by end)
-  // We increment blockDepth on each opener and decrement on each closer.
-  const boundaries = [0];
-  let i = 0;
-  const N = code.length;
-  let blockDepth = 0;    // do/function/if/while/for/repeat balance
-  let parenDepth = 0;    // ( ) balance
-  let brackDepth = 0;    // [ ] balance (not long-bracket strings)
-  let braceDepth = 0;    // { } balance
-  // Skip whitespace/comments and check identifier keywords properly.
-  function isIdChar(c){ return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_'; }
-  while (i < N){
-    const c = code[i];
-    const n = i + 1 < N ? code[i+1] : "";
-    // Long-bracket comment or string: --[[ ... ]] or [[ ... ]] (with optional = levels)
-    if (c === '-' && n === '-'){
-      let j = i + 2;
-      if (code[j] === '['){
-        let lvl = 0, k = j + 1;
-        while (code[k] === '=') { lvl++; k++; }
-        if (code[k] === '['){
-          const closer = ']' + '='.repeat(lvl) + ']';
-          const end = code.indexOf(closer, k + 1);
-          if (end > 0) { i = end + closer.length; continue; }
-          i = N; continue;
-        }
-      }
-      while (i < N && code[i] !== '\n') i++;
-      continue;
-    }
-    if (c === '['){
-      let lvl = 0, j = i + 1;
-      while (code[j] === '=') { lvl++; j++; }
-      if (code[j] === '['){
-        const closer = ']' + '='.repeat(lvl) + ']';
-        const end = code.indexOf(closer, j + 1);
-        if (end > 0) { i = end + closer.length; continue; }
-      }
-      brackDepth++; i++; continue;
-    }
-    if (c === ']'){ brackDepth--; i++; continue; }
-    if (c === '"' || c === "'"){
-      const q = c;
-      i++;
-      while (i < N){
-        if (code[i] === '\\'){ i += 2; continue; }
-        if (code[i] === q){ i++; break; }
-        if (code[i] === '\n') { i++; break; }
-        i++;
-      }
-      continue;
-    }
-    if (c === '(') { parenDepth++; i++; continue; }
-    if (c === ')') { parenDepth--; i++; continue; }
-    if (c === '{') { braceDepth++; i++; continue; }
-    if (c === '}') { braceDepth--; i++; continue; }
-    // Keyword scan â€” only when at word boundary
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_'){
-      let j = i;
-      while (j < N && isIdChar(code[j])) j++;
-      const word = code.slice(i, j);
-      // Opener keywords
-      if (word === 'do' || word === 'function' || word === 'if' || word === 'while' || word === 'for' || word === 'repeat'){
-        // 'for' with generic/numeric form and 'while ... do' both add ONE depth on the opener
-        // BUT 'while X do' â†’ 'while' does not open, 'do' does. Same for 'for X do'.
-        // 'if X then' â€” 'if' does not open, 'then' does... except 'elseif X then' also opens? no â€”
-        // 'then' just resumes body. We over-approximate by counting only 'do','function','if','repeat'.
-        // 'while' and 'for' don't add depth here; their 'do' will.
-        if (word === 'do' || word === 'function' || word === 'if' || word === 'repeat'){
-          blockDepth++;
-        }
-      } else if (word === 'end' || word === 'until'){
-        blockDepth--;
-        // After this end/until, we may be at a top-level boundary.
-        i = j;
-        if (blockDepth === 0 && parenDepth === 0 && brackDepth === 0 && braceDepth === 0){
-          // Skip trailing whitespace/semicolons up to the next line
-          while (i < N && (code[i] === ' ' || code[i] === '\t' || code[i] === ';' || code[i] === '\r')) i++;
-          if (code[i] === '\n') { i++; boundaries.push(i); continue; }
-          boundaries.push(i);
-        }
-        continue;
-      }
-      i = j; continue;
-    }
-    // Statement terminators at top level
-    if (c === '\n'){
-      if (blockDepth === 0 && parenDepth === 0 && brackDepth === 0 && braceDepth === 0){
-        boundaries.push(i + 1);
-      }
-      i++; continue;
-    }
-    if (c === ';' && blockDepth === 0 && parenDepth === 0 && brackDepth === 0 && braceDepth === 0){
-      i++;
-      while (i < N && (code[i] === ' ' || code[i] === '\t' || code[i] === '\r')) i++;
-      boundaries.push(i);
-      continue;
-    }
-    i++;
-  }
-  // Dedupe & sort
-  const uniq = Array.from(new Set(boundaries)).sort((a,b)=>a-b);
-  return uniq;
-}
-
-function _splitLuaSource(code, parts){
-  if (parts <= 1) return [code];
-  const boundaries = _findTopLevelBoundaries(code);
-  boundaries.push(code.length);
-  if (boundaries.length < parts + 1){
-    console.warn("[obfuscator] not enough top-level boundaries (" + boundaries.length + ") for " + parts + " parts â€” using fewer parts");
-    parts = Math.max(1, boundaries.length - 1);
-  }
-  const step = Math.floor(code.length / parts);
-  const cuts = [0];
-  for (let i = 1; i < parts; i++){
-    const ideal = i * step;
-    // Pick the boundary closest to ideal that is > previous cut
-    let best = -1;
-    let bestDist = Infinity;
-    for (const b of boundaries){
-      if (b <= cuts[cuts.length - 1]) continue;
-      if (b >= code.length) continue;
-      const d = Math.abs(b - ideal);
-      if (d < bestDist){ bestDist = d; best = b; }
-    }
-    if (best < 0) break;
-    cuts.push(best);
-  }
-  cuts.push(code.length);
-  const chunks = [];
-  for (let i = 0; i < cuts.length - 1; i++){
-    chunks.push(code.slice(cuts[i], cuts[i+1]));
-  }
-  console.log("[obfuscator] smart split â€” parts:", chunks.length, "sizes:", chunks.map(c=>c.length));
-  return chunks;
-}
-
-function _makeLongBracket(payload){
-  // Find an = level that never appears as ]===] inside payload.
-  for (let lvl = 0; lvl < 20; lvl++){
-    const eq = "=".repeat(lvl);
-    const closer = "]" + eq + "]";
-    if (payload.indexOf(closer) < 0){
-      return "[" + eq + "[" + payload + closer;
-    }
-  }
-  // Fallback: quote-escape (very slow, only if payload has ]===...===] for every level)
-  return '"' + payload.replace(/\\/g,"\\\\").replace(/"/g,'\\"').replace(/\n/g,"\\n") + '"';
-}
-
-function _buildMultiPartLoader(chunks){
-  // Each chunk is already an obfuscated Lua source string; we just need to loadstring
-  // each one in order. We use a shared getLoader() and a simple sequential runner
-  // with warn() on any failure â€” identical error visibility to the single-chunk loader.
-  const parts = [];
-  parts.push("-- [OBF v14.0 multi-part loader â€” " + chunks.length + " chunks]");
-  parts.push([
-    "local function __obf_getload()",
-    "  local ok,fn = pcall(function()",
-    "    local env = (getgenv and getgenv()) or _G or {}",
-    "    if type(env.loadstring) == 'function' then return env.loadstring end",
-    "    if type(env.load)       == 'function' then return env.load end",
-    "    if syn    and type(syn.load)    == 'function' then return syn.load end",
-    "    if fluxus and type(fluxus.load) == 'function' then return fluxus.load end",
-    "    if krnl   and type(krnl.load)   == 'function' then return krnl.load end",
-    "    if delta  and type(delta.load)  == 'function' then return delta.load end",
-    "    if type(loadstring) == 'function' then return loadstring end",
-    "    if type(load)       == 'function' then return load end",
-    "    return nil",
-    "  end)",
-    "  if ok and type(fn) == 'function' then return fn end",
-    "  return nil",
-    "end",
-    "local __obf_L = __obf_getload()",
-    "if type(__obf_L) ~= 'function' then",
-    "  warn('[OBF] no loadstring/load available in this executor')",
-    "  return",
-    "end",
-    "local __obf_chunks = {}",
-  ].join("\n"));
-  chunks.forEach((c, i) => {
-    parts.push("__obf_chunks[" + (i+1) + "] = " + _makeLongBracket(c));
-  });
-  parts.push([
-    "for __obf_i = 1, #__obf_chunks do",
-    "  local __obf_src = __obf_chunks[__obf_i]",
-    "  local __obf_fn, __obf_err = __obf_L(__obf_src)",
-    "  if type(__obf_fn) ~= 'function' then",
-    "    warn('[OBF] chunk ' .. __obf_i .. ' compile failed. err=', __obf_err, 'size=', #__obf_src, 'head=', string.sub(__obf_src, 1, 100))",
-    "  else",
-    "    local __obf_run_ok, __obf_run_err = xpcall(__obf_fn, function(e) return tostring(e) .. '\\n' .. debug.traceback() end)",
-    "    if not __obf_run_ok then",
-    "      warn('[OBF] chunk ' .. __obf_i .. ' runtime error:', __obf_run_err)",
-    "    end",
-    "  end",
-    "end",
-  ].join("\n"));
-  return parts.join("\n");
-}
-
-
-// FinalAndIHopeSo: pre-analysis phase.
-// Scans the source and returns a profile the obfuscate() wrapper uses to pick
-// a safe strategy per script. Zero AST â€” pure string/regex scan, so it works
-// even on scripts that luaparse chokes on (Luau syntax, huge files, etc.).
-function analyzeScript(code){
-  const p = {
-    bytes: code.length,
-    lines: 0,
-    hasCRLF: /\r\n/.test(code),
-    hasLuauSyntax: false,      // compound ops, continue, type annots, string interp
-    hasCompoundOps: false,     // +=, -=, *=, /=, ..=
-    hasContinue: false,        // continue keyword (Luau, not Lua 5.1)
-    hasTypeAnnots: false,      // : Type after params or vars
-    hasStringInterp: false,    // backtick strings
-    topLevelLocals: 0,
-    topLevelFunctions: 0,
-    topLevelDoBlocks: 0,
-    methodCallDensity: 0,      // ratio of X:foo() calls to total call sites
-    methodCallSites: 0,
-    getgenvCount: 0,
-    getrenvCount: 0,
-    hookfunctionCount: 0,
-    loadstringCount: 0,
-    httpGetCount: 0,
-    requireCount: 0,
-    returnsModule: false,      // ends with "return X" (module pattern)
-    hasLibraryPattern: false,  // "local X = {}" followed by "X.__index = X" (OO)
-    strategy: "light",
-    strategyReason: [],
-    recommendations: []
-  };
-
-  // Normalize for scanning only (do not modify actual code we return)
-  const norm = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const lines = norm.split("\n");
-  p.lines = lines.length;
-
-  // Luau syntax detection
-  if (/[+\-*/]=|\.\.=/.test(norm)) { p.hasCompoundOps = true; p.hasLuauSyntax = true; }
-  if (/\bcontinue\b/.test(norm))     { p.hasContinue = true;    p.hasLuauSyntax = true; }
-  if (/:\s*[A-Za-z_][A-Za-z0-9_.<>?]*\s*[,=)]/.test(norm)) { p.hasTypeAnnots = true; p.hasLuauSyntax = true; }
-  if (/`[^`\n]*\$?\{/.test(norm)) { p.hasStringInterp = true; p.hasLuauSyntax = true; }
-
-  // Top-level scan (very rough depth tracker â€” good enough for detection)
-  let depth = 0;
-  for (const line of lines){
-    const trimmed = line.trim();
-    if (depth === 0){
-      if (/^local\s+[A-Za-z_]\w*\s*=/.test(trimmed) && !/^local\s+function/.test(trimmed)) p.topLevelLocals++;
-      if (/^(?:local\s+)?function\s+[A-Za-z_]/.test(trimmed))                             p.topLevelFunctions++;
-      if (/^do\s*$/.test(trimmed))                                                          p.topLevelDoBlocks++;
-    }
-    const opens  = (line.match(/\b(do|function|if|while|for|repeat)\b/g) || []).length;
-    const closes = (line.match(/\b(end|until)\b/g) || []).length;
-    depth += opens - closes;
-    if (depth < 0) depth = 0;
-  }
-
-  // Method-call density
-  p.methodCallSites = (norm.match(/\b\w+:\w+\s*\(/g) || []).length;
-  const totalCallSites = (norm.match(/\b\w+\s*\(/g) || []).length;
-  p.methodCallDensity = totalCallSites > 0 ? p.methodCallSites / totalCallSites : 0;
-
-  // Global-state usage
-  p.getgenvCount      = (norm.match(/\bgetgenv\s*\(/g)      || []).length;
-  p.getrenvCount      = (norm.match(/\bgetrenv\s*\(/g)      || []).length;
-  p.hookfunctionCount = (norm.match(/\bhookfunction\s*\(/g) || []).length;
-
-  // External loading
-  p.loadstringCount = (norm.match(/\bloadstring\s*\(/g) || []).length;
-  p.httpGetCount    = (norm.match(/HttpGet/g)              || []).length;
-  p.requireCount    = (norm.match(/\brequire\s*\(/g)    || []).length;
-
-  // Module patterns
-  const tail = norm.slice(-500).trim();
-  p.returnsModule = /\breturn\s+[A-Za-z_]\w*\s*$/.test(tail);
-
-  // OO / library pattern (Library.__index = Library)
-  p.hasLibraryPattern = /\.__index\s*=/.test(norm);
-
-  // Strategy decision matrix â€” each rule adds a reason
-  const reasons = p.strategyReason;
-  const forceLight =
-    p.bytes > 400000                    ||
-    p.methodCallDensity > 0.25          ||
-    p.getgenvCount > 100                ||
-    p.hookfunctionCount > 3             ||
-    p.returnsModule                     ||
-    p.hasLibraryPattern;
-
-  if (p.bytes > 400000)          reasons.push("large script (" + Math.round(p.bytes/1024) + " KB) â€” heavy transforms risk cap issues");
-  if (p.methodCallDensity > 0.25) reasons.push("heavy method-chain usage (" + Math.round(p.methodCallDensity*100) + "% of calls) â€” rename would break refs");
-  if (p.getgenvCount > 100)      reasons.push("heavy getgenv usage (" + p.getgenvCount + " calls) â€” global-state sensitive");
-  if (p.hookfunctionCount > 3)   reasons.push("hookfunction hooks present (" + p.hookfunctionCount + ") â€” obfuscation may collide with executor hooks");
-  if (p.returnsModule)           reasons.push("returns a module at top level â€” split would break the return");
-  if (p.hasLibraryPattern)       reasons.push("OO/library pattern (__index) â€” rename would break method dispatch");
-  if (p.hasLuauSyntax)           reasons.push("uses Luau syntax â€” luaToLua converter required");
-
-  if (forceLight){
-    p.strategy = "light";
-  } else if (p.bytes < 50000){
-    p.strategy = "medium";
-    reasons.push("small script (" + Math.round(p.bytes/1024) + " KB) with no risky patterns â€” medium is safe");
-  } else {
-    p.strategy = "light";
-    reasons.push("no obvious risky pattern, but > 50 KB â€” light is the conservative default");
-  }
-
-  // Guidance for future edits to the source script
-  if (p.methodCallDensity > 0.25)
-    p.recommendations.push("your script relies on colon-method calls; if you enable rename mode later, provide a scope-aware renamer");
-  if (p.hookfunctionCount > 0)
-    p.recommendations.push("hookfunction is present â€” obfuscated output should not touch getrenv().debug.info or similar hook targets");
-  if (p.hasLibraryPattern && p.returnsModule)
-    p.recommendations.push("this is a self-contained UI library â€” do not split across multiple loadstring calls");
-
-  return p;
-}
-
-async function obfuscate(luaCode, level, userId){
-  // FinalAndIHopeSo: pre-analysis phase â€” inspect script BEFORE deciding strategy.
-  const profile = analyzeScript(luaCode);
-  console.log("[obfuscator] === script analysis ===");
-  console.log("  bytes: " + profile.bytes + ", lines: " + profile.lines + ", CRLF: " + profile.hasCRLF);
-  console.log("  top-level: " + profile.topLevelLocals + " locals, " + profile.topLevelFunctions + " functions, " + profile.topLevelDoBlocks + " do-blocks");
-  console.log("  method-call density: " + Math.round(profile.methodCallDensity * 100) + "% (" + profile.methodCallSites + " sites)");
-  console.log("  globals: " + profile.getgenvCount + " getgenv, " + profile.getrenvCount + " getrenv, " + profile.hookfunctionCount + " hookfunction");
-  console.log("  loading: " + profile.loadstringCount + " loadstring, " + profile.httpGetCount + " HttpGet, " + profile.requireCount + " require");
-  console.log("  patterns: Luau=" + profile.hasLuauSyntax + ", returnsModule=" + profile.returnsModule + ", libraryOO=" + profile.hasLibraryPattern);
-  console.log("  recommended strategy: " + profile.strategy);
-  for (const r of profile.strategyReason) console.log("    - " + r);
-  for (const r of profile.recommendations) console.log("  [hint] " + r);
-
-  // If caller didn't specify a level, use the recommended one
-  if (!level) level = profile.strategy;
-
-  // If caller asked for medium/maximum but profile forces light, downgrade with a loud log
-  const requestedStrict = (level === "medium" || level === "maximum");
-  if (requestedStrict && profile.strategy === "light"){
-    console.log("[obfuscator] DOWNGRADING requested level '" + level + "' â†’ 'light' because the profile flagged risky patterns above. See reasons.");
-    level = "light";
-  }
-
-  // v15: light mode + short paths skip the split â€” they produce a single small blob.
-  if (level === "light" || level === "none" || level === "basic"){
-    return await obfuscateSingle(luaCode, level, userId);
-  }
-  // First try single-shot; most inputs will not need splitting.
-  const single = await obfuscateSingle(luaCode, level, userId);
-  if (typeof single === "string" && single.length <= _CHUNK_SAFE_BYTES) {
-    return single;
-  }
-  // Estimate part count from single-shot expansion ratio, then round up with slack.
-  const ratio = (single && single.length) ? (single.length / Math.max(1, luaCode.length)) : 1.3;
-  let parts = Math.max(_MIN_CHUNKS, Math.ceil((single.length) / _CHUNK_SAFE_BYTES) + 1);
-  // Try increasing splits until every chunk lands under the ceiling.
-  for (let attempt = 0; attempt < 6; attempt++){
-    const chunks = _splitLuaSource(luaCode, parts);
-    const obfChunks = [];
-    let maxLen = 0;
-    let anyOversize = false;
-    for (const c of chunks){
-      const o = await obfuscateSingle(c, level, userId);
-      obfChunks.push(o);
-      if (o.length > maxLen) maxLen = o.length;
-      if (o.length > _CHUNK_SAFE_BYTES) anyOversize = true;
-    }
-    console.log("[obfuscator] multi-part attempt", attempt+1, "parts=" + parts, "maxChunkBytes=" + maxLen);
-    if (!anyOversize) {
-      return _buildMultiPartLoader(obfChunks);
-    }
-    // Otherwise split more aggressively
-    parts = Math.ceil(parts * 1.4);
-  }
-  // Give up and ship whatever we have; the loader itself will warn per failing chunk.
-  const chunks = _splitLuaSource(luaCode, parts);
-  const obfChunks = [];
-  for (const c of chunks) obfChunks.push(await obfuscateSingle(c, level, userId));
-  return _buildMultiPartLoader(obfChunks);
 }
 
 process.on("uncaughtException",(e)=>{console.error("[obfuscator] Uncaught:",e.message);});
