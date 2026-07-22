@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.21-fix - String encryption + numeric reporting + manifest split
+// AzureVM Obfuscator v25.22-fix - Align numeric stat key with dashboard (numericConstsObfuscated)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -509,7 +509,7 @@ function preprocess(rawCode) {
   // (b) function params (name: Type, ...) --  REMOVED in v25.19.
   // The old paren-walker regex mangled nested calls like fn((a or {})) by
   // capturing the empty inner group first, then re-emitting "()" around the
-  // outer remainder ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â producing an extra ")". This broke every AST stage on
+  // outer remainder ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â producing an extra ")". This broke every AST stage on
   // azure.txt (identical error at every stage: "<name> expected near '('").
   // Function-parameter Luau type annotations are rare in Roblox exploit /
   // game scripts; the far more common `local x: Type = ...` form is handled
@@ -1946,7 +1946,7 @@ function _pipeline(rawCode, level, options, report) {
       goodAst = r.ast; goodCode = r.code;
       report.layers.numericObfuscation = true;
       report.layers.constantObfuscation = true; // alias for dashboard's older label
-      if (report.stats) report.stats.numericsObfuscated = _numMeta.encoded;
+      if (report.stats) report.stats.numericConstsObfuscated = _numMeta.encoded;
     }
   }
 
