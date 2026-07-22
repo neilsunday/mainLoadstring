@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.6 - + Inner VM wrap (10 opcodes, print-only, loud errors)
+// AzureVM Obfuscator v25.7 - VM stage reordered to run BEFORE numeric-encoding
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1571,20 +1571,12 @@ function _pipeline(rawCode, level, options, report) {
     xorMask = [buf[0], buf[1], buf[2], buf[3]];
   }
 
-  // Stage: numeric encoding
-  {
-    const ctx = { encNumbers: true, manifest, strMeta: { encrypted: 0, skipped: 0 } };
-    const r = runStage("numeric-encoding", goodAst, ctx, walkTransform, report);
-    if (r.ok) {
-      goodAst = r.ast; goodCode = r.code;
-      report.layers.numericObfuscation = true;
-      report.layers.constantObfuscation = true; // alias for dashboard's older label
-    }
-  }
-
-  // Stage: inner VM wrap (v25.6). Runs BEFORE string-encryption so we
-  // still see literal strings, not _D() calls. Maximum tier only; smart-skip
-  // on hook/reflection payloads to stay conservative.
+  // Stage: inner VM wrap (v25.7). Runs FIRST, before any other transform,
+  // so it sees the pristine AST. Later stages (numeric-encoding, string-
+  // encryption, identifier-rename) all skip nodes that already have __obf
+  // markers, so once we tag a statement with type "vm" it stays intact.
+  // Maximum tier only; smart-skip on hook/reflection payloads to stay
+  // conservative.
   let vmFnName = null;
   let vmBcVar  = null;
   let vmBytecode = [];
@@ -1645,6 +1637,17 @@ function _pipeline(rawCode, level, options, report) {
     } catch (e) {
       report.warn("VM wrap threw: " + e.message + " - skipped");
       report.stagesSkipped.push("vm-wrap");
+    }
+  }
+
+  // Stage: numeric encoding
+  {
+    const ctx = { encNumbers: true, manifest, strMeta: { encrypted: 0, skipped: 0 } };
+    const r = runStage("numeric-encoding", goodAst, ctx, walkTransform, report);
+    if (r.ok) {
+      goodAst = r.ast; goodCode = r.code;
+      report.layers.numericObfuscation = true;
+      report.layers.constantObfuscation = true; // alias for dashboard's older label
     }
   }
 
