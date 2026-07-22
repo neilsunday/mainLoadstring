@@ -1,3 +1,16 @@
+// AzureVM Obfuscator v24.0 - Reference file support
+// v24.0 changes (2026-07):
+//   1. ReferenceManifest.scan now accepts (primaryCode, referenceCode?) â€”
+//      the reference is an OPTIONAL extra source file that feeds identifiers
+//      and strings into the same preservation whitelist. Enables the
+//      dashboard's "Reference Script" upload field: user uploads a working
+//      reference (e.g. macrozure.txt) once, and every future obfuscation
+//      uses those patterns as safety hints.
+//   2. options.referenceCode plumbed through obfuscateWithReport â€” the
+//      server passes the uploaded reference text down to the manifest.
+//   3. All v23 rename-consistency fixes preserved. All v22 manifest
+//      infrastructure preserved. All v21 reflection-string fixes preserved.
+//
 // AzureVM Obfuscator v23.0 - Rename consistency + full manifest coverage
 // v23.0 changes (2026-07):
 //   1. hoistFromManifest now seeds the ROOT scope with EVERY identifier the
@@ -261,8 +274,26 @@ class ReferenceManifest {
     this.stats = {};
   }
 
-  static scan(rawCode){
+  // v24.0: scan(primaryCode, referenceCode?) â€” reference is optional extra
+  // safety guide. Both files' identifiers/strings feed into the same manifest.
+  static scan(rawCode, referenceCode){
     const m = new ReferenceManifest();
+    ReferenceManifest._scanInto(m, rawCode);
+    if(referenceCode && typeof referenceCode === "string" && referenceCode.trim().length > 0){
+      ReferenceManifest._scanInto(m, referenceCode);
+    }
+    m.stats = {
+      identifiers: m.identifiers.size,
+      strings: m.strings.size,
+      propertyNames: m.propertyNames.size,
+      zeroInitLocals: m.zeroInitLocals.size,
+      forwardRefs: m.forwardRefs.size,
+      methodCallBases: m.methodCallBases.size,
+    };
+    return m;
+  }
+
+  static _scanInto(m, rawCode){
     let ast;
     try {
       ast = luaparse.parse(rawCode, { luaVersion: "5.3", comments: false, locations: true });
@@ -374,15 +405,6 @@ class ReferenceManifest {
       }
     }
 
-    m.stats = {
-      identifiers: m.identifiers.size,
-      strings: m.strings.size,
-      propertyNames: m.propertyNames.size,
-      zeroInitLocals: m.zeroInitLocals.size,
-      forwardRefs: m.forwardRefs.size,
-      methodCallBases: m.methodCallBases.size,
-    };
-    return m;
   }
 
   // Merge everything into a single Set for whitelist purposes.
@@ -3852,7 +3874,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     // future scripts don't need per-script patches.
     let _manifest;
     try {
-      _manifest = ReferenceManifest.scan(luaCode);
+      _manifest = ReferenceManifest.scan(luaCode, options.referenceCode);
       console.log("[obfuscator v22] Reference manifest:",
         _manifest.stats.identifiers + " identifiers,",
         _manifest.stats.strings + " strings,",
