@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.23-perf - Fast cloneAst + safe-stage fast path (500KB+ viable)
+// AzureVM Obfuscator v25.24-luau - v25.23 perf + Luau param type stripper (paren walker)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -506,7 +506,14 @@ function preprocess(rawCode) {
     new RegExp("(\\blocal\\s+" + IDENT + "(?:\\s*,\\s*" + IDENT + ")*)\\s*:\\s*[A-Za-z_][A-Za-z0-9_.<>?]*", "g"),
     "$1"
   );
-  // (b) function params (name: Type, ...) --  REMOVED in v25.19.
+  // (b) function params (name: Type, ...) -- v25.24 REINTRODUCED via paren walker.
+  // The v25.19 removal note said: "If we ever need this again, do a proper
+  // paren-balance walker (Option 2)." This IS that walker. Instead of a regex
+  // that miscounts nested parens, we scan token-by-token, track paren depth,
+  // and only strip `: Type` inside function parameter lists.
+  work = _stripLuauParamTypes(work);
+  changesMarker: /* v25.19-comment-preserved-below */
+  // (b-legacy) function params (name: Type, ...) -- ORIGINAL v25.19 removal note.
   // The old paren-walker regex mangled nested calls like fn((a or {})) by
   // capturing the empty inner group first, then re-emitting "()" around the
   // outer remainder ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â producing an extra ")". This broke every AST stage on
@@ -528,6 +535,158 @@ function preprocess(rawCode) {
   // Restore strings
   for (const s of strings) work = work.split(s.key).join(s.value);
   return work;
+}
+
+
+// ============================================================================
+// v25.24 - Luau function-parameter type stripper (paren-balance walker)
+// ============================================================================
+// Scans the source, finds each `function (` or `function name(` or
+// `function name.method(` or `function name:method(` opening paren, then
+// walks that parameter list with proper paren/bracket/brace balancing. Inside
+// the param list, strips `: Type` from each parameter, where Type can itself
+// contain parens (function types), braces (table types), brackets (generics),
+// unions (`|`), intersections (`&`), and question marks (optional).
+//
+// Also handles:
+//   * Generic parameters: function<T, U>(x: T) -> we skip the <...> block
+//   * Return types: function(): number  -- handled by existing (c) stripper
+//   * Default values not present in Luau, so we don't need to handle those
+// ============================================================================
+function _stripLuauParamTypes(code) {
+  // Locate every "function" keyword that opens a parameter list.
+  // We must NOT touch "function" inside strings, comments, or as identifier.
+  // Since preprocess() already substituted string literals with ___STR_N___
+  // placeholders and preserved comments, we can scan directly here.
+  const n = code.length;
+  const out = [];
+  let i = 0;
+
+  while (i < n) {
+    // Find next 'function' keyword.
+    const fnIdx = code.indexOf("function", i);
+    if (fnIdx < 0) {
+      out.push(code.substring(i));
+      break;
+    }
+    // Check word boundary before "function".
+    const prev = fnIdx > 0 ? code[fnIdx - 1] : " ";
+    if (/[A-Za-z0-9_]/.test(prev)) {
+      // Not a keyword (part of identifier), skip.
+      out.push(code.substring(i, fnIdx + 8));
+      i = fnIdx + 8;
+      continue;
+    }
+    // Emit everything up to and including "function".
+    out.push(code.substring(i, fnIdx + 8));
+    i = fnIdx + 8;
+
+    // Skip whitespace.
+    while (i < n && /\s/.test(code[i])) { out.push(code[i]); i++; }
+
+    // Optional: skip identifier chain (name, name.method, name:method, name.a.b:c)
+    while (i < n && /[A-Za-z_]/.test(code[i])) {
+      // Consume identifier
+      while (i < n && /[A-Za-z0-9_]/.test(code[i])) { out.push(code[i]); i++; }
+      // Consume . or : separator
+      while (i < n && /\s/.test(code[i])) { out.push(code[i]); i++; }
+      if (i < n && (code[i] === "." || code[i] === ":")) {
+        out.push(code[i]); i++;
+        while (i < n && /\s/.test(code[i])) { out.push(code[i]); i++; }
+      } else break;
+    }
+
+    // Optional: skip generic parameter list <T, U, V>
+    if (i < n && code[i] === "<") {
+      let depth = 1;
+      out.push(code[i]); i++;
+      while (i < n && depth > 0) {
+        if (code[i] === "<") depth++;
+        else if (code[i] === ">") depth--;
+        out.push(code[i]); i++;
+      }
+      while (i < n && /\s/.test(code[i])) { out.push(code[i]); i++; }
+    }
+
+    // Now we must see '(' -- if not, this wasn't a function-decl form.
+    if (i >= n || code[i] !== "(") continue;
+
+    // We're at the opening paren of the parameter list. Emit it and walk.
+    out.push("(");
+    i++;
+    // Track balance of (), [], {} inside the param list so we can find the
+    // matching close paren without being fooled by table/tuple/function types.
+    let paren = 1;
+    // Accumulate the parameter list content, then strip types from it.
+    let paramList = "";
+    while (i < n && paren > 0) {
+      const c = code[i];
+      if (c === "(") { paren++; paramList += c; i++; continue; }
+      if (c === ")") {
+        paren--;
+        if (paren === 0) break;
+        paramList += c; i++; continue;
+      }
+      // Handle nested [] and {} (they don't affect our paren counter but we
+      // need to skip through them without splitting on ',' inside them).
+      paramList += c;
+      i++;
+    }
+    // Now paramList holds everything between the outer parens (exclusive).
+    // Split by top-level commas (respecting <>, [], {}, ()) and strip types.
+    const stripped = _stripTypesFromParams(paramList);
+    out.push(stripped);
+    out.push(")");
+    i++; // consume the closing ')'
+  }
+
+  return out.join("");
+}
+
+function _stripTypesFromParams(paramList) {
+  // Split on top-level commas, then for each param: keep everything up to
+  // the first top-level ':' (that's the param name; optional '?' allowed).
+  const parts = [];
+  let depth_paren = 0, depth_brace = 0, depth_bracket = 0, depth_angle = 0;
+  let start = 0;
+  for (let k = 0; k < paramList.length; k++) {
+    const c = paramList[k];
+    if (c === "(") depth_paren++;
+    else if (c === ")") depth_paren--;
+    else if (c === "{") depth_brace++;
+    else if (c === "}") depth_brace--;
+    else if (c === "[") depth_bracket++;
+    else if (c === "]") depth_bracket--;
+    else if (c === "<") depth_angle++;
+    else if (c === ">") depth_angle--;
+    else if (c === "," && depth_paren === 0 && depth_brace === 0 && depth_bracket === 0 && depth_angle === 0) {
+      parts.push(paramList.substring(start, k));
+      start = k + 1;
+    }
+  }
+  parts.push(paramList.substring(start));
+
+  const cleaned = parts.map(p => {
+    // Find first top-level ':' -- everything after it is the type annotation.
+    let dp = 0, db = 0, dk = 0, da = 0;
+    for (let k = 0; k < p.length; k++) {
+      const c = p[k];
+      if (c === "(") dp++;
+      else if (c === ")") dp--;
+      else if (c === "{") db++;
+      else if (c === "}") db--;
+      else if (c === "[") dk++;
+      else if (c === "]") dk--;
+      else if (c === "<") da++;
+      else if (c === ">") da--;
+      else if (c === ":" && dp === 0 && db === 0 && dk === 0 && da === 0) {
+        return p.substring(0, k);
+      }
+    }
+    return p;
+  });
+
+  return cleaned.join(",");
 }
 
 function lowerContinue(code) {
@@ -1987,7 +2146,7 @@ function _pipeline(rawCode, level, options, report) {
       goodAst = r.ast; goodCode = r.code;
       report.layers.numericObfuscation = true;
       report.layers.constantObfuscation = true; // alias for dashboard's older label
-      if (report.stats) report.stats.numericsObfuscated = _numMeta.encoded;
+      if (report.stats) report.stats.numericConstsObfuscated = _numMeta.encoded;
     }
   }
 
