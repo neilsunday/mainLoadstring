@@ -109,8 +109,8 @@ function _clsRemove(el, ...cs) { _cls(el, "remove", ...cs); }
 function _clsToggle(el, cls, force) {
   if (!el || !el.classList) return;
   try {
-    if (typeof force === "boolean") _clsToggle(el, cls, force);
-    else _clsToggle(el, cls);
+    if (typeof force === "boolean") el.classList.toggle(cls, force);
+    else el.classList.toggle(cls);
   } catch (_) {}
 }
 function _setText(id, value) {
