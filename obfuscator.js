@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.0 - Clean rewrite (drop-in for server.js v24.0)
+// AzureVM Obfuscator v25.1 - Clean rewrite + Anti-debugger (silent-exit)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1014,6 +1014,47 @@ function generatePoisonPool(varName, poolKey, poolShift) {
 // a crash.
 // ============================================================================
 
+function generateAntiDebugger() {
+  // Silent-exit anti-debugger. Runs ONCE at load time before the payload.
+  // Detects:
+  //   1. getfenv(0) tampering  -- returns a non-table or nils out globals
+  //   2. debug.sethook active  -- a foreign hook set on this thread
+  //   3. debug.getinfo on ourselves says source is not "=[C]" and not the
+  //      loadstring chunk we expect (a decompiler/dumper replaced us)
+  // Every check is pcall-wrapped. A pcall FAILURE (throwing debug lib)
+  // means "no debug lib available" -- we treat that as safe, not hostile.
+  // Only a pcall that SUCCEEDS AND returns a hostile-shape value triggers
+  // the silent exit.
+  const fn = randHexName(3);
+  const okVar = randHexName(2);
+  const resVar = randHexName(2);
+  const hookVar = randHexName(2);
+  const envVar = randHexName(2);
+  return "local function " + fn + "() " +
+    // Check 1: getfenv(0) must return a table. If it returns anything else,
+    // something replaced _G with a probe. pcall wraps because sandboxed
+    // executors may block getfenv entirely (that is FINE -- ok=false path).
+    "local " + okVar + "," + envVar + "=pcall(getfenv,0) " +
+    "if " + okVar + " and type(" + envVar + ")~=\"table\" then return true end " +
+    // Check 2: debug.sethook set by someone else on the current coroutine.
+    // debug.gethook returns the hook function, mask, count. If the hook is
+    // a function (not nil), a foreign profiler/tracer is attached.
+    "local " + okVar + "2," + hookVar + "=pcall(function() return debug.gethook() end) " +
+    "if " + okVar + "2 and type(" + hookVar + ")==\"function\" then return true end " +
+    // Check 3: our own closure's source. Under a normal loadstring/loader,
+    // debug.getinfo(1,\"S\").source starts with '=' (chunk name) or the code
+    // itself. If it is a real file path (starts with '@'), the payload has
+    // been dumped to disk and re-loaded -- suspicious.
+    "local " + okVar + "3," + resVar + "=pcall(function() return debug.getinfo(1,\"S\") end) " +
+    "if " + okVar + "3 and type(" + resVar + ")==\"table\" and type(" + resVar + ".source)==\"string\" " +
+    "and string.sub(" + resVar + ".source,1,1)==\"@\" then return true end " +
+    "return false " +
+    "end " +
+    // Silent exit: if the probe returns true, top-level return -- the
+    // script simply does nothing, no error message, no crash.
+    "if " + fn + "() then return end";
+}
+
 function generateIntegrityCheck(payload) {
   // Marker is the first slice of the payload. Pure 7-bit ASCII by
   // construction (all our wrappers emit only ASCII), so JS charCodeAt and
@@ -1503,6 +1544,7 @@ const _STAGE_CATALOG = [
   { name: "identifier-rename",  label: "Identifier rename",       skippable: true,  levels: ["medium", "maximum"] },
   { name: "constant-pool",      label: "Constant pool + poison",  skippable: true,  levels: ["maximum"] },
   { name: "integrity-check",    label: "Integrity check",         skippable: true,  levels: ["medium", "maximum"] },
+  { name: "anti-debugger",     label: "Anti-debugger",           skippable: true,  levels: ["maximum"] },
 ];
 
 async function obfuscateWithStream(luaCode, level, userId, options) {
@@ -1742,6 +1784,23 @@ async function obfuscateWithStream(luaCode, level, userId, options) {
       if (r.ran && r.ok) report.layers.integrityCheck = true;
       continue;
     }
+
+    if (stage.name === "anti-debugger") {
+      // Smart-skip on reflection-heavy scripts. If the payload itself uses
+      // hookfunction / hookmetamethod / getrawmetatable / getgc, our probes
+      // for foreign hooks will false-positive on the payload's OWN hooks.
+      // We surface this as a SKIPPED stage (not a failure) so the UI can
+      // explain WHY the layer is off.
+      const r = await askThenRun(stage, i, total, () => {
+        if (profile.hasHookfunction || profile.hasHookmetamethod ||
+            profile.hasRuntimeReflection) {
+          return { ok: false, error: "skipped: script uses hooks/reflection (would false-positive)" };
+        }
+        return { ok: true, detail: "anti-debugger queued for wrap phase" };
+      });
+      if (r.ran && r.ok) report.layers.antiDebugger = true;
+      continue;
+    }
   }
 
   // ---- Wrap phase: apply layer flags decided above. ----
@@ -1753,6 +1812,21 @@ async function obfuscateWithStream(luaCode, level, userId, options) {
   if (report.layers.constantPool) {
     const poolVar = "_CP" + randHexName(2).slice(3);
     wrapped = generatePoisonPool(poolVar, encKey, encShift) + " " + wrapped;
+  }
+  if (report.layers.antiDebugger) {
+    try {
+      const withAD = generateAntiDebugger() + " " + wrapped;
+      const chk = validate(withAD);
+      if (chk.ok) {
+        wrapped = withAD;
+      } else {
+        report.warn("Anti-debugger wrap produced invalid Lua - skipped");
+        report.layers.antiDebugger = false;
+      }
+    } catch (e) {
+      report.warn("Anti-debugger wrap threw: " + e.message + " - skipped");
+      report.layers.antiDebugger = false;
+    }
   }
   if (report.layers.integrityCheck) {
     try {
@@ -1778,6 +1852,7 @@ async function obfuscateWithStream(luaCode, level, userId, options) {
     report.layers.constantPool = false;
     report.layers.stringEncryption = false;
     report.layers.integrityCheck = false;
+    report.layers.antiDebugger = false;
   }
 
   const finalCode = minify(wrapped);
