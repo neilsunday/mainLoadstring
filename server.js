@@ -8,7 +8,20 @@ const { obfuscate, obfuscateWithReport } = require("./obfuscator");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-const SUPABASE_URL = process.env.SUPABASE_URL || "https://uwxsgijolhlpnihdelrq.supabase.co";
+// ---------------------------------------------------------------------------
+// Security hardening (server v2):
+//   * SUPABASE_URL is now REQUIRED via env, no hardcoded fallback.
+//     Set it in Render -> Environment before deploying.
+//   * HWID validated against a strict character whitelist to prevent
+//     injection of weird Unicode / SQL-like chars into the DB.
+//   * Rate limit falls back to IP when HWID is missing so an attacker
+//     cannot bypass throttling by simply omitting the &hwid= param.
+// ---------------------------------------------------------------------------
+const SUPABASE_URL = process.env.SUPABASE_URL;
+if (!SUPABASE_URL) {
+  console.error("[FATAL] SUPABASE_URL env var is required. Aborting startup.");
+  process.exit(1);
+}
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 if (!SUPABASE_SERVICE_KEY) {
@@ -21,8 +34,14 @@ const supabase = SUPABASE_SERVICE_KEY
     })
   : null;
 
+// Derive the raw-fetch endpoint from SUPABASE_URL so we never hardcode
+// project refs. Trailing slash is normalized so both forms of the env var work.
 const SUPABASE_RAW_URL =
-  "https://uwxsgijolhlpnihdelrq.supabase.co/functions/v1/raw";
+  SUPABASE_URL.replace(/\/+$/, "") + "/functions/v1/raw";
+
+// HWID must be alphanumeric + dash/underscore, 8-128 chars. Anything else
+// gets rejected before it can touch the DB.
+const HWID_PATTERN = /^[a-zA-Z0-9_-]{8,128}$/;
 
 // v24.0: bumped limit to 24mb to accommodate primary code + reference file
 app.use(express.json({ limit: "24mb" }));
@@ -112,12 +131,12 @@ app.post("/obfuscate", async (req, res) => {
 });
 
 // ==========================================
-// /s/:id â€” unchanged from v1 (loadstring loader endpoint)
+// /s/:id â€” v2 (HWID whitelist + IP-fallback rate limit)
 // ==========================================
 app.get("/s/:id", async (req, res) => {
   const scriptId = req.params.id;
   const key = (req.query.key || "").toString().trim();
-  const hwid = (req.query.hwid || "").toString().trim().substring(0, 128);
+  const hwidRaw = (req.query.hwid || "").toString().trim().substring(0, 128);
   const placeId = (req.query.place || "").toString().trim();
   const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip;
   const userAgent = req.headers["user-agent"] || "";
@@ -127,6 +146,17 @@ app.get("/s/:id", async (req, res) => {
     res.set("Cache-Control", "no-store");
     res.send(`error("[Loader] ${msg.replace(/"/g, "'")}")`);
   };
+
+  // HWID sanitization: reject malformed strings before touching the DB.
+  // Empty HWID is allowed (some executors won't send one); only non-empty
+  // values that fail the pattern are rejected.
+  let hwid = "";
+  if (hwidRaw.length > 0) {
+    if (!HWID_PATTERN.test(hwidRaw)) {
+      return luaError("Malformed HWID", 400);
+    }
+    hwid = hwidRaw;
+  }
 
   try {
     if (!/^[a-zA-Z0-9]{4,32}$/.test(scriptId)) return luaError("Invalid script ID", 400);
@@ -205,11 +235,16 @@ app.get("/s/:id", async (req, res) => {
         return luaError("Access denied.", 403);
       }
     }
-    if (hwid) {
+    // Rate limit: prefer HWID, fall back to IP so a stripped &hwid= param
+    // cannot bypass throttling. If BOTH are missing we skip -- there's
+    // nothing meaningful to key on.
+    const rateLimitCol = hwid ? "hwid" : (ip ? "ip" : null);
+    const rateLimitVal = hwid || ip;
+    if (rateLimitCol) {
       const oneMinAgo = new Date(Date.now() - 60 * 1000).toISOString();
       const { count } = await supabase.from("executions")
         .select("*", { count: "exact", head: true })
-        .eq("hwid", hwid).gte("executed_at", oneMinAgo);
+        .eq(rateLimitCol, rateLimitVal).gte("executed_at", oneMinAgo);
       if (count && count > 30) return luaError("Rate limit exceeded. Slow down.", 429);
     }
     const supabaseUrl = `${SUPABASE_RAW_URL}?id=${encodeURIComponent(scriptId)}`;
