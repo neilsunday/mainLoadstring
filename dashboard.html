@@ -691,8 +691,17 @@
 
         <!-- Warnings (only shown if any) -->
         <div id="reportWarningsWrap" class="hidden" style="margin-bottom: 20px">
-          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Warnings</div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+            <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px;">
+              Warnings <span id="reportWarningsCount" style="color: rgba(255,255,255,0.35); font-weight: 500;"></span>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button type="button" id="copyWarningsBtn" class="btn btn-secondary" style="padding: 4px 12px; font-size: 11px;">Copy all</button>
+              <button type="button" id="toggleConsoleBtn" class="btn btn-secondary" style="padding: 4px 12px; font-size: 11px;">Show console</button>
+            </div>
+          </div>
           <ul class="warnings-list" id="reportWarningsList"></ul>
+          <div id="reportConsole" class="hidden" style="margin-top: 12px; background: #0a0a0a; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 12px; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 11px; color: #cccccc; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;"></div>
         </div>
 
         <!-- View generated code (collapsible) -->
