@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.10 - Per-layer smart-skip + Byte-XOR + Outer-VM unlock
+// AzureVM Obfuscator v25.11 - Anti-tamper timing threshold raised to 10s (mobile safety)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1301,13 +1301,13 @@ function generateAntiTamper() {
     "if " + okVar + "2 and type(" + infoVar + "2)==\"table\" and " +
     infoVar + "2.what==\"Lua\" then return true end " +
     // Probe 3: one-shot timing. 100 iterations of a trivial op should be
-    // sub-millisecond on any real machine; > 5s means single-stepping.
+    // sub-millisecond on any real machine; > 10s means single-stepping.
     "local " + okVar + "3," + tmpVar + "=pcall(function() " +
     "local " + t0Var + "=tick() " +
     "local t={} " +
     "for i=1,100 do t[i]=i end " +
     "local " + t1Var + "=tick() " +
-    "return (" + t1Var + "-" + t0Var + ")>5 end) " +
+    "return (" + t1Var + "-" + t0Var + ")>10 end) " +
     "if " + okVar + "3 and " + tmpVar + "==true then return true end " +
     "return false " +
     "end " +
