@@ -37,7 +37,7 @@ const referenceUpload = document.getElementById("referenceUpload");
 const referenceUploadBtn = document.getElementById("referenceUploadBtn");
 const referenceClearBtn = document.getElementById("referenceClearBtn");
 const referenceFileNameEl = document.getElementById("referenceFileName");
-let referenceCode = "";  // in-memory only â€” not persisted
+let referenceCode = "";  // in-memory only Ã¢â‚¬â€ not persisted
 let referenceFileName = "";
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -67,6 +67,16 @@ const viewCodeBody = document.getElementById("viewCodeBody");
 const reportCodeOutput = document.getElementById("reportCodeOutput");
 const viewCodeChars = document.getElementById("viewCodeChars");
 const copyReportCodeBtn = document.getElementById("copyReportCodeBtn");
+
+// v25 NEW: Live obfuscation modal
+const liveModal = document.getElementById("liveModal");
+const liveStagesEl = document.getElementById("liveStages");
+const liveStatusEl = document.getElementById("liveStatus");
+const liveSubtitleEl = document.getElementById("liveSubtitle");
+const liveProgressFill = document.getElementById("liveProgressFill");
+const liveCancelBtn = document.getElementById("liveCancelBtn");
+const liveCloseBtn = document.getElementById("liveCloseBtn");
+let _liveState = null; // { sessionId, eventSource, stages, resolve, reject, aborted }
 
 const previewCard = document.getElementById("previewCard");
 const previewStats = document.getElementById("previewStats");
@@ -229,6 +239,25 @@ function buildProtectedLoadstring(scriptId, key) {
 // ============================================================================
 // v16: OBFUSCATION WITH REPORT
 // ============================================================================
+// v25: dispatcher -- live streaming for medium/maximum, one-shot for others.
+async function obfuscateCodeAny(code, level, options) {
+  options = options || {};
+  if (level === "medium" || level === "maximum") {
+    try {
+      return await obfuscateCodeLive(code, level, options);
+    } catch (e) {
+      console.warn("Live obfuscation failed, falling back to one-shot:", e.message);
+      closeLiveModal();
+      return await obfuscateCodeLive(code, level, options);
+    } catch (e) {
+      console.warn("Live obfuscation failed, falling back to one-shot:", e.message);
+      closeLiveModal();
+      return await obfuscateCode(code, level, options);
+    }
+  }
+  return await obfuscateCode(code, level, options);
+}
+
 async function obfuscateCode(code, level, options) {
   options = options || {};
   if (level === "none") {
@@ -286,6 +315,262 @@ function openForceMaxModal() {
     forceMaxCancelBtn.addEventListener("click", onCancel);
   });
 }
+
+// ============================================================================
+// v25: LIVE OBFUSCATION (SSE + per-stage skip/continue)
+// ============================================================================
+//
+// Runs an obfuscation via the streaming endpoints. Returns the same
+// { code, elapsed, originalSize, obfuscatedSize, report } shape that
+// obfuscateCode() returns so callers can swap between them freely.
+// If any error occurs mid-flow, the promise rejects; the caller can then
+// fall back to the classic one-shot /obfuscate endpoint.
+//
+async function obfuscateCodeLive(code, level, options) {
+  options = options || {};
+  if (level === "none") {
+    return {
+      code, elapsed: 0, originalSize: code.length,
+      obfuscatedSize: code.length, report: null,
+    };
+  }
+
+  // Step 1: reserve session.
+  const startRes = await fetch("/obfuscate/stream/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code, level,
+      forceMaximum: !!options.forceMaximum,
+      userId: currentUser ? currentUser.id : null,
+      referenceCode: referenceCode || null,
+    }),
+  });
+  if (!startRes.ok) {
+    let errMsg = "Failed to start stream";
+    try { const d = await startRes.json(); errMsg = d.error || errMsg; } catch (e) {}
+    throw new Error(errMsg);
+  }
+  const { sessionId } = await startRes.json();
+
+  openLiveModal();
+  setLiveStatus("Connecting...");
+
+  // Step 2: open SSE + wait for completion.
+  return new Promise((resolve, reject) => {
+    const es = new EventSource("/obfuscate/stream/" + sessionId);
+    _liveState = {
+      sessionId, eventSource: es,
+      stages: [],
+      resolve, reject,
+      aborted: false,
+      finalPayload: null,
+    };
+
+    const cleanup = (why) => {
+      try { es.close(); } catch (_) {}
+      if (_liveState) _liveState.eventSource = null;
+    };
+
+    es.addEventListener("session-start", (ev) => {
+      const d = JSON.parse(ev.data);
+      _liveState.stages = d.stages || [];
+      renderLiveStages(_liveState.stages);
+      const lvl = (d.effectiveLevel || d.level || "").toUpperCase();
+      liveSubtitleEl.textContent = "Applying " + lvl + " tier - " +
+        _liveState.stages.length + " protection layer" +
+        (_liveState.stages.length === 1 ? "" : "s") + " queued.";
+      if (d.wasDowngraded && d.downgradeReason) {
+        setLiveStatus("Auto-downgraded: " + d.downgradeReason);
+      } else {
+        setLiveStatus("Running...");
+      }
+    });
+
+    es.addEventListener("stage-start", (ev) => {
+      const d = JSON.parse(ev.data);
+      updateLiveStage(d.stage, "running", d.label);
+    });
+
+    es.addEventListener("stage-await", (ev) => {
+      const d = JSON.parse(ev.data);
+      updateLiveStage(d.stage, "awaiting", d.label, "Waiting for your decision...");
+    });
+
+    es.addEventListener("stage-skip", (ev) => {
+      const d = JSON.parse(ev.data);
+      updateLiveStage(d.stage, "skipped", null, "Skipped");
+      updateProgressBar();
+    });
+
+    es.addEventListener("stage-success", (ev) => {
+      const d = JSON.parse(ev.data);
+      const detail = (d.detail ? d.detail + " " : "") + "(" + (d.elapsedMs || 0) + " ms)";
+      updateLiveStage(d.stage, "success", null, detail);
+      updateProgressBar();
+    });
+
+    es.addEventListener("stage-failure", (ev) => {
+      const d = JSON.parse(ev.data);
+      updateLiveStage(d.stage, "failed", null, "Failed: " + (d.error || "unknown"));
+      updateProgressBar();
+    });
+
+    es.addEventListener("session-complete", (ev) => {
+      const d = JSON.parse(ev.data);
+      _liveState.finalPayload = d;
+      setLiveStatus("Done - " + ((d.report && d.report.stats && d.report.stats.elapsedMs) || 0) + " ms total");
+      liveCancelBtn.classList.add("hidden");
+      liveCloseBtn.classList.remove("hidden");
+      cleanup("complete");
+      if (d && typeof d.code === "string") {
+        resolve({
+          code: d.code,
+          elapsed: (d.report && d.report.stats && d.report.stats.elapsedMs) || 0,
+          originalSize: d.original_size || code.length,
+          obfuscatedSize: d.obfuscated_size || d.code.length,
+          report: d.report || null,
+        });
+      } else {
+        reject(new Error("Session finished without code"));
+      }
+    });
+
+    es.addEventListener("session-error", (ev) => {
+      const d = JSON.parse(ev.data);
+      setLiveStatus("Error: " + (d.error || "unknown"));
+      liveCancelBtn.classList.add("hidden");
+      liveCloseBtn.classList.remove("hidden");
+      cleanup("error");
+      reject(new Error(d.error || "Streaming pipeline failed"));
+    });
+
+    es.onerror = () => {
+      if (_liveState && _liveState.finalPayload) return; // already completed
+      setLiveStatus("Connection lost");
+      liveCancelBtn.classList.add("hidden");
+      liveCloseBtn.classList.remove("hidden");
+      cleanup("connection-error");
+      reject(new Error("SSE connection lost"));
+    };
+  });
+}
+
+// Send a decision (skip: true|false) for the currently awaiting stage.
+async function sendLiveDecision(stage, skip) {
+  if (!_liveState || !_liveState.sessionId) return;
+  try {
+    await fetch("/obfuscate/stream/" + _liveState.sessionId + "/decision", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stage, skip: !!skip }),
+    });
+  } catch (e) {
+    setLiveStatus("Failed to send decision: " + e.message);
+  }
+}
+
+function openLiveModal() {
+  liveStagesEl.innerHTML = "";
+  liveProgressFill.style.width = "0%";
+  liveCancelBtn.classList.remove("hidden");
+  liveCloseBtn.classList.add("hidden");
+  liveModal.classList.add("open");
+}
+
+function closeLiveModal() {
+  liveModal.classList.remove("open");
+  if (_liveState && _liveState.eventSource) {
+    try { _liveState.eventSource.close(); } catch (_) {}
+  }
+  _liveState = null;
+}
+
+function setLiveStatus(text) {
+  if (liveStatusEl) liveStatusEl.textContent = text;
+}
+
+function renderLiveStages(stages) {
+  liveStagesEl.innerHTML = "";
+  for (const s of stages) {
+    const div = document.createElement("div");
+    div.className = "live-stage pending";
+    div.setAttribute("data-stage", s.name);
+    div.innerHTML =
+      '<div class="live-stage-icon" data-role="icon">' + _stageIconSvg("pending") + '</div>' +
+      '<div class="live-stage-body">' +
+        '<div class="live-stage-label">' + escapeHtml(s.label) + '</div>' +
+        '<div class="live-stage-detail" data-role="detail">Waiting to run</div>' +
+      '</div>' +
+      '<div class="live-stage-actions">' +
+        '<button type="button" class="secondary small" data-action="skip">Skip</button>' +
+        '<button type="button" class="primary small" data-action="continue">Continue</button>' +
+      '</div>';
+    div.querySelector('[data-action="skip"]').addEventListener("click", () => {
+      sendLiveDecision(s.name, true);
+      updateLiveStage(s.name, "running", null, "Skipping...");
+    });
+    div.querySelector('[data-action="continue"]').addEventListener("click", () => {
+      sendLiveDecision(s.name, false);
+      updateLiveStage(s.name, "running", null, "Running...");
+    });
+    liveStagesEl.appendChild(div);
+  }
+}
+
+function updateLiveStage(stageName, status, label, detail) {
+  const el = liveStagesEl.querySelector('[data-stage="' + stageName + '"]');
+  if (!el) return;
+  el.classList.remove("pending", "running", "awaiting", "success", "skipped", "failed");
+  el.classList.add(status);
+  const iconEl = el.querySelector('[data-role="icon"]');
+  if (iconEl) iconEl.innerHTML = _stageIconSvg(status);
+  if (label) {
+    const lbl = el.querySelector(".live-stage-label");
+    if (lbl) lbl.textContent = label;
+  }
+  if (detail != null) {
+    const d = el.querySelector('[data-role="detail"]');
+    if (d) d.textContent = detail;
+  }
+}
+
+function updateProgressBar() {
+  const nodes = liveStagesEl.querySelectorAll(".live-stage");
+  if (!nodes.length) return;
+  let done = 0;
+  nodes.forEach(n => {
+    if (n.classList.contains("success") || n.classList.contains("skipped") || n.classList.contains("failed")) done++;
+  });
+  liveProgressFill.style.width = ((done / nodes.length) * 100).toFixed(1) + "%";
+}
+
+function _stageIconSvg(status) {
+  if (status === "running" || status === "awaiting") {
+    return '<div class="live-stage-spinner"></div>';
+  }
+  if (status === "success") {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;"><polyline points="20 6 9 17 4 12"/></svg>';
+  }
+  if (status === "skipped") {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;"><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  }
+  if (status === "failed") {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+  }
+  // pending
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><circle cx="12" cy="12" r="9"/></svg>';
+}
+
+liveCancelBtn?.addEventListener("click", () => {
+  if (_liveState && _liveState.eventSource) {
+    try { _liveState.eventSource.close(); } catch (_) {}
+    if (_liveState.reject) _liveState.reject(new Error("Cancelled by user"));
+  }
+  closeLiveModal();
+});
+
+liveCloseBtn?.addEventListener("click", closeLiveModal);
 
 // ============================================================================
 // v16: ADVANCED OPTIONS COLLAPSIBLE
@@ -484,7 +769,7 @@ abCompareBtn?.addEventListener("click", async () => {
   abCompareBtn.textContent = "Running " + alt + "...";
 
   try {
-    const altResult = await obfuscateCode(code, alt, { forceMaximum: false });
+    const altResult = await obfuscateCodeAny(code, alt, { forceMaximum: false });
 
     abCompareResult.classList.remove("hidden");
     document.getElementById("abThisLevel").textContent = actual.toUpperCase();
@@ -530,7 +815,7 @@ previewBtn.addEventListener("click", async () => {
   previewBtn.textContent = "Generating preview...";
 
   try {
-    const result = await obfuscateCode(code, level, { forceMaximum });
+    const result = await obfuscateCodeAny(code, level, { forceMaximum });
     lastPreviewedCode = result.code;
     lastReport = result.report;
     lastRequestedLevel = level;
@@ -620,7 +905,7 @@ saveBtn.addEventListener("click", async () => {
     if (level !== "none") {
       saveBtn.textContent = "Obfuscating...";
       showMessage(`Obfuscating with level: ${level}${forceMaximum ? " (forced)" : ""}...`, "info");
-      const result = await obfuscateCode(code, level, { forceMaximum });
+      const result = await obfuscateCodeAny(code, level, { forceMaximum });
       finalCode = result.code;
       report = result.report;
       lastPreviewedCode = result.code;
