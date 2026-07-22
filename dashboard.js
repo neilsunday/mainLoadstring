@@ -37,7 +37,7 @@ const referenceUpload = document.getElementById("referenceUpload");
 const referenceUploadBtn = document.getElementById("referenceUploadBtn");
 const referenceClearBtn = document.getElementById("referenceClearBtn");
 const referenceFileNameEl = document.getElementById("referenceFileName");
-let referenceCode = "";  // in-memory only Ã¢â‚¬â€ not persisted
+let referenceCode = "";  // in-memory only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â not persisted
 let referenceFileName = "";
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -583,19 +583,25 @@ advOptionsToggle?.addEventListener("click", () => {
 // ============================================================================
 // v16: REPORT RENDERING
 // ============================================================================
+// v25 FIX: helper to set textContent only if element exists
+function _setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
 function renderReport(report, generatedCode) {
   if (!report) {
     reportCard.classList.add("hidden");
     return;
   }
   reportCard.classList.remove("hidden");
-  abCompareResult.classList.add("hidden");
+  if (abCompareResult) abCompareResult.classList.add("hidden");
 
   // Hero
-  document.getElementById("reportRequestedLevel").textContent = (report.requestedLevel || "-").toUpperCase();
-  document.getElementById("reportActualLevel").textContent = (report.actualLevel || "-").toUpperCase();
+  _setText("reportRequestedLevel", (report.requestedLevel || "-").toUpperCase());
+  _setText("reportActualLevel", (report.actualLevel || "-").toUpperCase());
   const downgradeBadge = document.getElementById("reportDowngradeBadge");
-  if (report.wasDowngraded) {
+  if (report.wasDowngraded && downgradeBadge) {
     downgradeBadge.classList.remove("hidden");
     downgradeBadge.textContent = report.actualLevel === "fallback" || report.actualLevel === "minified"
       ? "FALLBACK" : "DOWNGRADED";
@@ -603,34 +609,34 @@ function renderReport(report, generatedCode) {
       report.actualLevel === "fallback" || report.actualLevel === "minified"
         ? "badge-danger" : "badge-warning"
     );
-  } else {
+  } else if (downgradeBadge) {
     downgradeBadge.classList.add("hidden");
   }
 
   // Downgrade banner
   const banner = document.getElementById("reportDowngradeBanner");
-  if (report.wasDowngraded && report.downgradeReason) {
+  if (report.wasDowngraded && report.downgradeReason && banner) {
     banner.classList.remove("hidden");
     const isError = report.actualLevel === "fallback" || report.actualLevel === "minified";
     banner.classList.toggle("error", isError);
-    document.getElementById("reportDowngradeTitle").textContent = isError
-      ? "Fallback mode active" : "Auto-downgrade applied";
-    document.getElementById("reportDowngradeMsg").textContent = report.downgradeReason;
-  } else {
+    _setText("reportDowngradeTitle", isError
+      ? "Fallback mode active" : "Auto-downgrade applied");
+    _setText("reportDowngradeMsg", report.downgradeReason);
+  } else if (banner) {
     banner.classList.add("hidden");
   }
 
   // Profile
   const p = report.profile || {};
-  document.getElementById("profRisk").textContent = p.riskTier || "-";
-  document.getElementById("profComplexity").textContent = p.complexityScore != null ? p.complexityScore : "-";
-  document.getElementById("profDepth").textContent = p.maxBlockDepth != null ? p.maxBlockDepth : "-";
-  document.getElementById("profFuncs").textContent = p.functionCount != null ? p.functionCount : "-";
-  document.getElementById("profPcalls").textContent = p.pcallCount != null ? p.pcallCount : "-";
+  _setText("profRisk", p.riskTier || "-");
+  _setText("profComplexity", p.complexityScore != null ? p.complexityScore : "-");
+  _setText("profDepth", p.maxBlockDepth != null ? p.maxBlockDepth : "-");
+  _setText("profFuncs", p.functionCount != null ? p.functionCount : "-");
+  _setText("profPcalls", p.pcallCount != null ? p.pcallCount : "-");
   const hooks = [];
   if (p.hasHookfunction) hooks.push("hookfunction");
   if (p.hasHookmetamethod) hooks.push("hookmetamethod");
-  document.getElementById("profHooks").textContent = hooks.length > 0 ? hooks.join(" + ") : "none";
+  _setText("profHooks", hooks.length > 0 ? hooks.join(" + ") : "none");
 
   // Layers
   const layersEl = document.getElementById("reportLayers");
@@ -667,33 +673,33 @@ function renderReport(report, generatedCode) {
   // v22 NEW: Reference manifest stats
   const manifestSection = document.getElementById("reportManifestSection");
   const m = report.manifest;
-  if (m && !m.error && typeof m.identifiers === "number") {
+  if (m && !m.error && typeof m.identifiers === "number" && manifestSection) {
     manifestSection.classList.remove("hidden");
-    document.getElementById("manifestIdentifiers").textContent = m.identifiers.toLocaleString();
-    document.getElementById("manifestStrings").textContent = (m.strings || 0).toLocaleString();
-    document.getElementById("manifestPropertyNames").textContent = (m.propertyNames || 0).toLocaleString();
-    document.getElementById("manifestZeroInits").textContent = (m.zeroInitLocals || 0).toLocaleString();
-    document.getElementById("manifestForwardRefs").textContent = (m.forwardRefs || 0).toLocaleString();
-    document.getElementById("manifestMethodBases").textContent = (m.methodCallBases || 0).toLocaleString();
-  } else {
+    _setText("manifestIdentifiers", m.identifiers.toLocaleString());
+    _setText("manifestStrings", (m.strings || 0).toLocaleString());
+    _setText("manifestPropertyNames", (m.propertyNames || 0).toLocaleString());
+    _setText("manifestZeroInits", (m.zeroInitLocals || 0).toLocaleString());
+    _setText("manifestForwardRefs", (m.forwardRefs || 0).toLocaleString());
+    _setText("manifestMethodBases", (m.methodCallBases || 0).toLocaleString());
+  } else if (manifestSection) {
     manifestSection.classList.add("hidden");
   }
 
   // Stats
   const s = report.stats || {};
-  document.getElementById("statOrig").textContent = s.originalBytes ? s.originalBytes.toLocaleString() + " B" : "-";
-  document.getElementById("statObf").textContent = s.obfuscatedBytes ? s.obfuscatedBytes.toLocaleString() + " B" : "-";
-  document.getElementById("statRatio").textContent = s.sizeRatio ? s.sizeRatio.toFixed(2) + "x" : "-";
-  document.getElementById("statElapsed").textContent = s.elapsedMs != null ? s.elapsedMs + " ms" : "-";
-  document.getElementById("statStrEnc").textContent = s.stringsEncrypted != null ? s.stringsEncrypted : "-";
-  document.getElementById("statStrSkip").textContent = s.stringsSkipped != null ? s.stringsSkipped : "-";
-  document.getElementById("statNumObf").textContent = s.numericConstsObfuscated != null ? s.numericConstsObfuscated : "-";
-  document.getElementById("statVmStmt").textContent = s.vmCompiledStatements != null ? s.vmCompiledStatements : "0";
+  _setText("statOrig", s.originalBytes ? s.originalBytes.toLocaleString() + " B" : "-");
+  _setText("statObf", s.obfuscatedBytes ? s.obfuscatedBytes.toLocaleString() + " B" : "-");
+  _setText("statRatio", s.sizeRatio ? s.sizeRatio.toFixed(2) + "x" : "-");
+  _setText("statElapsed", s.elapsedMs != null ? s.elapsedMs + " ms" : "-");
+  _setText("statStrEnc", s.stringsEncrypted != null ? s.stringsEncrypted : "-");
+  _setText("statStrSkip", s.stringsSkipped != null ? s.stringsSkipped : "-");
+  _setText("statNumObf", s.numericConstsObfuscated != null ? s.numericConstsObfuscated : "-");
+  _setText("statVmStmt", s.vmCompiledStatements != null ? s.vmCompiledStatements : "0");
 
   // Warnings
   const warningsWrap = document.getElementById("reportWarningsWrap");
   const warningsList = document.getElementById("reportWarningsList");
-  if (report.warnings && report.warnings.length > 0) {
+  if (report.warnings && report.warnings.length > 0 && warningsWrap) {
     warningsWrap.classList.remove("hidden");
     warningsList.innerHTML = "";
     for (const w of report.warnings) {
@@ -701,7 +707,7 @@ function renderReport(report, generatedCode) {
       li.textContent = w;
       warningsList.appendChild(li);
     }
-  } else {
+  } else if (warningsWrap) {
     warningsWrap.classList.add("hidden");
   }
 
