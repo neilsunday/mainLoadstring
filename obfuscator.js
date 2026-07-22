@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.11 - Anti-tamper timing threshold raised to 10s (mobile safety)
+// AzureVM Obfuscator v25.12 - Realistic 20-instruction outer-VM decoy (harder to spot)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -836,6 +836,67 @@ function vmGenerateOuterDecoder(decoderName, encodedVar, stringsVar, mask4) {
     "  return out",
     "end",
   ].join(" ");
+}
+
+// v25.12: Realistic decoy bytecode. Called when the outer-VM stage runs
+// but there's no real inner VM to encode. Produces ~20 plausible-looking
+// instructions that decode to a valid table but never actually dispatch.
+function generateDecoyBytecode() {
+  const strings = [
+    "loading", "init", "check", "ready", "value", "state",
+    "count", "data", "result", "input", "output", "ok",
+    "start", "end", "next", "prev", "flag", "mode",
+    "run", "step", "task", "info", "temp", "buf",
+  ];
+  // Random count 17-23 -- looks intentional without being a round number.
+  const totalInstrs = randInt(17, 23);
+  const instrs = [];
+
+  // First instruction: usually a LOAD to prime the stack.
+  if (_rand(0, 1) === 0) {
+    instrs.push([_VM_OP.LOADN, randInt(1, 1000)]);
+  } else {
+    instrs.push([_VM_OP.LOADS, randChoice(strings)]);
+  }
+
+  // Middle instructions: weighted random mix.
+  // We bias toward loads + binops so the sequence looks like real
+  // expression evaluation, with an occasional PRINT.
+  const weights = [
+    { op: _VM_OP.LOADN,  weight: 30 },
+    { op: _VM_OP.LOADS,  weight: 20 },
+    { op: _VM_OP.ADD,    weight: 10 },
+    { op: _VM_OP.SUB,    weight: 8 },
+    { op: _VM_OP.MUL,    weight: 8 },
+    { op: _VM_OP.DIV,    weight: 5 },
+    { op: _VM_OP.MOD,    weight: 3 },
+    { op: _VM_OP.CONCAT, weight: 10 },
+    { op: _VM_OP.PRINT,  weight: 6 },
+  ];
+  const totalWeight = weights.reduce((a, w) => a + w.weight, 0);
+
+  // Skip first + last (reserved).
+  for (let i = 1; i < totalInstrs - 1; i++) {
+    let r = _rand(0, totalWeight - 1);
+    let picked = weights[0].op;
+    for (const w of weights) {
+      if (r < w.weight) { picked = w.op; break; }
+      r -= w.weight;
+    }
+    if (picked === _VM_OP.LOADN) {
+      instrs.push([_VM_OP.LOADN, randInt(1, 10000)]);
+    } else if (picked === _VM_OP.LOADS) {
+      instrs.push([_VM_OP.LOADS, randChoice(strings)]);
+    } else if (picked === _VM_OP.PRINT) {
+      instrs.push([_VM_OP.PRINT, randInt(1, 3)]);
+    } else {
+      instrs.push([picked]);
+    }
+  }
+
+  // Last instruction: HALT (matches how real payloads end).
+  instrs.push([_VM_OP.HALT]);
+  return instrs;
 }
 
 function vmGenerateDispatcher(vmFnName, bytecodeVar) {
@@ -1855,7 +1916,11 @@ function _pipeline(rawCode, level, options, report) {
       } else {
         // Decoy path: inner VM didn't run, but we still emit a decoder +
         // fake encoded payload so the outer layer registers active.
-        const fakeBytecode = [[10]];  // Just a HALT -- inert.
+        // v25.12: use realistic-looking bytecode instead of a bare HALT.
+        // The decoded table is assigned to an unused local so nothing
+        // actually runs -- but any attacker who traces the decoder gets
+        // a plausible-looking instruction stream to waste time on.
+        const fakeBytecode = generateDecoyBytecode();
         const enc = vmEncodeFlat(fakeBytecode);
         const buf = crypto.randomBytes(4);
         const outerMask = [buf[0], buf[1], buf[2], buf[3]];
