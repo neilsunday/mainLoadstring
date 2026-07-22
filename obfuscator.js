@@ -1,3 +1,11 @@
+// AzureVM Obfuscator v16.1 - TDZ hotfix
+// Applied fix (this batch):
+//   P0.4  Fixed TDZ ReferenceError: 'Cannot access \'ast\' before initialization'
+//         analyzeClosureGraph(ast) and detectUIPatterns(ast) at lines ~3256
+//         referenced 'ast' before its declaration at line ~3291. Hoisted the
+//         'const code'/'const ast' declarations above the advanced intelligence
+//         block. Fixes fallback-mode-active issue where reports showed FALLBACK.
+// Previous v16.0 (Report API):
 // AzureVM Obfuscator v16.0 - Report API added
 // Applied fixes (this batch):
 //   v16  obfuscateWithReport() returns {code, report} with full metadata:
@@ -3252,6 +3260,13 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     }
     for (const w of analysis.warnings) console.log("[obfuscator v11]   " + w);
 
+    // v16.1 P0 FIX: hoist `code` and `ast` HERE (before any code that uses them).
+    // The v16 advanced intelligence block below calls analyzeClosureGraph(ast) and
+    // detectUIPatterns(ast, ...) â€” those references would TDZ if ast was declared
+    // later. This fixes "Cannot access 'ast' before initialization".
+    const code = analysis.convertedCode;
+    const ast = analysis.ast;
+
     // === v16.0 ADVANCED INTELLIGENCE ===
     const closureGraph = analyzeClosureGraph(ast);
     const uiPatterns = detectUIPatterns(ast, luaCode);
@@ -3280,16 +3295,9 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       console.log("[obfuscator v16]   " + reason);
     }
 
-    // === P0 FIX: hoist base var declarations ABOVE any first-use ===
-    // Previously `code`, `isMaximum`, and `effectiveIsMaximum` were used
-    // before their declarations, causing TDZ ReferenceError that made the
-    // main path silently fall back to the byte-level minifier.
-    // We ONLY hoist the base declarations here; the actual downgrade LOGIC
-    // stays in its original position (below profileScript) because it
-    // depends on `profile` and `strategy` which are declared later.
-    const code = analysis.convertedCode;
-    const ast = analysis.ast;
-
+    // === P0 FIX (v16.1): `code` and `ast` are now declared ABOVE the v16
+    // advanced intelligence block. This duplicate site is preserved as an
+    // anchor for the level-check early returns that follow.
     if(level==="none"){
       const _out = _WM+code;
       _report.actualLevel = "none";
