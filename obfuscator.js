@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.20 - Diagnostic baseline parse warning (Option A)
+// AzureVM Obfuscator v25.21-fix - String encryption + numeric reporting + manifest split
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -76,6 +76,35 @@ function shuffle(arr) {
     const tmp = out[i]; out[i] = out[j]; out[j] = tmp;
   }
   return out;
+}
+
+
+// ============================================================================
+// SECTION 1b - String literal value normalizer (FIX)
+// ============================================================================
+// luaparse may emit StringLiteral with only `raw` set (quoted form) and leave
+// `value` undefined depending on the parser version / options. Every string
+// literal touchpoint MUST go through this helper -- otherwise typeof-value
+// guards silently drop every string, which manifests as strings encrypted = 0
+// and manifest.strings = 0 even on trivial inputs.
+// ============================================================================
+function _stringLiteralValue(node) {
+  if (!node) return null;
+  if (typeof node.value === "string") return node.value;
+  if (typeof node.raw !== "string" || node.raw.length < 2) return null;
+  const r = node.raw;
+  // Long-bracket strings: [[...]] or [=[...]=]
+  if (r.charAt(0) === "[") {
+    const m = r.match(/^\[(=*)\[([\s\S]*)\](\1)\]$/);
+    return m ? m[2] : null;
+  }
+  // Regular quoted: strip outer quotes, unescape common sequences
+  const q = r.charAt(0);
+  if (q !== '"' && q !== "'") return null;
+  const inner = r.slice(1, -1);
+  return inner
+    .replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\r/g, "\r")
+    .replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\\\/g, "\\");
 }
 
 // ============================================================================
@@ -257,9 +286,11 @@ class ReferenceManifest {
         case "Identifier":
           if (node.name) m.identifiers.add(node.name);
           break;
-        case "StringLiteral":
-          if (typeof node.value === "string") m.strings.add(node.value);
+        case "StringLiteral": {
+          const _v = _stringLiteralValue(node);
+          if (_v !== null) m.strings.add(_v);
           break;
+        }
         case "LocalStatement":
           if (Array.isArray(node.variables)) {
             node.variables.forEach((v, i) => {
@@ -478,7 +509,7 @@ function preprocess(rawCode) {
   // (b) function params (name: Type, ...) --  REMOVED in v25.19.
   // The old paren-walker regex mangled nested calls like fn((a or {})) by
   // capturing the empty inner group first, then re-emitting "()" around the
-  // outer remainder Ã¢â‚¬â€ producing an extra ")". This broke every AST stage on
+  // outer remainder ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â producing an extra ")". This broke every AST stage on
   // azure.txt (identical error at every stage: "<name> expected near '('").
   // Function-parameter Luau type annotations are rare in Roblox exploit /
   // game scripts; the far more common `local x: Type = ...` form is handled
@@ -1090,18 +1121,24 @@ function walkTransform(node, ctx) {
   if (ctx.encNumbers && node.type === "NumericLiteral"
       && typeof node.value === "number" && !node.__obf) {
     const expr = encodeNumber(node.value);
-    if (expr !== String(node.value)) node.__obf = { type: "num", expr };
+    if (expr !== String(node.value)) {
+      node.__obf = { type: "num", expr };
+      if (ctx.numMeta) ctx.numMeta.encoded++;
+    }
   }
 
-  // String literal encryption.
-  if (ctx.encStrings && node.type === "StringLiteral"
-      && typeof node.value === "string" && !node.__obf) {
-    if (_shouldEncrypt(node.value, ctx.manifest, ctx.strict)) {
-      const bytes = encryptStringBytes(node.value, ctx.encKey, ctx.encShift, ctx.xorMask);
-      node.__obf = { type: "str", bytes };
-      ctx.strMeta.encrypted++;
-    } else {
-      ctx.strMeta.skipped++;
+  // String literal encryption. Uses _stringLiteralValue to handle luaparse
+  // versions that populate `raw` but leave `value` undefined.
+  if (ctx.encStrings && node.type === "StringLiteral" && !node.__obf) {
+    const _strVal = _stringLiteralValue(node);
+    if (_strVal !== null) {
+      if (_shouldEncrypt(_strVal, ctx.manifest, ctx.strict)) {
+        const bytes = encryptStringBytes(_strVal, ctx.encKey, ctx.encShift, ctx.xorMask);
+        node.__obf = { type: "str", bytes };
+        ctx.strMeta.encrypted++;
+      } else {
+        ctx.strMeta.skipped++;
+      }
     }
   }
 
@@ -1688,6 +1725,18 @@ function _pipeline(rawCode, level, options, report) {
   // module-level pointer so nested helpers (like _shouldEncrypt in the
   // walker) can consult it directly.
   const manifest = ReferenceManifest.scan(preprocessed, options.referenceCode);
+  // FIX: prevent self-poisoning of the string whitelist. The primary-code
+  // scan populates manifest.strings with EVERY literal in the user's own
+  // source, which then causes _shouldEncrypt to whitelist all of them and
+  // emit 0 encrypted strings. Rebuild manifest.strings from the reference
+  // file only (identifiers/propertyNames/methodBases still come from both).
+  if (options.referenceCode && typeof options.referenceCode === "string"
+      && options.referenceCode.trim().length > 0) {
+    const refOnly = ReferenceManifest.scan(options.referenceCode);
+    manifest.strings = refOnly.strings;
+  } else {
+    manifest.strings = new Set();
+  }
   _currentManifest = manifest;
   report.manifest = {
     identifiers: manifest.identifiers.size,
@@ -1890,12 +1939,14 @@ function _pipeline(rawCode, level, options, report) {
 
   // Stage: numeric encoding
   {
-    const ctx = { encNumbers: true, manifest, strMeta: { encrypted: 0, skipped: 0 } };
+    const _numMeta = { encoded: 0 };
+    const ctx = { encNumbers: true, manifest, strMeta: { encrypted: 0, skipped: 0 }, numMeta: _numMeta };
     const r = runStage("numeric-encoding", goodAst, ctx, walkTransform, report);
     if (r.ok) {
       goodAst = r.ast; goodCode = r.code;
       report.layers.numericObfuscation = true;
       report.layers.constantObfuscation = true; // alias for dashboard's older label
+      if (report.stats) report.stats.numericsObfuscated = _numMeta.encoded;
     }
   }
 
