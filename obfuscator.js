@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.19 - Remove buggy paren-walker in preprocess (Option 1)
+// AzureVM Obfuscator v25.20 - Diagnostic baseline parse warning (Option A)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -478,7 +478,7 @@ function preprocess(rawCode) {
   // (b) function params (name: Type, ...) --  REMOVED in v25.19.
   // The old paren-walker regex mangled nested calls like fn((a or {})) by
   // capturing the empty inner group first, then re-emitting "()" around the
-  // outer remainder â€” producing an extra ")". This broke every AST stage on
+  // outer remainder Ã¢â‚¬â€ producing an extra ")". This broke every AST stage on
   // azure.txt (identical error at every stage: "<name> expected near '('").
   // Function-parameter Luau type annotations are rare in Roblox exploit /
   // game scripts; the far more common `local x: Type = ...` form is handled
@@ -1262,15 +1262,26 @@ function validate(code) {
   }
 }
 
+// v25.20: last parse error is stashed here so the caller (when _parseAst
+// returns null) can surface line/column/message in a warning, and snip a
+// piece of the source around it to show the exact Luau construct that broke.
+let _lastParseError = null;
 function _parseAst(code) {
+  _lastParseError = null;
+  let e53 = null;
   try {
     return luaparse.parse(code, { luaVersion: "5.3", comments: false, locations: false });
-  } catch (_) {
-    try {
-      return luaparse.parse(code, { luaVersion: "5.1", comments: false, locations: false });
-    } catch (_) {
-      return null;
-    }
+  } catch (e) { e53 = e; }
+  try {
+    return luaparse.parse(code, { luaVersion: "5.1", comments: false, locations: false });
+  } catch (e51) {
+    // Prefer 5.3 error since that is what we run stages against.
+    _lastParseError = {
+      message: (e53 && e53.message) || (e51 && e51.message) || "unknown",
+      line: (e53 && e53.line) || (e51 && e51.line) || 0,
+      column: (e53 && e53.column) || (e51 && e51.column) || 0,
+    };
+    return null;
   }
 }
 
@@ -1656,7 +1667,12 @@ function _pipeline(rawCode, level, options, report) {
   const preprocessed = preprocess(rawCode);
   const baselineAst = _parseAst(preprocessed);
   if (!baselineAst) {
-    report.warn("Baseline parse failed - returning minified source only");
+    report.warn("Baseline parse failed - returning minified source only" +
+      (_lastParseError
+        ? " (" + _lastParseError.message +
+          " at " + (_lastParseError.line || "?") + ":" + (_lastParseError.column || "?") + ")" +
+          _snippetAround(preprocessed, _lastParseError.line, _lastParseError.column)
+        : ""));
     report.actualLevel = "basic";
     report.wasDowngraded = true;
     report.downgradeReason = "Input script could not be parsed after preprocessing";
@@ -2323,7 +2339,12 @@ async function obfuscateWithStream(luaCode, level, userId, options) {
   }
 
   if (!baselineAst) {
-    report.warn("Baseline parse failed - returning minified source only");
+    report.warn("Baseline parse failed - returning minified source only" +
+      (_lastParseError
+        ? " (" + _lastParseError.message +
+          " at " + (_lastParseError.line || "?") + ":" + (_lastParseError.column || "?") + ")" +
+          _snippetAround(preprocessed, _lastParseError.line, _lastParseError.column)
+        : ""));
     report.actualLevel = "basic";
     report.wasDowngraded = true;
     report.downgradeReason = "Input script could not be parsed after preprocessing";
