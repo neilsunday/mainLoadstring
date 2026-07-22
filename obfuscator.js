@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.13 - Randomized integrity marker length (150-500B per build)
+// AzureVM Obfuscator v25.14 - + Manual layer overrides (Phase 2a)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -6,7 +6,18 @@
 //   obfuscate(luaCode, level, userId)                    -> Promise<string>
 //   obfuscateWithReport(luaCode, level, userId, options) -> Promise<{code, report}>
 //
-// Where options = { forceMaximum?: bool, referenceCode?: string|null }.
+// Where options = {
+//   forceMaximum?: bool,
+//   referenceCode?: string|null,
+//   layerOverrides?: {  // v25.14: per-layer user override (Phase 2a)
+//     antiDebugger?: "auto"|"force"|"skip",
+//     antiDump?:     "auto"|"force"|"skip",
+//     antiTamper?:   "auto"|"force"|"skip",
+//     byteLevelXor?: "auto"|"force"|"skip",
+//     vmWrap?:       "auto"|"force"|"skip",
+//     outerVM?:      "auto"|"force"|"skip",
+//   }
+// }.
 //
 // What was removed vs v24 (and why):
 //   * Inner bytecode VM (vmCanCompile / tryVmWrap / 55-opcode dispatcher)
@@ -1665,6 +1676,44 @@ function _pipeline(rawCode, level, options, report) {
   }
   report.actualLevel = effectiveLevel;
 
+  // ------------------------------------------------------------------
+  // v25.14 (Phase 2a): Manual layer overrides.
+  // ------------------------------------------------------------------
+  // options.layerOverrides is a map from layer name to "auto"|"force"|"skip".
+  // - "auto" (default): existing smart-skip logic decides.
+  // - "skip":  never emit this layer, regardless of profile.
+  // - "force": emit even when smart-skip would have suppressed it.
+  //            A warning is added so the user sees the deliberate override.
+  //
+  // layerOverrideDecision(name, autoEnabled) returns:
+  //   { enabled: bool, forced: bool }
+  //   .enabled = final decision (yes emit / no skip)
+  //   .forced  = user overrode smart-skip via "force"; caller may want to warn.
+  //
+  // If the level isn't "maximum" the overrides still apply, but "force" on a
+  // layer that requires maximum will still no-op (we don't emit maximum-only
+  // layers on medium/basic tiers). The caller checks effectiveLevel itself.
+  // ------------------------------------------------------------------
+  const _overrides = (options && options.layerOverrides) || {};
+  function layerOverrideDecision(name, autoEnabled) {
+    const v = _overrides[name];
+    if (v === "skip") {
+      return { enabled: false, forced: false, mode: "skip" };
+    }
+    if (v === "force") {
+      return { enabled: true, forced: !autoEnabled, mode: "force" };
+    }
+    return { enabled: autoEnabled, forced: false, mode: "auto" };
+  }
+  report.layerOverrides = {
+    antiDebugger: _overrides.antiDebugger || "auto",
+    antiDump:     _overrides.antiDump     || "auto",
+    antiTamper:   _overrides.antiTamper   || "auto",
+    byteLevelXor: _overrides.byteLevelXor || "auto",
+    vmWrap:       _overrides.vmWrap       || "auto",
+    outerVM:      _overrides.outerVM      || "auto",
+  };
+
   // Levels "none" / "basic" -- no AST transforms.
   if (effectiveLevel === "none") {
     report.stats.originalBytes = rawCode.length;
@@ -1698,12 +1747,19 @@ function _pipeline(rawCode, level, options, report) {
   // and makeStringDecoder emit the pre-v25.5 output byte-for-byte, so
   // enabling/disabling this layer is a pure superset -- never a break.
   let xorMask = null;
-  if (effectiveLevel === "maximum" &&
-      !profile.hasHookfunction && !profile.hasHookmetamethod) {
-    // v25.9+: Byte-XOR is pure encoding on encrypted string bytes.
-    // No collision with any script behavior other than hooked bit32.bxor.
-    const buf = crypto.randomBytes(4);
-    xorMask = [buf[0], buf[1], buf[2], buf[3]];
+  {
+    const autoOn = (effectiveLevel === "maximum") &&
+                   !profile.hasHookfunction && !profile.hasHookmetamethod;
+    const dec = layerOverrideDecision("byteLevelXor", autoOn);
+    if (dec.enabled && effectiveLevel === "maximum") {
+      const buf = crypto.randomBytes(4);
+      xorMask = [buf[0], buf[1], buf[2], buf[3]];
+      if (dec.forced) {
+        report.warn("Byte-level XOR force-enabled by user override (script installs hooks; may collide with bit32.bxor)");
+      }
+    } else if (dec.mode === "skip") {
+      report.warn("Byte-level XOR skipped by user override");
+    }
   }
 
   // Stage: inner VM wrap (v25.7). Runs FIRST, before any other transform,
@@ -1716,9 +1772,14 @@ function _pipeline(rawCode, level, options, report) {
   let vmBcVar  = null;
   let vmBytecode = [];
   let vmStatementsWrapped = 0;
-  if (effectiveLevel === "maximum" &&
-      !profile.hasHookfunction && !profile.hasHookmetamethod &&
-      !profile.hasRuntimeReflection) {
+  const _vmAutoOn = (effectiveLevel === "maximum") &&
+                    !profile.hasHookfunction && !profile.hasHookmetamethod &&
+                    !profile.hasRuntimeReflection;
+  const _vmDec = layerOverrideDecision("vmWrap", _vmAutoOn);
+  if (_vmDec.enabled && effectiveLevel === "maximum") {
+    if (_vmDec.forced) {
+      report.warn("Inner VM force-enabled by user override (script uses hooks/reflection; VM may false-positive)");
+    }
     try {
       const localVmFn = randHexName(3);
       const localBcVar = randHexName(3);
@@ -1773,6 +1834,8 @@ function _pipeline(rawCode, level, options, report) {
       report.warn("VM wrap threw: " + e.message + " - skipped");
       report.stagesSkipped.push("vm-wrap");
     }
+  } else if (_vmDec.mode === "skip") {
+    report.warn("Inner VM skipped by user override");
   }
 
   // Stage: numeric encoding
@@ -1827,8 +1890,13 @@ function _pipeline(rawCode, level, options, report) {
   // layer registers active but has no runtime cost.
   let wrapped = goodCode;
   let outerVmActive = false;
-  if (effectiveLevel === "maximum" &&
-      !profile.hasHookfunction && !profile.hasHookmetamethod) {
+  const _ovmAutoOn = (effectiveLevel === "maximum") &&
+                     !profile.hasHookfunction && !profile.hasHookmetamethod;
+  const _ovmDec = layerOverrideDecision("outerVM", _ovmAutoOn);
+  if (_ovmDec.enabled && effectiveLevel === "maximum") {
+    if (_ovmDec.forced) {
+      report.warn("Outer VM force-enabled by user override (script installs hooks; decoder may collide with bit32.bxor)");
+    }
     try {
       if (report.layers.vmWrap && vmFnName && vmBcVar && vmBytecode.length > 0) {
         // Real path: encode the inner bytecode, replace the inner table
@@ -1898,10 +1966,13 @@ function _pipeline(rawCode, level, options, report) {
     }
   } else if (report.layers.vmWrap && vmFnName && vmBcVar) {
     // Inner VM active but outer VM disabled (not maximum, or hooks
-    // detected) -- just emit plain inner form.
+    // detected, or user override) -- just emit plain inner form.
     const bcTableSrc = vmGenerateBytecodeTable(vmBcVar, vmBytecode);
     const dispatcherSrc = vmGenerateDispatcher(vmFnName, vmBcVar);
     wrapped = bcTableSrc + " " + dispatcherSrc + " " + wrapped;
+  }
+  if (_ovmDec.mode === "skip") {
+    report.warn("Multi-layer outer VM skipped by user override");
   }
   if (outerVmActive) {
     report.layers.outerVM = true;
@@ -1925,10 +1996,19 @@ function _pipeline(rawCode, level, options, report) {
   // Only maximum tier. Skip ONLY when the script itself installs hooks
   // (hookfunction / hookmetamethod) that would collide with our probes.
   if (effectiveLevel === "maximum") {
-    if (profile.hasHookfunction || profile.hasHookmetamethod) {
-      report.warn("Anti-debugger skipped: script installs hooks (would false-positive)");
+    const _adAutoOn = !profile.hasHookfunction && !profile.hasHookmetamethod;
+    const _adDec = layerOverrideDecision("antiDebugger", _adAutoOn);
+    if (!_adDec.enabled) {
+      if (_adDec.mode === "skip") {
+        report.warn("Anti-debugger skipped by user override");
+      } else {
+        report.warn("Anti-debugger skipped: script installs hooks (would false-positive)");
+      }
       report.stagesSkipped.push("anti-debugger");
     } else {
+      if (_adDec.forced) {
+        report.warn("Anti-debugger force-enabled by user override (script installs hooks; may false-positive)");
+      }
       try {
         const withAD = generateAntiDebugger() + " " + wrapped;
         const chk = validate(withAD);
@@ -1949,21 +2029,28 @@ function _pipeline(rawCode, level, options, report) {
 
   // Stage: anti-dump (silent-exit guard against bytecode dumpers).
   // Only maximum tier. No smart-skip based on script content.
+  // v25.14: honors user override for skip/force.
   if (effectiveLevel === "maximum") {
-    try {
-      const withAX = generateAntiDump() + " " + wrapped;
-      const chk = validate(withAX);
-      if (chk.ok) {
-        wrapped = withAX;
-        report.layers.antiDump = true;
-        report.stagesSucceeded.push("anti-dump");
-      } else {
-        report.warn("Anti-dump produced invalid Lua (" + chk.error + ") - skipped");
+    const _axDec = layerOverrideDecision("antiDump", true);
+    if (!_axDec.enabled) {
+      report.warn("Anti-dump skipped by user override");
+      report.stagesSkipped.push("anti-dump");
+    } else {
+      try {
+        const withAX = generateAntiDump() + " " + wrapped;
+        const chk = validate(withAX);
+        if (chk.ok) {
+          wrapped = withAX;
+          report.layers.antiDump = true;
+          report.stagesSucceeded.push("anti-dump");
+        } else {
+          report.warn("Anti-dump produced invalid Lua (" + chk.error + ") - skipped");
+          report.stagesSkipped.push("anti-dump");
+        }
+      } catch (e) {
+        report.warn("Anti-dump threw: " + e.message + " - skipped");
         report.stagesSkipped.push("anti-dump");
       }
-    } catch (e) {
-      report.warn("Anti-dump threw: " + e.message + " - skipped");
-      report.stagesSkipped.push("anti-dump");
     }
   }
 
@@ -1971,10 +2058,19 @@ function _pipeline(rawCode, level, options, report) {
   // debugger single-stepping).
   // Only maximum tier. Skip ONLY when the script installs hooks.
   if (effectiveLevel === "maximum") {
-    if (profile.hasHookfunction || profile.hasHookmetamethod) {
-      report.warn("Anti-tamper skipped: script installs hooks (would false-positive)");
+    const _atAutoOn = !profile.hasHookfunction && !profile.hasHookmetamethod;
+    const _atDec = layerOverrideDecision("antiTamper", _atAutoOn);
+    if (!_atDec.enabled) {
+      if (_atDec.mode === "skip") {
+        report.warn("Anti-tamper skipped by user override");
+      } else {
+        report.warn("Anti-tamper skipped: script installs hooks (would false-positive)");
+      }
       report.stagesSkipped.push("anti-tamper");
     } else {
+      if (_atDec.forced) {
+        report.warn("Anti-tamper force-enabled by user override (script installs hooks; may false-positive)");
+      }
       try {
         const withAT = generateAntiTamper() + " " + wrapped;
         const chk = validate(withAT);
