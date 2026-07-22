@@ -48,13 +48,13 @@ app.use(express.json({ limit: "24mb" }));
 app.use(express.static(path.join(__dirname), { extensions: ["html"] }));
 
 // ==========================================
-// /obfuscate â€” v24.0
-// Body: { code, level, forceMaximum?, userId?, referenceCode? }
+// /obfuscate â€” v24.0 + Phase 2a layer overrides
+// Body: { code, level, forceMaximum?, userId?, referenceCode?, layerOverrides? }
 // Response: { success, level, original_size, obfuscated_size, elapsed_ms, code, report }
 // ==========================================
 app.post("/obfuscate", async (req, res) => {
   try {
-    const { code, level, forceMaximum, userId, referenceCode } = req.body || {};
+    const { code, level, forceMaximum, userId, referenceCode, layerOverrides } = req.body || {};
     if (!code || typeof code !== "string") {
       res.status(400).json({ error: "Missing or invalid 'code' field" });
       return;
@@ -74,6 +74,21 @@ app.post("/obfuscate", async (req, res) => {
     }
     const validLevels = ["none", "basic", "medium", "maximum"];
     const obfLevel = validLevels.includes(level) ? level : "medium";
+
+    // Phase 2a: sanitize layerOverrides. Only 6 known keys, values must be
+    // one of "auto" | "force" | "skip". Anything else is dropped silently.
+    const ALLOWED_LAYERS = ["antiDebugger", "antiDump", "antiTamper", "byteLevelXor", "vmWrap", "outerVM"];
+    const ALLOWED_MODES  = ["auto", "force", "skip"];
+    const safeOverrides = {};
+    if (layerOverrides && typeof layerOverrides === "object") {
+      for (const key of ALLOWED_LAYERS) {
+        const v = layerOverrides[key];
+        if (typeof v === "string" && ALLOWED_MODES.includes(v)) {
+          safeOverrides[key] = v;
+        }
+      }
+    }
+
     const start = Date.now();
 
     let result;
@@ -81,6 +96,7 @@ app.post("/obfuscate", async (req, res) => {
       result = await obfuscateWithReport(code, obfLevel, userId, {
         forceMaximum: !!forceMaximum,
         referenceCode: referenceCode || null,
+        layerOverrides: safeOverrides,
       });
     } catch (reportErr) {
       console.warn("obfuscateWithReport failed, falling back:", reportErr.message);
@@ -132,6 +148,7 @@ app.post("/obfuscate", async (req, res) => {
 
 // ==========================================
 // /s/:id â€” v2 (HWID whitelist + IP-fallback rate limit)
+// Unchanged from server-v2.
 // ==========================================
 app.get("/s/:id", async (req, res) => {
   const scriptId = req.params.id;
@@ -148,8 +165,6 @@ app.get("/s/:id", async (req, res) => {
   };
 
   // HWID sanitization: reject malformed strings before touching the DB.
-  // Empty HWID is allowed (some executors won't send one); only non-empty
-  // values that fail the pattern are rejected.
   let hwid = "";
   if (hwidRaw.length > 0) {
     if (!HWID_PATTERN.test(hwidRaw)) {
@@ -235,9 +250,6 @@ app.get("/s/:id", async (req, res) => {
         return luaError("Access denied.", 403);
       }
     }
-    // Rate limit: prefer HWID, fall back to IP so a stripped &hwid= param
-    // cannot bypass throttling. If BOTH are missing we skip -- there's
-    // nothing meaningful to key on.
     const rateLimitCol = hwid ? "hwid" : (ip ? "ip" : null);
     const rateLimitVal = hwid || ip;
     if (rateLimitCol) {
