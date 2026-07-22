@@ -1,3 +1,11 @@
+// AzureVM Obfuscator v16.2 - Second TDZ hotfix
+// Applied fix (this batch):
+//   P0.5  Fixed second TDZ ReferenceError: 'Cannot access \'profile\' before initialization'
+//         tuneStrategy(profile, closureGraph, uiPatterns) at line ~3273
+//         referenced 'profile' before its declaration further down. Hoisted
+//         the profileScript() call AND the _report.profile capture above the
+//         advanced intelligence block.
+// Previous v16.1 (First TDZ hotfix):
 // AzureVM Obfuscator v16.1 - TDZ hotfix
 // Applied fix (this batch):
 //   P0.4  Fixed TDZ ReferenceError: 'Cannot access \'ast\' before initialization'
@@ -3261,11 +3269,42 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     for (const w of analysis.warnings) console.log("[obfuscator v11]   " + w);
 
     // v16.1 P0 FIX: hoist `code` and `ast` HERE (before any code that uses them).
-    // The v16 advanced intelligence block below calls analyzeClosureGraph(ast) and
-    // detectUIPatterns(ast, ...) â€” those references would TDZ if ast was declared
-    // later. This fixes "Cannot access 'ast' before initialization".
+    // v16.2 P0 FIX: also hoist `profile` â€” tuneStrategy(profile,...) inside the
+    // v16 advanced intelligence block was throwing "Cannot access 'profile'
+    // before initialization" because profileScript() was called much later.
     const code = analysis.convertedCode;
     const ast = analysis.ast;
+
+    // === v13.0 SCRIPT PROFILER (hoisted from below in v16.2) ===
+    const profile = profileScript(ast, luaCode);
+    _report.profile = {
+      riskTier: profile.riskTier,
+      complexityScore: profile.complexityScore,
+      maxBlockDepth: profile.maxBlockDepth,
+      functionCount: profile.functionCount,
+      pcallCount: profile.pcallCount,
+      hasHookfunction: !!profile.hasHookfunction,
+      hasHookmetamethod: !!profile.hasHookmetamethod,
+      frameworks: profile.frameworks ? [...profile.frameworks] : [],
+      hotspotCount: profile.hotspots ? profile.hotspots.length : 0
+    };
+    console.log("[obfuscator v13] Profile:",
+      "risk=" + profile.riskTier,
+      "| depth=" + profile.maxBlockDepth,
+      "| complexity=" + profile.complexityScore,
+      "| functions=" + profile.functionCount,
+      "| pcalls=" + profile.pcallCount);
+    if (profile.frameworks && profile.frameworks.size > 0) {
+      console.log("[obfuscator v13] Detected frameworks:", [...profile.frameworks].join(", "));
+    }
+    if (profile.hasHookfunction || profile.hasHookmetamethod) {
+      console.log("[obfuscator v13] Script uses executor hooks - sensitive-init sections will be preserved");
+    }
+    if (profile.hotspots && profile.hotspots.length > 0) {
+      console.log("[obfuscator v13] Hotspots found:", profile.hotspots.length,
+        "(deepest at line " + profile.hotspots[profile.hotspots.length-1].line + ", depth " +
+        profile.hotspots[profile.hotspots.length-1].depth + ")");
+    }
 
     // === v16.0 ADVANCED INTELLIGENCE ===
     const closureGraph = analyzeClosureGraph(ast);
@@ -3368,36 +3407,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     _report.layers.stringEncryption = true;
     _report.layers.stringEncryptionStrict = effectiveIsMaximum;
     _report.layers.constantObfuscation = true;
-    // === v13.0 SCRIPT PROFILER ===
-    const profile = profileScript(ast, luaCode);
-    _report.profile = {
-      riskTier: profile.riskTier,
-      complexityScore: profile.complexityScore,
-      maxBlockDepth: profile.maxBlockDepth,
-      functionCount: profile.functionCount,
-      pcallCount: profile.pcallCount,
-      hasHookfunction: !!profile.hasHookfunction,
-      hasHookmetamethod: !!profile.hasHookmetamethod,
-      frameworks: profile.frameworks ? [...profile.frameworks] : [],
-      hotspotCount: profile.hotspots ? profile.hotspots.length : 0
-    };
-    console.log("[obfuscator v13] Profile:",
-      "risk=" + profile.riskTier,
-      "| depth=" + profile.maxBlockDepth,
-      "| complexity=" + profile.complexityScore,
-      "| functions=" + profile.functionCount,
-      "| pcalls=" + profile.pcallCount);
-    if (profile.frameworks.size > 0) {
-      console.log("[obfuscator v13] Detected frameworks:", [...profile.frameworks].join(", "));
-    }
-    if (profile.hasHookfunction || profile.hasHookmetamethod) {
-      console.log("[obfuscator v13] -  Script uses executor hooks - sensitive-init sections will be preserved");
-    }
-    if (profile.hotspots.length > 0) {
-      console.log("[obfuscator v13] Hotspots found:", profile.hotspots.length,
-        "(deepest at line " + profile.hotspots[profile.hotspots.length-1].line + ", depth " +
-        profile.hotspots[profile.hotspots.length-1].depth + ")");
-    }
+    // === v13.0 SCRIPT PROFILER (moved to hoisted P0 fix section in v16.2) ===
 
     // === v13.0 ADAPTIVE STRATEGY DOWNGRADE (hoisted P0 fix) ===
     // Actual downgrade logic runs HERE (after profile is available).
