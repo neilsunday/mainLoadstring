@@ -2,8 +2,7 @@ const express = require("express");
 const path = require("path");
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
-// v16.0: import both â€” obfuscate() is the legacy string API, obfuscateWithReport()
-// returns { code, report } for the new dashboard flow.
+// v24.0: obfuscateWithReport now accepts options.referenceCode for the manifest.
 const { obfuscate, obfuscateWithReport } = require("./obfuscator");
 
 const app = express();
@@ -25,20 +24,18 @@ const supabase = SUPABASE_SERVICE_KEY
 const SUPABASE_RAW_URL =
   "https://uwxsgijolhlpnihdelrq.supabase.co/functions/v1/raw";
 
-app.use(express.json({ limit: "12mb" }));
+// v24.0: bumped limit to 24mb to accommodate primary code + reference file
+app.use(express.json({ limit: "24mb" }));
 app.use(express.static(path.join(__dirname), { extensions: ["html"] }));
 
 // ==========================================
-// /obfuscate â€” v2: returns { code, report } when report is available
-// Backward compat: response always has `code` field, and the OLD fields
-// (level, original_size, obfuscated_size, elapsed_ms) are still populated.
-// NEW: `report` field with full metadata for dashboard display.
-// NEW: Accepts `forceMaximum: true` in body to skip auto-downgrade.
-// NEW: Accepts `userId` for optional history logging.
+// /obfuscate â€” v24.0
+// Body: { code, level, forceMaximum?, userId?, referenceCode? }
+// Response: { success, level, original_size, obfuscated_size, elapsed_ms, code, report }
 // ==========================================
 app.post("/obfuscate", async (req, res) => {
   try {
-    const { code, level, forceMaximum, userId } = req.body || {};
+    const { code, level, forceMaximum, userId, referenceCode } = req.body || {};
     if (!code || typeof code !== "string") {
       res.status(400).json({ error: "Missing or invalid 'code' field" });
       return;
@@ -47,16 +44,24 @@ app.post("/obfuscate", async (req, res) => {
       res.status(413).json({ error: "Code too large (max 10MB)" });
       return;
     }
+    // v24.0: reference is optional; validate size but allow missing
+    if (referenceCode != null && typeof referenceCode !== "string") {
+      res.status(400).json({ error: "Invalid 'referenceCode' field type" });
+      return;
+    }
+    if (referenceCode && referenceCode.length > 10 * 1024 * 1024) {
+      res.status(413).json({ error: "Reference file too large (max 10MB)" });
+      return;
+    }
     const validLevels = ["none", "basic", "medium", "maximum"];
     const obfLevel = validLevels.includes(level) ? level : "medium";
     const start = Date.now();
 
-    // Use obfuscateWithReport for the report; fall back to obfuscate() as a
-    // safety net if the new API is somehow unavailable (should never happen).
     let result;
     try {
       result = await obfuscateWithReport(code, obfLevel, userId, {
         forceMaximum: !!forceMaximum,
+        referenceCode: referenceCode || null,
       });
     } catch (reportErr) {
       console.warn("obfuscateWithReport failed, falling back:", reportErr.message);
@@ -69,9 +74,7 @@ app.post("/obfuscate", async (req, res) => {
     }
     const elapsed = Date.now() - start;
 
-    // Optional: log to obfuscation_history if userId provided AND Supabase is available
     if (userId && supabase && result.report) {
-      // Fire and forget - don't block response on log write
       supabase.from("obfuscation_history").insert({
         user_id: userId,
         requested_level: result.report.requestedLevel,
@@ -87,6 +90,7 @@ app.post("/obfuscate", async (req, res) => {
         stats_json: result.report.stats,
         warnings_json: result.report.warnings,
         force_maximum_used: !!forceMaximum,
+        reference_used: !!referenceCode,
       }).then(() => {}, (e) => {
         console.error("obfuscation_history insert error:", e.message);
       });
@@ -99,7 +103,7 @@ app.post("/obfuscate", async (req, res) => {
       obfuscated_size: result.code.length,
       elapsed_ms: elapsed,
       code: result.code,
-      report: result.report, // NEW: full report object for dashboard
+      report: result.report,
     });
   } catch (err) {
     console.error("Obfuscate endpoint error:", err.message);
@@ -108,7 +112,7 @@ app.post("/obfuscate", async (req, res) => {
 });
 
 // ==========================================
-// /s/:id (unchanged from v1)
+// /s/:id â€” unchanged from v1 (loadstring loader endpoint)
 // ==========================================
 app.get("/s/:id", async (req, res) => {
   const scriptId = req.params.id;
@@ -125,42 +129,26 @@ app.get("/s/:id", async (req, res) => {
   };
 
   try {
-    if (!/^[a-zA-Z0-9]{4,32}$/.test(scriptId)) {
-      return luaError("Invalid script ID", 400);
-    }
+    if (!/^[a-zA-Z0-9]{4,32}$/.test(scriptId)) return luaError("Invalid script ID", 400);
     const isRoblox = userAgent.toLowerCase().includes("roblox");
-    if (!isRoblox) {
-      return res.redirect(302, "/restricted.html");
-    }
-    if (!supabase) {
-      return luaError("Server misconfigured (no service key)", 500);
-    }
+    if (!isRoblox) return res.redirect(302, "/restricted.html");
+    if (!supabase) return luaError("Server misconfigured (no service key)", 500);
     const { data: scriptRow, error: scriptErr } = await supabase
-      .from("scripts")
-      .select("id, key_required")
-      .eq("id", scriptId)
-      .maybeSingle();
-    if (scriptErr) {
-      console.error("Script lookup error:", scriptErr.message);
-      return luaError("Server error", 500);
-    }
+      .from("scripts").select("id, key_required").eq("id", scriptId).maybeSingle();
+    if (scriptErr) { console.error("Script lookup error:", scriptErr.message); return luaError("Server error", 500); }
     if (!scriptRow) return luaError("Script not found", 404);
     const keyRequired = scriptRow.key_required !== false;
 
     if (!keyRequired) {
       await supabase.from("executions").insert({
-        key: null, hwid: hwid || null,
-        place_id: Number(placeId) || null,
-        ip, user_agent: userAgent, success: true,
-        error_reason: "free_mode",
+        key: null, hwid: hwid || null, place_id: Number(placeId) || null,
+        ip, user_agent: userAgent, success: true, error_reason: "free_mode",
       }).then(() => {}, (e) => console.error("Free-mode log error:", e.message));
-
       const supabaseUrl = `${SUPABASE_RAW_URL}?id=${encodeURIComponent(scriptId)}`;
       const scriptCode = await new Promise((resolve, reject) => {
         const request = https.get(supabaseUrl, { headers: { "User-Agent": userAgent } }, (r) => {
           if (r.statusCode !== 200) { reject(new Error(`Supabase returned ${r.statusCode}`)); return; }
-          let body = "";
-          r.setEncoding("utf8");
+          let body = ""; r.setEncoding("utf8");
           r.on("data", (c) => body += c);
           r.on("end", () => resolve(body));
         });
@@ -176,21 +164,12 @@ app.get("/s/:id", async (req, res) => {
     if (!key) return luaError("This script requires a key. Get one from the script owner.", 401);
     if (!/^[A-Z0-9\-]{8,64}$/i.test(key)) return luaError("Malformed key", 401);
 
-    const { data: keyRow, error: keyErr } = await supabase
-      .from("user_keys")
-      .select("*")
-      .eq("key", key)
-      .eq("script_id", scriptId)
-      .maybeSingle();
-    if (keyErr) {
-      console.error("Key lookup error:", keyErr.message);
-      return luaError("Server error", 500);
-    }
+    const { data: keyRow, error: keyErr } = await supabase.from("user_keys")
+      .select("*").eq("key", key).eq("script_id", scriptId).maybeSingle();
+    if (keyErr) { console.error("Key lookup error:", keyErr.message); return luaError("Server error", 500); }
     if (!keyRow) return luaError("Invalid key or not authorized for this script", 403);
     if (keyRow.revoked) return luaError("Key has been revoked by the owner", 403);
-    if (keyRow.expires_at && new Date(keyRow.expires_at) < new Date()) {
-      return luaError("Key expired", 403);
-    }
+    if (keyRow.expires_at && new Date(keyRow.expires_at) < new Date()) return luaError("Key expired", 403);
     if (keyRow.hwid && keyRow.hwid !== hwid) {
       await supabase.from("executions").insert({
         key, hwid: hwid || null, place_id: Number(placeId) || null,
@@ -199,9 +178,7 @@ app.get("/s/:id", async (req, res) => {
       return luaError("HWID mismatch. Contact the script owner to reset.", 403);
     }
     if (!keyRow.hwid && hwid) {
-      await supabase.from("user_keys")
-        .update({ hwid, first_used_at: new Date().toISOString() })
-        .eq("key", key);
+      await supabase.from("user_keys").update({ hwid, first_used_at: new Date().toISOString() }).eq("key", key);
     }
     if (keyRow.place_id_whitelist && keyRow.place_id_whitelist.length > 0) {
       const placeIdNum = Number(placeId);
@@ -239,8 +216,7 @@ app.get("/s/:id", async (req, res) => {
     const scriptCode = await new Promise((resolve, reject) => {
       const request = https.get(supabaseUrl, { headers: { "User-Agent": userAgent } }, (r) => {
         if (r.statusCode !== 200) { reject(new Error(`Supabase returned ${r.statusCode}`)); return; }
-        let body = "";
-        r.setEncoding("utf8");
+        let body = ""; r.setEncoding("utf8");
         r.on("data", (c) => body += c);
         r.on("end", () => resolve(body));
       });
@@ -265,11 +241,7 @@ app.get("/s/:id", async (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    supabase_configured: !!supabase,
-  });
+  res.json({ status: "ok", timestamp: new Date().toISOString(), supabase_configured: !!supabase });
 });
 
 app.use((req, res) => {
