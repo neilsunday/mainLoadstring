@@ -476,8 +476,15 @@ function openLiveModal() {
 
 function closeLiveModal() {
   liveModal.classList.remove("open");
-  if (_liveState && _liveState.eventSource) {
-    try { _liveState.eventSource.close(); } catch (_) {}
+  // v25 FIX: reject any pending promise so the caller does not hang forever
+  // if the user closes the modal mid-run.
+  if (_liveState) {
+    if (_liveState.eventSource) {
+      try { _liveState.eventSource.close(); } catch (_) {}
+    }
+    if (_liveState.reject && !_liveState.finalPayload) {
+      try { _liveState.reject(new Error("Live obfuscation cancelled")); } catch (_) {}
+    }
   }
   _liveState = null;
 }
@@ -559,10 +566,7 @@ function _stageIconSvg(status) {
 }
 
 liveCancelBtn?.addEventListener("click", () => {
-  if (_liveState && _liveState.eventSource) {
-    try { _liveState.eventSource.close(); } catch (_) {}
-    if (_liveState.reject) _liveState.reject(new Error("Cancelled by user"));
-  }
+  // v25 FIX: just close -- closeLiveModal now handles the reject itself.
   closeLiveModal();
 });
 
