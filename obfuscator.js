@@ -1,3 +1,23 @@
+// AzureVM Obfuscator v19.0 - Property identifier guard (REAL fix)
+// Applied fix (this batch):
+//   THE REAL ROOT CAUSE for macrozure UI-not-showing:
+//   The walkAst recursion loop was descending into MemberExpression.identifier
+//   (the .field part of obj.field) and TableKeyString.key (the key in {key=v}).
+//   These are PROPERTY NAMES not variables, but the Identifier rename step
+//   below the loop was renaming them. When the property name coincidentally
+//   matched a hoisted local (e.g. `local LocalPlayer = Players.LocalPlayer`
+//   hoists 'LocalPlayer', then the .LocalPlayer property gets renamed to hex),
+//   the runtime saw `Players._0xhex` which is not a valid Instance member.
+//   
+//   Fix: Skip renaming in property positions:
+//     - MemberExpression.identifier (obj.field)
+//     - TableKeyString.key ({key=v})
+//     - Non-local FunctionDeclaration with MemberExpression identifier
+//       (function obj.method or function obj:method)
+//   
+//   Also restored the byte-level XOR chain (v18 removed it as workaround,
+//   but with the real fix in place, the chain works fine).
+// Previous v18.0 (Direct execution workaround):
 // AzureVM Obfuscator v18.0 - Direct execution (no byte-level chain)
 // Applied fix (this batch):
 //   ROOT CAUSE for macrozure silent-fail: byteLevelTripleObfuscate's inner
@@ -1849,6 +1869,16 @@ function walkAst(node,ctx){
     if(opensLoopScope && (k==="variable" || k==="variables")) continue;
     if(ctx.rename && node.type==="LocalStatement" && k==="variables") continue;
     if(ctx.rename && node.type==="FunctionDeclaration" && k==="identifier" && node.isLocal) continue;
+    // v19: Skip Identifier nodes that are PROPERTY NAMES not variables.
+    // Renaming these corrupts Roblox reflection (Players.LocalPlayer becomes
+    // Players._0xhex which is not a valid Instance member).
+    if(ctx.rename && node.type==="MemberExpression" && k==="identifier") continue;
+    if(ctx.rename && node.type==="TableKeyString" && k==="key") continue;
+    // Global function declaration like `function obj.method()` â€” the identifier
+    // chain is a member expression; the outer method name is a property.
+    if(ctx.rename && node.type==="FunctionDeclaration" && k==="identifier"
+       && !node.isLocal && node.identifier
+       && (node.identifier.type==="MemberExpression" || node.identifier.type==="IndexExpression")) continue;
 
     const c=node[k];
     if(Array.isArray(c))c.forEach(x=>walkAst(x,ctx));
@@ -3619,18 +3649,13 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       return { code: _finalOutput, report: _report };
     }
 
-    // v18: SKIP byteLevelTripleObfuscate entirely. Its loadstring+pcall chain
-    // silently swallows syntax errors, causing macrozure-like scripts to fail
-    // with no visible error. Instead, use the direct-execution medium-style output
-    // (which already has string encryption strict + numeric obf + constant pool
-    // when in maximum tier via ctx.strictStrings=true and isMaximum). This is
-    // functionally 'maximum without byte-level wrap'.
-    const encrypted = combined;  // direct pass-through, no encryption chain
-    _report.layers.byteLevelXor = false;  // no longer active
-    _report.layers.antiTamper = false;    // no longer active
-    // Note: strings are still encrypted (strict mode when maximum), numerics
-    // are still obfuscated, constant pool is still injected. Only the outer
-    // encryption chain is removed - which was the layer causing silent-fail.
+    // v19: Restore byte-level XOR chain now that the real bug (property
+    // identifier rename bleeding) is fixed. The chain itself was innocent;
+    // the crashes were from broken Identifier renames upstream.
+    const effectiveLevel = effectiveIsMaximum ? "maximum" : "medium";
+    const encrypted = byteLevelTripleObfuscate(combined, effectiveLevel, userId);
+    _report.layers.byteLevelXor = true;
+    _report.layers.antiTamper = effectiveIsMaximum;
     // v8.0: Wrap in Control Flow Flattening state machine (maximum only)
     let finalOutput;
     if(isMaximum){
