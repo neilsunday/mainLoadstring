@@ -436,7 +436,7 @@
         <div style="margin-top: 14px">
           <div class="collapsible-toggle" id="advOptionsToggle">
             <span>Advanced options</span>
-            <span class="caret">â€º</span>
+            <span class="caret">Ã¢â‚¬Âº</span>
           </div>
           <div class="collapsible-body" id="advOptionsBody">
             <div class="toggle-row" style="margin-top: 12px">
@@ -521,6 +521,25 @@
           <div class="layers-grid" id="reportLayers"></div>
         </div>
 
+        <!-- v22 NEW: Reference Manifest (auto-whitelist from source) -->
+        <div id="reportManifestSection" style="margin-bottom: 20px" class="hidden">
+          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">
+            Reference manifest
+            <span class="badge badge-info" style="margin-left: 8px; font-weight: 600;">AUTO-PROTECTED</span>
+          </div>
+          <div style="font-size: 12px; color: rgba(255,255,255,0.55); margin-bottom: 12px; line-height: 1.55;">
+            Items extracted from your source code that were automatically preserved during obfuscation. Higher counts mean better protection against rename or encryption bugs.
+          </div>
+          <div class="profile-grid" id="reportManifest">
+            <div>Identifiers<strong id="manifestIdentifiers">-</strong></div>
+            <div>Strings<strong id="manifestStrings">-</strong></div>
+            <div>Property names<strong id="manifestPropertyNames">-</strong></div>
+            <div>Zero-init locals<strong id="manifestZeroInits">-</strong></div>
+            <div>Forward refs<strong id="manifestForwardRefs">-</strong></div>
+            <div>Method bases<strong id="manifestMethodBases">-</strong></div>
+          </div>
+        </div>
+
         <!-- Stats -->
         <div style="margin-bottom: 20px">
           <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Stats</div>
@@ -546,7 +565,7 @@
         <div>
           <div class="collapsible-toggle" id="viewCodeToggle">
             <span>View generated code <span id="viewCodeChars" style="color: rgba(255,255,255,0.4); font-weight: 400; margin-left: 6px"></span></span>
-            <span class="caret">â€º</span>
+            <span class="caret">Ã¢â‚¬Âº</span>
           </div>
           <div class="collapsible-body" id="viewCodeBody">
             <pre style="margin-top: 12px"><code id="reportCodeOutput" class="language-lua"></code></pre>
