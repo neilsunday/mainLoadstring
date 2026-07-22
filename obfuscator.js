@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.8 - + Multi-layer outer VM (XOR-encoded bytecode + decoy)
+// AzureVM Obfuscator v25.9 - Per-layer smart-skip (unlock guards on reflection scripts)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1915,13 +1915,14 @@ function _pipeline(rawCode, level, options, report) {
   }
 
   // Stage: anti-debugger (silent-exit guard).
-  // Only maximum tier, and only when the payload does NOT itself use
-  // hookfunction / hookmetamethod / runtime reflection -- our probes would
-  // false-positive on the payload's own hooks otherwise.
+  // Only maximum tier. Skip ONLY when the script itself installs hooks
+  // (hookfunction / hookmetamethod) that would collide with our probes.
+  // Scripts that merely READ debug info on external closures do not
+  // collide with our checks (which target our own closure + runtime
+  // hook table), so we no longer skip on hasRuntimeReflection alone.
   if (effectiveLevel === "maximum") {
-    if (profile.hasHookfunction || profile.hasHookmetamethod ||
-        profile.hasRuntimeReflection) {
-      report.warn("Anti-debugger skipped: script uses hooks/reflection (would false-positive)");
+    if (profile.hasHookfunction || profile.hasHookmetamethod) {
+      report.warn("Anti-debugger skipped: script installs hooks (would false-positive)");
       report.stagesSkipped.push("anti-debugger");
     } else {
       try {
@@ -1943,40 +1944,38 @@ function _pipeline(rawCode, level, options, report) {
   }
 
   // Stage: anti-dump (silent-exit guard against bytecode dumpers).
-  // Only maximum tier, and only when the payload does NOT itself use
-  // hooks/reflection -- our probes for getscriptbytecode/decompile would
-  // false-positive on scripts that legitimately look them up.
+  // Only maximum tier. No smart-skip based on script content -- our
+  // probes are pure global-existence checks via rawget(getfenv(0), ...)
+  // that cannot false-positive on ANY script pattern. Even
+  // reflection-heavy scripts (getgc, debug.info, getupvalues) don't
+  // interact with the outer environment tables we scan.
   if (effectiveLevel === "maximum") {
-    if (profile.hasHookfunction || profile.hasHookmetamethod ||
-        profile.hasRuntimeReflection) {
-      report.warn("Anti-dump skipped: script uses hooks/reflection (would false-positive)");
-      report.stagesSkipped.push("anti-dump");
-    } else {
-      try {
-        const withAX = generateAntiDump() + " " + wrapped;
-        const chk = validate(withAX);
-        if (chk.ok) {
-          wrapped = withAX;
-          report.layers.antiDump = true;
-          report.stagesSucceeded.push("anti-dump");
-        } else {
-          report.warn("Anti-dump produced invalid Lua (" + chk.error + ") - skipped");
-          report.stagesSkipped.push("anti-dump");
-        }
-      } catch (e) {
-        report.warn("Anti-dump threw: " + e.message + " - skipped");
+    try {
+      const withAX = generateAntiDump() + " " + wrapped;
+      const chk = validate(withAX);
+      if (chk.ok) {
+        wrapped = withAX;
+        report.layers.antiDump = true;
+        report.stagesSucceeded.push("anti-dump");
+      } else {
+        report.warn("Anti-dump produced invalid Lua (" + chk.error + ") - skipped");
         report.stagesSkipped.push("anti-dump");
       }
+    } catch (e) {
+      report.warn("Anti-dump threw: " + e.message + " - skipped");
+      report.stagesSkipped.push("anti-dump");
     }
   }
 
   // Stage: anti-tamper wrapper (silent-exit on hooked load/loadstring or
   // debugger single-stepping).
-  // Only maximum tier, smart-skip on hook/reflection payloads.
+  // Only maximum tier. Skip ONLY when the script installs hooks
+  // (hookfunction / hookmetamethod) that could replace load/loadstring
+  // with Lua closures and trip our probe. Reflection-only scripts
+  // (getgc, debug.info on external closures) don't touch load identity.
   if (effectiveLevel === "maximum") {
-    if (profile.hasHookfunction || profile.hasHookmetamethod ||
-        profile.hasRuntimeReflection) {
-      report.warn("Anti-tamper skipped: script uses hooks/reflection (would false-positive)");
+    if (profile.hasHookfunction || profile.hasHookmetamethod) {
+      report.warn("Anti-tamper skipped: script installs hooks (would false-positive)");
       report.stagesSkipped.push("anti-tamper");
     } else {
       try {
