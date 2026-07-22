@@ -331,6 +331,21 @@ function renderReport(report, generatedCode) {
     layersEl.appendChild(div);
   }
 
+  // v22 NEW: Reference manifest stats
+  const manifestSection = document.getElementById("reportManifestSection");
+  const m = report.manifest;
+  if (m && !m.error && typeof m.identifiers === "number") {
+    manifestSection.classList.remove("hidden");
+    document.getElementById("manifestIdentifiers").textContent = m.identifiers.toLocaleString();
+    document.getElementById("manifestStrings").textContent = (m.strings || 0).toLocaleString();
+    document.getElementById("manifestPropertyNames").textContent = (m.propertyNames || 0).toLocaleString();
+    document.getElementById("manifestZeroInits").textContent = (m.zeroInitLocals || 0).toLocaleString();
+    document.getElementById("manifestForwardRefs").textContent = (m.forwardRefs || 0).toLocaleString();
+    document.getElementById("manifestMethodBases").textContent = (m.methodCallBases || 0).toLocaleString();
+  } else {
+    manifestSection.classList.add("hidden");
+  }
+
   // Stats
   const s = report.stats || {};
   document.getElementById("statOrig").textContent = s.originalBytes ? s.originalBytes.toLocaleString() + " B" : "-";
