@@ -1,861 +1,948 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Dashboard - Loadstring Gen</title>
-    <link rel="stylesheet" href="style.css" />
-    <!-- v16: Prism.js for Lua syntax highlighting in the Obfuscated Preview card -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" />
-    <style>
-      /* Minimal additions only - reuse .card, .btn, .row from style.css */
+async function handleOAuthCallback() {
+  const hasHash =
+    window.location.hash.includes("access_token") ||
+    window.location.hash.includes("error");
+  const hasCode = window.location.search.includes("code=");
+  if (!hasHash && !hasCode) return;
+  await new Promise((resolve) => {
+    let done = false;
+    const { data: { subscription } } = sb.auth.onAuthStateChange((event, session) => {
+      if (session && !done) {
+        done = true;
+        subscription.unsubscribe();
+        history.replaceState(null, "", window.location.pathname);
+        resolve();
+      }
+    });
+    setTimeout(() => {
+      if (!done) { done = true; subscription.unsubscribe(); resolve(); }
+    }, 10000);
+  });
+}
 
-      .section-head {
-        display: flex; align-items: center; gap: 12px;
-        padding-bottom: 18px; margin-bottom: 20px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-      }
-      .section-head .icon {
-        width: 32px; height: 32px; border-radius: 8px;
-        background: rgba(255, 255, 255, 0.04);
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        display: inline-flex; align-items: center; justify-content: center;
-        color: rgba(255, 255, 255, 0.8); flex-shrink: 0;
-      }
-      .section-head .icon svg { width: 16px; height: 16px; }
-      .section-head .title-block { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-      .section-head h2 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: 0.1px; }
-      .section-head .sub { font-size: 12px; color: rgba(255, 255, 255, 0.5); }
-      .section-head .head-actions { margin-left: auto; display: flex; gap: 8px; }
+const MAX_SCRIPT_SIZE = 10 * 1024 * 1024;
+const OBFUSCATE_ENDPOINT = "/obfuscate";
 
-      .field { display: flex; flex-direction: column; gap: 8px; }
-      .field + .field { margin-top: 18px; }
-      .field > label {
-        font-size: 13px; font-weight: 600;
-        color: rgba(255, 255, 255, 0.85);
-        display: flex; justify-content: space-between; align-items: baseline;
-      }
-      .field > label .hint { font-size: 11px; font-weight: 400; color: rgba(255, 255, 255, 0.45); }
-      .field > small { font-size: 12px; color: rgba(255, 255, 255, 0.5); line-height: 1.5; }
+const userEmailEl = document.getElementById("userEmail");
+const logoutBtn = document.getElementById("logoutBtn");
+const scriptNameInput = document.getElementById("scriptName");
+const scriptCodeInput = document.getElementById("scriptCode");
+const charCountEl = document.getElementById("charCount");
+const uploadBtn = document.getElementById("uploadBtn");
+const fileUpload = document.getElementById("fileUpload");
+const fileNameEl = document.getElementById("fileName");
 
-      .card-divider {
-        height: 1px; background: rgba(255, 255, 255, 0.05);
-        margin: 24px 0; border: 0;
-      }
+// v24 NEW: Reference script upload
+const referenceUpload = document.getElementById("referenceUpload");
+const referenceUploadBtn = document.getElementById("referenceUploadBtn");
+const referenceClearBtn = document.getElementById("referenceClearBtn");
+const referenceFileNameEl = document.getElementById("referenceFileName");
+let referenceCode = "";  // in-memory only Ã¢â‚¬â€ not persisted
+let referenceFileName = "";
+const clearBtn = document.getElementById("clearBtn");
+const saveBtn = document.getElementById("saveBtn");
+const previewBtn = document.getElementById("previewBtn");
+const messageDiv = document.getElementById("message");
+const obfuscationLevelSelect = document.getElementById("obfuscationLevel");
+const requireKeyCheckbox = document.getElementById("requireKey");
 
-      select {
-        width: 100%; padding: 12px 40px 12px 16px;
-        border-radius: 14px; border: 1px solid rgba(255, 255, 255, 0.06);
-        background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));
-        color: #fff; font-family: inherit; font-size: 15px;
-        appearance: none; -webkit-appearance: none; cursor: pointer;
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.5)' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-        background-repeat: no-repeat; background-position: right 14px center;
-      }
-      select:focus { outline: none; border-color: var(--accent-2); }
+// v16 NEW: force maximum + advanced options
+const forceMaximumCheckbox = document.getElementById("forceMaximum");
+const advOptionsToggle = document.getElementById("advOptionsToggle");
+const advOptionsBody = document.getElementById("advOptionsBody");
 
-      .toggle-row {
-        display: flex; gap: 14px; align-items: flex-start;
-        padding: 16px; border-radius: 12px;
-        background: rgba(255, 255, 255, 0.015);
-        border: 1px solid rgba(255, 255, 255, 0.04);
-      }
-      .toggle-row input[type="checkbox"] {
-        width: 18px; height: 18px; margin-top: 1px;
-        accent-color: var(--accent); flex-shrink: 0; cursor: pointer;
-      }
-      .toggle-row label { cursor: pointer; flex: 1; }
-      .toggle-row .t-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
-      .toggle-row .t-desc { font-size: 12px; color: rgba(255, 255, 255, 0.55); line-height: 1.55; }
+// v16 NEW: modal
+const forceMaxModal = document.getElementById("forceMaxModal");
+const forceMaxConfirmCheck = document.getElementById("forceMaxConfirmCheck");
+const forceMaxProceedBtn = document.getElementById("forceMaxProceedBtn");
+const forceMaxCancelBtn = document.getElementById("forceMaxCancelBtn");
 
-      .form-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 16px;
-      }
+// v16 NEW: report card
+const reportCard = document.getElementById("reportCard");
+const closeReportBtn = document.getElementById("closeReportBtn");
+const abCompareBtn = document.getElementById("abCompareBtn");
+const abCompareResult = document.getElementById("abCompareResult");
+const viewCodeToggle = document.getElementById("viewCodeToggle");
+const viewCodeBody = document.getElementById("viewCodeBody");
+const reportCodeOutput = document.getElementById("reportCodeOutput");
+const viewCodeChars = document.getElementById("viewCodeChars");
+const copyReportCodeBtn = document.getElementById("copyReportCodeBtn");
 
-      .key-row {
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        border-radius: 12px; padding: 16px; margin-bottom: 12px;
-        background: rgba(255, 255, 255, 0.015);
-      }
-      .key-row-head {
-        display: flex; justify-content: space-between; align-items: center;
-        margin-bottom: 12px; flex-wrap: wrap; gap: 8px;
-      }
-      .key-value {
-        font-family: ui-monospace, "SF Mono", Consolas, monospace;
-        font-size: 13px; color: rgba(255, 255, 255, 0.9);
-        word-break: break-all; padding: 4px 8px;
-        border-radius: 6px; background: rgba(0, 0, 0, 0.3);
-        border: 1px solid rgba(255, 255, 255, 0.04);
-      }
-      .key-meta {
-        font-size: 12px; color: rgba(255, 255, 255, 0.55);
-        line-height: 1.7; margin-bottom: 12px;
-      }
-      .key-meta strong { color: rgba(255, 255, 255, 0.85); font-weight: 600; }
-      .key-meta code.hwid {
-        font-family: ui-monospace, "SF Mono", Consolas, monospace;
-        background: rgba(0, 0, 0, 0.3); padding: 2px 6px;
-        border-radius: 4px; font-size: 11px;
-        color: rgba(255, 255, 255, 0.75);
-      }
-      .badge {
-        display: inline-block; padding: 3px 10px;
-        border-radius: 6px; font-size: 10px;
-        font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase;
-      }
-      .badge-success { background: rgba(72, 176, 92, 0.15); color: #7de095; border: 1px solid rgba(72, 176, 92, 0.25); }
-      .badge-warning { background: rgba(255, 180, 60, 0.12); color: #ffd280; border: 1px solid rgba(255, 180, 60, 0.22); }
-      .badge-danger  { background: rgba(255, 90, 90, 0.12); color: #ff9b9b; border: 1px solid rgba(255, 90, 90, 0.22); }
-      .badge-info    { background: rgba(96, 165, 250, 0.12); color: #93c5fd; border: 1px solid rgba(96, 165, 250, 0.22); }
+const previewCard = document.getElementById("previewCard");
+const previewStats = document.getElementById("previewStats");
+const previewOutput = document.getElementById("previewOutput");
+const closePreviewBtn = document.getElementById("closePreviewBtn");
+const copyPreviewBtn = document.getElementById("copyPreviewBtn");
 
-      .output-box {
-        max-height: 400px; overflow: auto;
-        padding: 14px 16px;
-        background: rgba(0, 0, 0, 0.35);
-        border: 1px solid rgba(255, 255, 255, 0.04);
-        border-radius: 12px;
-        font-family: ui-monospace, "SF Mono", Consolas, monospace;
-        font-size: 12px; line-height: 1.6;
-        white-space: pre-wrap; word-break: break-all;
-        color: rgba(255, 255, 255, 0.85);
-      }
-      .output-box.small { max-height: none; padding: 12px 14px; }
+const resultCard = document.getElementById("resultCard");
+const loadstringOutput = document.getElementById("loadstringOutput");
+const copyBtn = document.getElementById("copyBtn");
 
-      /* v16: Prism.js override to match dark theme */
-      pre[class*="language-"] {
-        margin: 0; padding: 14px 16px;
-        background: rgba(0, 0, 0, 0.35) !important;
-        border: 1px solid rgba(255, 255, 255, 0.04);
-        border-radius: 12px;
-        max-height: 500px; overflow: auto;
-        font-size: 12px; line-height: 1.6;
-      }
-      code[class*="language-"] {
-        font-family: ui-monospace, "SF Mono", Consolas, monospace !important;
-        font-size: 12px !important;
-        white-space: pre-wrap !important;
-        word-break: break-word !important;
-      }
+// Key management
+const keysCard = document.getElementById("keysCard");
+const keysList = document.getElementById("keysList");
+const generateKeyBtn = document.getElementById("generateKeyBtn");
+const keyScriptSelect = document.getElementById("keyScriptSelect");
+const keyPlaceIdsInput = document.getElementById("keyPlaceIds");
+const keyMaxExecInput = document.getElementById("keyMaxExec");
+const keyExpiresInput = document.getElementById("keyExpires");
 
-      .upload-row {
-        display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-      }
-      #fileName { font-size: 12px; color: rgba(255, 255, 255, 0.55); }
+let currentUser = null;
+let lastPreviewedCode = "";
+let lastReport = null;         // v16: cached most recent report
+let lastRequestedLevel = null; // v16: for A/B compare
+let lastSavedScriptId = null;
 
-      .key-actions button {
-        min-height: 36px; padding: 6px 14px;
-        font-size: 12px; font-weight: 600;
-      }
+(async function init() {
+  await handleOAuthCallback();
+  const user = await requireAuth();
+  if (!user) return;
+  currentUser = user;
+  if (userEmailEl) userEmailEl.textContent = user.email;
+  await loadUserKeys();
+})();
 
-      /* ================================================================
-         v16: OBFUSCATION REPORT CARD STYLES
-      ================================================================ */
-      .report-hero {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 12px;
-        margin-bottom: 20px;
-      }
-      .report-hero-item {
-        padding: 14px 16px;
-        border-radius: 12px;
-        background: rgba(255, 255, 255, 0.015);
-        border: 1px solid rgba(255, 255, 255, 0.04);
-      }
-      .report-hero-item .label {
-        font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px;
-        color: rgba(255, 255, 255, 0.5); margin-bottom: 6px;
-      }
-      .report-hero-item .value {
-        font-size: 20px; font-weight: 700; color: #fff;
-        display: flex; align-items: center; gap: 10px;
-      }
+logoutBtn?.addEventListener("click", async () => {
+  logoutBtn.disabled = true;
+  logoutBtn.textContent = "Logging out...";
+  try { await sb.auth.signOut(); } catch (err) {}
+  finally { window.location.href = "index.html"; }
+});
 
-      .report-downgrade-banner {
-        padding: 14px 16px; border-radius: 12px;
-        background: rgba(255, 180, 60, 0.08);
-        border: 1px solid rgba(255, 180, 60, 0.2);
-        margin-bottom: 20px;
-        display: flex; gap: 12px; align-items: flex-start;
-      }
-      .report-downgrade-banner.error {
-        background: rgba(255, 90, 90, 0.08);
-        border-color: rgba(255, 90, 90, 0.2);
-      }
-      .report-downgrade-banner .warn-icon {
-        flex-shrink: 0; width: 22px; height: 22px; color: #ffd280;
-      }
-      .report-downgrade-banner.error .warn-icon { color: #ff9b9b; }
-      .report-downgrade-banner .warn-body { flex: 1; }
-      .report-downgrade-banner .warn-title {
-        font-size: 13px; font-weight: 700; margin-bottom: 4px;
-        color: #ffd280;
-      }
-      .report-downgrade-banner.error .warn-title { color: #ff9b9b; }
-      .report-downgrade-banner .warn-msg {
-        font-size: 13px; color: rgba(255, 255, 255, 0.75); line-height: 1.55;
-      }
+function updateUI() {
+  const len = scriptCodeInput.value.length;
+  charCountEl.textContent = `${len.toLocaleString()} characters`;
+  const hasCode = len > 0;
+  saveBtn.disabled = !hasCode;
+  previewBtn.disabled = !hasCode;
+}
 
-      .layers-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 8px;
-        margin-bottom: 20px;
-      }
-      .layer-item {
-        display: flex; align-items: center; gap: 10px;
-        padding: 10px 14px;
-        border-radius: 10px;
-        background: rgba(255, 255, 255, 0.015);
-        border: 1px solid rgba(255, 255, 255, 0.04);
-        font-size: 13px;
-      }
-      .layer-item.active {
-        background: rgba(72, 176, 92, 0.08);
-        border-color: rgba(72, 176, 92, 0.2);
-      }
-      .layer-item.inactive { opacity: 0.5; }
-      .layer-item .check {
-        width: 16px; height: 16px; flex-shrink: 0;
-      }
-      .layer-item.active .check { color: #7de095; }
-      .layer-item.inactive .check { color: rgba(255, 255, 255, 0.35); }
-      .layer-item .layer-name { flex: 1; }
-      .layer-item .layer-mode {
-        font-size: 10px;
-        padding: 2px 6px;
-        border-radius: 4px;
-        background: rgba(255, 255, 255, 0.05);
-        color: rgba(255, 255, 255, 0.55);
-      }
+scriptCodeInput.addEventListener("input", updateUI);
+uploadBtn.addEventListener("click", () => fileUpload.click());
 
-      .profile-grid, .stats-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-        gap: 10px 20px;
-        padding: 14px 16px;
-        border-radius: 12px;
-        background: rgba(255, 255, 255, 0.015);
-        border: 1px solid rgba(255, 255, 255, 0.04);
-      }
-      .profile-grid > div, .stats-grid > div {
-        font-size: 12px; color: rgba(255, 255, 255, 0.55);
-      }
-      .profile-grid > div strong, .stats-grid > div strong {
-        display: block; font-size: 15px; font-weight: 700;
-        color: #fff; margin-top: 2px;
-      }
+// v24 NEW: Reference upload handlers
+referenceUploadBtn?.addEventListener("click", () => referenceUpload.click());
 
-      .warnings-list {
-        list-style: none; padding: 0; margin: 0;
-        display: flex; flex-direction: column; gap: 8px;
-      }
-      .warnings-list li {
-        padding: 10px 14px;
-        background: rgba(255, 180, 60, 0.06);
-        border: 1px solid rgba(255, 180, 60, 0.18);
-        border-radius: 10px;
-        font-size: 12px; line-height: 1.5;
-        color: rgba(255, 255, 255, 0.8);
-      }
+referenceUpload?.addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > MAX_SCRIPT_SIZE) {
+    showMessage("Reference file too large. Max 10MB.", "error");
+    return;
+  }
+  const allowedTypes = [".lua", ".txt"];
+  const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
+  if (!allowedTypes.includes(ext)) {
+    showMessage("Only .lua or .txt reference files allowed.", "error");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    referenceCode = event.target.result;
+    referenceFileName = file.name;
+    referenceFileNameEl.textContent = "Reference: " + file.name + " (" +
+      referenceCode.length.toLocaleString() + " chars)";
+    referenceClearBtn.classList.remove("hidden");
+    showMessage("Reference file loaded. It will be used for the next obfuscation.", "success");
+  };
+  reader.onerror = () => showMessage("Failed to read reference file.", "error");
+  reader.readAsText(file);
+});
 
-      .collapsible-toggle {
-        cursor: pointer;
-        padding: 12px 16px;
-        border-radius: 10px;
-        background: rgba(255, 255, 255, 0.02);
-        border: 1px solid rgba(255, 255, 255, 0.04);
-        font-size: 13px; font-weight: 600;
-        color: rgba(255, 255, 255, 0.85);
-        display: flex; align-items: center; justify-content: space-between;
-        user-select: none;
-      }
-      .collapsible-toggle:hover { background: rgba(255, 255, 255, 0.035); }
-      .collapsible-toggle .caret {
-        transition: transform 0.2s;
-      }
-      .collapsible-toggle.open .caret { transform: rotate(90deg); }
-      .collapsible-body {
-        margin-top: 12px;
-        display: none;
-      }
-      .collapsible-body.open { display: block; }
+referenceClearBtn?.addEventListener("click", () => {
+  referenceCode = "";
+  referenceFileName = "";
+  referenceUpload.value = "";
+  referenceFileNameEl.textContent = "";
+  referenceClearBtn.classList.add("hidden");
+  showMessage("Reference cleared.", "info");
+});
 
-      /* ================================================================
-         v16: MODAL DIALOG (for Force Maximum confirmation)
-      ================================================================ */
-      .modal-backdrop {
-        position: fixed; inset: 0;
-        background: rgba(0, 0, 0, 0.7);
-        backdrop-filter: blur(6px);
-        display: none;
-        align-items: center; justify-content: center;
-        z-index: 9999;
-        padding: 20px;
-      }
-      .modal-backdrop.open { display: flex; }
-      .modal-dialog {
-        max-width: 480px; width: 100%;
-        background: #1a1a1c;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 16px;
-        padding: 24px;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-      }
-      .modal-title {
-        font-size: 16px; font-weight: 700; margin: 0 0 12px 0;
-        color: #ff9b9b;
-        display: flex; align-items: center; gap: 10px;
-      }
-      .modal-body {
-        font-size: 13px; line-height: 1.6;
-        color: rgba(255, 255, 255, 0.75);
-        margin-bottom: 20px;
-      }
-      .modal-body strong { color: rgba(255, 255, 255, 0.95); }
-      .modal-actions {
-        display: flex; gap: 10px; justify-content: flex-end;
-      }
-      .modal-check {
-        display: flex; align-items: center; gap: 8px;
-        margin: 16px 0;
-        padding: 12px 14px;
-        border-radius: 10px;
-        background: rgba(255, 90, 90, 0.06);
-        border: 1px solid rgba(255, 90, 90, 0.2);
-        font-size: 13px; color: rgba(255, 255, 255, 0.85);
-        cursor: pointer;
-      }
-      .modal-check input[type="checkbox"] {
-        width: 16px; height: 16px;
-        accent-color: #ff6b6b;
-      }
-      button.danger-solid {
-        background: #b03030 !important;
-        border-color: #b03030 !important;
-        color: #fff !important;
-      }
-      button.danger-solid:disabled {
-        opacity: 0.5; cursor: not-allowed;
-      }
+fileUpload.addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > MAX_SCRIPT_SIZE) { showMessage("File too large. Max 10MB.", "error"); return; }
+  const allowedTypes = [".lua", ".txt"];
+  const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
+  if (!allowedTypes.includes(ext)) { showMessage("Only .lua or .txt files allowed.", "error"); return; }
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    scriptCodeInput.value = event.target.result;
+    fileNameEl.textContent = `Loaded: ${file.name}`;
+    if (!scriptNameInput.value.trim()) {
+      const nameWithoutExt = file.name.replace(/\.(lua|txt)$/i, "");
+      scriptNameInput.value = nameWithoutExt;
+    }
+    updateUI();
+    showMessage(`Loaded "${file.name}"`, "success");
+  };
+  reader.onerror = () => showMessage("Failed to read file.", "error");
+  reader.readAsText(file);
+});
 
-      /* ================================================================
-         Phase 2a: per-layer overrides in Advanced Options
-      ================================================================ */
-      .layer-override-block {
-        margin-top: 16px; padding: 14px;
-        border-radius: 12px;
-        background: rgba(255, 255, 255, 0.02);
-        border: 1px solid rgba(255, 255, 255, 0.05);
-      }
-      .layer-override-block .lob-title {
-        font-size: 12px; font-weight: 700;
-        color: rgba(255, 255, 255, 0.75);
-        text-transform: uppercase; letter-spacing: 0.6px;
-        margin-bottom: 4px;
-      }
-      .layer-override-block .lob-desc {
-        font-size: 11px; color: rgba(255, 255, 255, 0.5);
-        line-height: 1.5; margin-bottom: 12px;
-      }
-      .layer-override-row {
-        display: grid;
-        grid-template-columns: 1fr 130px;
-        gap: 4px 12px;
-        align-items: center;
-        padding: 10px 0;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-      }
-      .layer-override-row:last-child { border-bottom: 0; padding-bottom: 2px; }
-      .layer-override-row .name {
-        font-size: 13px; color: rgba(255, 255, 255, 0.85); font-weight: 600;
-      }
-      .layer-override-row .hint {
-        grid-column: 1 / -1;
-        font-size: 11px;
-        color: rgba(255, 255, 255, 0.5);
-        font-style: italic;
-        line-height: 1.45;
-      }
-      .layer-override-row .hint.auto-on { color: #7de095; font-style: normal; }
-      .layer-override-row .hint.auto-off { color: #ffd280; font-style: normal; }
-      .layer-override-row select.override-select {
-        padding: 6px 28px 6px 10px;
-        font-size: 12px;
-        border-radius: 8px;
-        min-height: 32px;
-      }
-    </style>
-  </head>
-  <body>
-    <nav class="app-nav">
-      <div class="brand">Loadstring Gen</div>
-      <div class="nav-links">
-        <a href="dashboard.html" class="active">Dashboard</a>
-        <a href="saved.html">Saved Scripts</a>
-        <a href="admin.html" id="adminLink" class="hidden">Admin</a>
+clearBtn.addEventListener("click", () => {
+  if (!scriptCodeInput.value && !scriptNameInput.value) return;
+  if (confirm("Clear the script editor?")) {
+    scriptNameInput.value = "";
+    scriptCodeInput.value = "";
+    fileNameEl.textContent = "";
+    fileUpload.value = "";
+    hideMessage();
+    resultCard.classList.add("hidden");
+    previewCard.classList.add("hidden");
+    reportCard.classList.add("hidden");
+    updateUI();
+  }
+});
+
+function generateId(length = 8) {
+  const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let id = "";
+  const array = new Uint8Array(length);
+  crypto.getRandomValues(array);
+  for (let i = 0; i < length; i++) id += chars[array[i] % chars.length];
+  return id;
+}
+
+function generateLicenseKey() {
+  const chunks = [];
+  for (let i = 0; i < 4; i++) {
+    const bytes = new Uint8Array(4);
+    crypto.getRandomValues(bytes);
+    chunks.push(
+      Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase()
+    );
+  }
+  return "KEY-" + chunks.join("-");
+}
+
+function buildLoadstring(scriptId) {
+  const rawUrl = `${window.location.origin}/s/${scriptId}`;
+  return `loadstring(game:HttpGet("${rawUrl}"))()`;
+}
+
+function buildProtectedLoadstring(scriptId, key) {
+  const baseUrl = `${window.location.origin}/s/${scriptId}`;
+  return `local _k="${key}"\nlocal _h=game:GetService("RbxAnalyticsService"):GetClientId()\nlocal _p=tostring(game.PlaceId)\nloadstring(game:HttpGet("${baseUrl}?key=".._k.."&hwid=".._h.."&place=".._p))()`;
+}
+
+// ============================================================================
+// Phase 2a: Per-layer overrides + hint updater
+// ============================================================================
+const OVERRIDE_LAYERS = ["antiDebugger", "antiDump", "antiTamper", "byteLevelXor", "vmWrap", "outerVM"];
+
+function readLayerOverrides() {
+  const out = {};
+  for (const key of OVERRIDE_LAYERS) {
+    const el = document.getElementById("ovr_" + key);
+    if (el && el.value && el.value !== "auto") out[key] = el.value;
+  }
+  return out;
+}
+
+function predictAutoDecision(layerKey, profile) {
+  const p = profile || {};
+  const hooks = !!p.hasHookfunction || !!p.hasHookmetamethod;
+  const refl  = !!p.hasRuntimeReflection;
+  switch (layerKey) {
+    case "antiDebugger":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (would false-positive)" }
+        : { enabled: true,  reason: "no hooks detected \u2014 safe to apply" };
+    case "antiDump":
+      return { enabled: true, reason: "pure global-existence probes \u2014 no collision risk" };
+    case "antiTamper":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (would false-positive)" }
+        : { enabled: true,  reason: "no hooks detected \u2014 safe to apply" };
+    case "byteLevelXor":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (bit32.bxor collision risk)" }
+        : { enabled: true,  reason: "no hooks detected \u2014 safe to apply" };
+    case "vmWrap":
+      return (hooks || refl)
+        ? { enabled: false, reason: (hooks ? "hooks" : "reflection") + " detected (would false-positive)" }
+        : { enabled: true,  reason: "eligible \u2014 will wrap qualifying print() calls" };
+    case "outerVM":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (decoder collision risk)" }
+        : { enabled: true,  reason: "safe \u2014 decoy or real path will emit" };
+    default:
+      return { enabled: true, reason: "" };
+  }
+}
+
+function updateOverrideHints(profile) {
+  for (const key of OVERRIDE_LAYERS) {
+    const hintEl = document.getElementById("ovrHint_" + key);
+    const selEl  = document.getElementById("ovr_" + key);
+    if (!hintEl || !selEl) continue;
+    if (selEl.value === "force") {
+      hintEl.textContent = "Force: bypass smart-skip (may false-positive at runtime)";
+      hintEl.className = "hint auto-off";
+      continue;
+    }
+    if (selEl.value === "skip") {
+      hintEl.textContent = "Skip: this layer will never be applied";
+      hintEl.className = "hint";
+      continue;
+    }
+    if (!profile) {
+      hintEl.textContent = "Auto: obfuscate once to preview what this would do";
+      hintEl.className = "hint";
+      continue;
+    }
+    const dec = predictAutoDecision(key, profile);
+    hintEl.textContent = "Auto: " + (dec.enabled ? "will be enabled" : "will be skipped") +
+                        (dec.reason ? " (" + dec.reason + ")" : "");
+    hintEl.className = "hint " + (dec.enabled ? "auto-on" : "auto-off");
+  }
+}
+
+for (const key of OVERRIDE_LAYERS) {
+  document.getElementById("ovr_" + key)?.addEventListener("change", () => {
+    updateOverrideHints(lastReport ? lastReport.profile : null);
+  });
+}
+
+// ============================================================================
+// v16: OBFUSCATION WITH REPORT
+// ============================================================================
+async function obfuscateCode(code, level, options) {
+  options = options || {};
+  if (level === "none") {
+    return {
+      code, elapsed: 0, originalSize: code.length, obfuscatedSize: code.length,
+      report: null
+    };
+  }
+  const response = await fetch(OBFUSCATE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code, level,
+      forceMaximum: !!options.forceMaximum,
+      userId: currentUser ? currentUser.id : null,
+      // v24 NEW: pass the uploaded reference script as an extra manifest source
+      referenceCode: referenceCode || null,
+      // Phase 2a: per-layer overrides
+      layerOverrides: readLayerOverrides(),
+    }),
+  });
+  if (!response.ok) {
+    let errMsg = "Obfuscation failed";
+    try { const errData = await response.json(); errMsg = errData.error || errMsg; } catch (e) {}
+    throw new Error(errMsg);
+  }
+  const data = await response.json();
+  if (!data.success || !data.code) throw new Error(data.error || "Obfuscation returned no code");
+  return {
+    code: data.code,
+    elapsed: data.elapsed_ms,
+    originalSize: data.original_size,
+    obfuscatedSize: data.obfuscated_size,
+    report: data.report || null,
+  };
+}
+
+// ============================================================================
+// v16: FORCE MAXIMUM CONFIRM MODAL
+// ============================================================================
+function openForceMaxModal() {
+  return new Promise((resolve) => {
+    forceMaxConfirmCheck.checked = false;
+    forceMaxProceedBtn.disabled = true;
+    forceMaxModal.classList.add("open");
+    const onCheck = () => { forceMaxProceedBtn.disabled = !forceMaxConfirmCheck.checked; };
+    const onProceed = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+    const cleanup = () => {
+      forceMaxModal.classList.remove("open");
+      forceMaxConfirmCheck.removeEventListener("change", onCheck);
+      forceMaxProceedBtn.removeEventListener("click", onProceed);
+      forceMaxCancelBtn.removeEventListener("click", onCancel);
+    };
+    forceMaxConfirmCheck.addEventListener("change", onCheck);
+    forceMaxProceedBtn.addEventListener("click", onProceed);
+    forceMaxCancelBtn.addEventListener("click", onCancel);
+  });
+}
+
+// ============================================================================
+// v16: ADVANCED OPTIONS COLLAPSIBLE
+// ============================================================================
+advOptionsToggle?.addEventListener("click", () => {
+  advOptionsToggle.classList.toggle("open");
+  advOptionsBody.classList.toggle("open");
+});
+
+// ============================================================================
+// v16: REPORT RENDERING
+// ============================================================================
+function renderReport(report, generatedCode) {
+  if (!report) {
+    reportCard.classList.add("hidden");
+    return;
+  }
+  reportCard.classList.remove("hidden");
+  abCompareResult.classList.add("hidden");
+
+  // Hero
+  document.getElementById("reportRequestedLevel").textContent = (report.requestedLevel || "-").toUpperCase();
+  document.getElementById("reportActualLevel").textContent = (report.actualLevel || "-").toUpperCase();
+  const downgradeBadge = document.getElementById("reportDowngradeBadge");
+  if (report.wasDowngraded) {
+    downgradeBadge.classList.remove("hidden");
+    downgradeBadge.textContent = report.actualLevel === "fallback" || report.actualLevel === "minified"
+      ? "FALLBACK" : "DOWNGRADED";
+    downgradeBadge.className = "badge " + (
+      report.actualLevel === "fallback" || report.actualLevel === "minified"
+        ? "badge-danger" : "badge-warning"
+    );
+  } else {
+    downgradeBadge.classList.add("hidden");
+  }
+
+  // Downgrade banner
+  const banner = document.getElementById("reportDowngradeBanner");
+  if (report.wasDowngraded && report.downgradeReason) {
+    banner.classList.remove("hidden");
+    const isError = report.actualLevel === "fallback" || report.actualLevel === "minified";
+    banner.classList.toggle("error", isError);
+    document.getElementById("reportDowngradeTitle").textContent = isError
+      ? "Fallback mode active" : "Auto-downgrade applied";
+    document.getElementById("reportDowngradeMsg").textContent = report.downgradeReason;
+  } else {
+    banner.classList.add("hidden");
+  }
+
+  // Profile
+  const p = report.profile || {};
+  document.getElementById("profRisk").textContent = p.riskTier || "-";
+  document.getElementById("profComplexity").textContent = p.complexityScore != null ? p.complexityScore : "-";
+  document.getElementById("profDepth").textContent = p.maxBlockDepth != null ? p.maxBlockDepth : "-";
+  document.getElementById("profFuncs").textContent = p.functionCount != null ? p.functionCount : "-";
+  document.getElementById("profPcalls").textContent = p.pcallCount != null ? p.pcallCount : "-";
+  const hooks = [];
+  if (p.hasHookfunction) hooks.push("hookfunction");
+  if (p.hasHookmetamethod) hooks.push("hookmetamethod");
+  document.getElementById("profHooks").textContent = hooks.length > 0 ? hooks.join(" + ") : "none";
+
+  // Layers
+  const layersEl = document.getElementById("reportLayers");
+  layersEl.innerHTML = "";
+  const L = report.layers || {};
+  const layerDefs = [
+    { key: "vmWrap", name: "Inner VM wrap" },
+    { key: "outerVM", name: "Multi-layer outer VM" },
+    { key: "antiDebugger", name: "Anti-debugger", mode: L.antiDebuggerMode },
+    { key: "integrityCheck", name: "Integrity check" },
+    { key: "stringEncryption", name: "String encryption", mode: L.stringEncryptionStrict ? "strict" : "normal" },
+    { key: "constantObfuscation", name: "Numeric obfuscation" },
+    { key: "constantPool", name: "Constant pool + poison" },
+    { key: "antiTamper", name: "Anti-tamper wrapper" },
+    { key: "antiDump", name: "Anti-dump" },
+    { key: "byteLevelXor", name: "Byte-level XOR encryption" },
+  ];
+  for (const def of layerDefs) {
+    const active = !!L[def.key];
+    const div = document.createElement("div");
+    div.className = "layer-item " + (active ? "active" : "inactive");
+    div.innerHTML = `
+      <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        ${active
+          ? '<polyline points="20 6 9 17 4 12"/>'
+          : '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'}
+      </svg>
+      <span class="layer-name">${escapeHtml(def.name)}</span>
+      ${active && def.mode ? `<span class="layer-mode">${escapeHtml(def.mode)}</span>` : ""}
+    `;
+    layersEl.appendChild(div);
+  }
+
+  // v22 NEW: Reference manifest stats
+  const manifestSection = document.getElementById("reportManifestSection");
+  const m = report.manifest;
+  if (m && !m.error && typeof m.identifiers === "number") {
+    manifestSection.classList.remove("hidden");
+    document.getElementById("manifestIdentifiers").textContent = m.identifiers.toLocaleString();
+    document.getElementById("manifestStrings").textContent = (m.strings || 0).toLocaleString();
+    document.getElementById("manifestPropertyNames").textContent = (m.propertyNames || 0).toLocaleString();
+    document.getElementById("manifestZeroInits").textContent = (m.zeroInitLocals || 0).toLocaleString();
+    document.getElementById("manifestForwardRefs").textContent = (m.forwardRefs || 0).toLocaleString();
+    document.getElementById("manifestMethodBases").textContent = (m.methodCallBases || 0).toLocaleString();
+  } else {
+    manifestSection.classList.add("hidden");
+  }
+
+  // Stats
+  const s = report.stats || {};
+  document.getElementById("statOrig").textContent = s.originalBytes ? s.originalBytes.toLocaleString() + " B" : "-";
+  document.getElementById("statObf").textContent = s.obfuscatedBytes ? s.obfuscatedBytes.toLocaleString() + " B" : "-";
+  document.getElementById("statRatio").textContent = s.sizeRatio ? s.sizeRatio.toFixed(2) + "x" : "-";
+  document.getElementById("statElapsed").textContent = s.elapsedMs != null ? s.elapsedMs + " ms" : "-";
+  document.getElementById("statStrEnc").textContent = s.stringsEncrypted != null ? s.stringsEncrypted : "-";
+  document.getElementById("statStrSkip").textContent = s.stringsSkipped != null ? s.stringsSkipped : "-";
+  document.getElementById("statNumObf").textContent = s.numericConstsObfuscated != null ? s.numericConstsObfuscated : "-";
+  document.getElementById("statVmStmt").textContent = s.vmCompiledStatements != null ? s.vmCompiledStatements : "0";
+
+  // Warnings
+  const warningsWrap = document.getElementById("reportWarningsWrap");
+  const warningsList = document.getElementById("reportWarningsList");
+  if (report.warnings && report.warnings.length > 0) {
+    warningsWrap.classList.remove("hidden");
+    warningsList.innerHTML = "";
+    for (const w of report.warnings) {
+      const li = document.createElement("li");
+      li.textContent = w;
+      warningsList.appendChild(li);
+    }
+  } else {
+    warningsWrap.classList.add("hidden");
+  }
+
+  // Phase 2a: refresh override hints based on the new profile
+  updateOverrideHints(report.profile);
+
+  // Generated code preview (Prism)
+  if (generatedCode) {
+    // Limit rendering to first 30KB for perf; show truncation notice
+    const MAX_SHOW = 30000;
+    const shown = generatedCode.length > MAX_SHOW
+      ? generatedCode.slice(0, MAX_SHOW) + "\n\n-- ... (truncated, " + (generatedCode.length - MAX_SHOW).toLocaleString() + " chars hidden. Use Copy button for full code) --"
+      : generatedCode;
+    reportCodeOutput.textContent = shown;
+    viewCodeChars.textContent = "(" + generatedCode.length.toLocaleString() + " chars)";
+    // Trigger Prism re-highlight
+    if (window.Prism && window.Prism.highlightElement) {
+      try { window.Prism.highlightElement(reportCodeOutput); } catch (e) {}
+    }
+  } else {
+    reportCodeOutput.textContent = "-- No code available --";
+    viewCodeChars.textContent = "";
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[c]);
+}
+
+closeReportBtn?.addEventListener("click", () => reportCard.classList.add("hidden"));
+
+viewCodeToggle?.addEventListener("click", () => {
+  viewCodeToggle.classList.toggle("open");
+  viewCodeBody.classList.toggle("open");
+});
+
+copyReportCodeBtn?.addEventListener("click", async () => {
+  if (!lastPreviewedCode) return;
+  try {
+    await navigator.clipboard.writeText(lastPreviewedCode);
+    const original = copyReportCodeBtn.textContent;
+    copyReportCodeBtn.textContent = "Copied!";
+    setTimeout(() => (copyReportCodeBtn.textContent = original), 1500);
+  } catch (err) {
+    showMessage("Failed to copy. Select and copy manually.", "error");
+  }
+});
+
+// ============================================================================
+// v16: A/B COMPARE (on-demand)
+// ============================================================================
+abCompareBtn?.addEventListener("click", async () => {
+  if (!lastReport || !lastRequestedLevel) return;
+  const code = scriptCodeInput.value;
+  if (!code.trim()) return;
+
+  // Pick the "other" tier to compare against
+  const actual = lastReport.actualLevel;
+  const alt = actual === "maximum" ? "medium"
+             : actual === "medium" ? "maximum"
+             : actual === "basic" ? "medium"
+             : "basic";
+
+  abCompareBtn.disabled = true;
+  const originalText = abCompareBtn.textContent;
+  abCompareBtn.textContent = "Running " + alt + "...";
+
+  try {
+    const altResult = await obfuscateCode(code, alt, { forceMaximum: false });
+
+    abCompareResult.classList.remove("hidden");
+    document.getElementById("abThisLevel").textContent = actual.toUpperCase();
+    document.getElementById("abThisSize").textContent =
+      `${(lastReport.stats.obfuscatedBytes || 0).toLocaleString()} B (${(lastReport.stats.sizeRatio || 0).toFixed(2)}x) - ${lastReport.stats.elapsedMs || 0} ms`;
+
+    document.getElementById("abAltLevel").textContent = (altResult.report ? altResult.report.actualLevel : alt).toUpperCase();
+    const altRatio = altResult.originalSize > 0 ? (altResult.obfuscatedSize / altResult.originalSize) : 0;
+    document.getElementById("abAltSize").textContent =
+      `${altResult.obfuscatedSize.toLocaleString()} B (${altRatio.toFixed(2)}x) - ${altResult.elapsed} ms`;
+
+    showMessage(`A/B compare complete. Alternate tier: ${alt}`, "success");
+  } catch (err) {
+    showMessage("A/B compare failed: " + err.message, "error");
+  } finally {
+    abCompareBtn.disabled = false;
+    abCompareBtn.textContent = originalText;
+  }
+});
+
+// ============================================================================
+// PREVIEW HANDLER (v16: now populates report card too)
+// ============================================================================
+previewBtn.addEventListener("click", async () => {
+  const code = scriptCodeInput.value;
+  const level = obfuscationLevelSelect.value;
+  const wantForce = !!(forceMaximumCheckbox && forceMaximumCheckbox.checked);
+  hideMessage();
+
+  if (!code.trim()) { showMessage("Wala kang na-paste na code.", "error"); return; }
+  if (code.length > MAX_SCRIPT_SIZE) { showMessage("Script too long. Max 10MB.", "error"); return; }
+
+  // v16: Force max confirm modal
+  let forceMaximum = false;
+  if (wantForce && level === "maximum") {
+    const confirmed = await openForceMaxModal();
+    if (!confirmed) { showMessage("Force-maximum canceled.", "info"); return; }
+    forceMaximum = true;
+  }
+
+  previewBtn.disabled = true;
+  const originalText = previewBtn.textContent;
+  previewBtn.textContent = "Generating preview...";
+
+  try {
+    const result = await obfuscateCode(code, level, { forceMaximum });
+    lastPreviewedCode = result.code;
+    lastReport = result.report;
+    lastRequestedLevel = level;
+
+    // Preview card
+    const ratio = result.obfuscatedSize / result.originalSize;
+    const ratioStr = ratio.toFixed(2);
+    const actualLevel = result.report ? result.report.actualLevel : level;
+    const statsText = level === "none"
+      ? `Level: none | ${result.originalSize.toLocaleString()} chars (no changes)`
+      : `Applied: ${actualLevel} | ${result.originalSize.toLocaleString()} chars -> ${result.obfuscatedSize.toLocaleString()} chars (${ratioStr}x) | ${result.elapsed}ms`;
+    previewStats.textContent = statsText;
+
+    // Prism-highlighted preview (limit for perf)
+    const MAX_SHOW = 30000;
+    const shown = result.code.length > MAX_SHOW
+      ? result.code.slice(0, MAX_SHOW) + "\n\n-- ... (truncated) --"
+      : result.code;
+    previewOutput.textContent = shown;
+    if (window.Prism && window.Prism.highlightElement) {
+      try { window.Prism.highlightElement(previewOutput); } catch (e) {}
+    }
+    previewCard.classList.remove("hidden");
+
+    // v16: Report card (render with generated code, close preview code section by default)
+    renderReport(result.report, result.code);
+    // Make sure the collapsible starts closed
+    viewCodeToggle.classList.remove("open");
+    viewCodeBody.classList.remove("open");
+
+    reportCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    showMessage(`Preview ready. Check the report below, then click Save Script.`, "success");
+  } catch (err) {
+    showMessage(err.message || "Failed to preview.", "error");
+  } finally {
+    previewBtn.disabled = false;
+    previewBtn.textContent = originalText;
+    updateUI();
+  }
+});
+
+closePreviewBtn.addEventListener("click", () => {
+  previewCard.classList.add("hidden");
+});
+
+copyPreviewBtn.addEventListener("click", async () => {
+  if (!lastPreviewedCode) return;
+  try {
+    await navigator.clipboard.writeText(lastPreviewedCode);
+    const original = copyPreviewBtn.textContent;
+    copyPreviewBtn.textContent = "Copied!";
+    setTimeout(() => (copyPreviewBtn.textContent = original), 1500);
+  } catch (err) {
+    showMessage("Failed to copy. Select and copy manually.", "error");
+  }
+});
+
+// ============================================================================
+// SAVE HANDLER (v16: force max modal + report render)
+// ============================================================================
+saveBtn.addEventListener("click", async () => {
+  const name = scriptNameInput.value.trim();
+  const code = scriptCodeInput.value;
+  const level = obfuscationLevelSelect ? obfuscationLevelSelect.value : "none";
+  const requireKey = requireKeyCheckbox ? requireKeyCheckbox.checked : true;
+  const wantForce = !!(forceMaximumCheckbox && forceMaximumCheckbox.checked);
+
+  hideMessage();
+  if (!code.trim()) { showMessage("Wala kang na-paste na code.", "error"); return; }
+  if (code.length > MAX_SCRIPT_SIZE) { showMessage("Script too long. Max 10MB.", "error"); return; }
+
+  // v16: Force max confirm modal
+  let forceMaximum = false;
+  if (wantForce && level === "maximum") {
+    const confirmed = await openForceMaxModal();
+    if (!confirmed) { showMessage("Force-maximum canceled.", "info"); return; }
+    forceMaximum = true;
+  }
+
+  saveBtn.disabled = true;
+  const originalText = saveBtn.textContent;
+
+  try {
+    let finalCode = code;
+    let sizeInfo = "";
+    let report = null;
+    if (level !== "none") {
+      saveBtn.textContent = "Obfuscating...";
+      showMessage(`Obfuscating with level: ${level}${forceMaximum ? " (forced)" : ""}...`, "info");
+      const result = await obfuscateCode(code, level, { forceMaximum });
+      finalCode = result.code;
+      report = result.report;
+      lastPreviewedCode = result.code;
+      lastReport = result.report;
+      lastRequestedLevel = level;
+      sizeInfo = ` (${result.originalSize.toLocaleString()} -> ${result.obfuscatedSize.toLocaleString()} chars)`;
+    }
+
+    saveBtn.textContent = "Saving...";
+    showMessage("Saving to database...", "info");
+
+    let scriptId = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const id = generateId(8);
+      const { error } = await sb.from("scripts").insert({
+        id, user_id: currentUser.id, name: name || null,
+        code: finalCode, key_required: requireKey,
+      });
+      if (!error) { scriptId = id; break; }
+      if (error.code !== "23505") throw error;
+    }
+    if (!scriptId) throw new Error("Could not generate a unique ID. Try again.");
+
+    lastSavedScriptId = scriptId;
+    const loadstring = buildLoadstring(scriptId);
+    loadstringOutput.textContent = loadstring;
+    resultCard.classList.remove("hidden");
+
+    // v16: Also render report if available
+    if (report) {
+      renderReport(report, finalCode);
+      viewCodeToggle.classList.remove("open");
+      viewCodeBody.classList.remove("open");
+    }
+
+    resultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+    const actualLevel = report ? report.actualLevel : level;
+    const modeInfo = requireKey
+      ? ` Generate a key below to enable protection.`
+      : ` Script is FREE (no key required) - anyone can run this loadstring.`;
+    showMessage(
+      `Script saved! ID: ${scriptId} | Applied: ${actualLevel}${sizeInfo}.${modeInfo}`,
+      "success"
+    );
+
+    await refreshScriptOptions();
+  } catch (err) {
+    showMessage(err.message || "Failed to save script.", "error");
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = originalText;
+    updateUI();
+  }
+});
+
+copyBtn.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(loadstringOutput.textContent);
+    const originalText = copyBtn.textContent;
+    copyBtn.textContent = "Copied!";
+    setTimeout(() => { copyBtn.textContent = originalText; }, 1500);
+  } catch (err) {
+    showMessage("Failed to copy. Select and copy manually.", "error");
+  }
+});
+
+// ============================================================================
+// KEY MANAGEMENT (unchanged)
+// ============================================================================
+
+async function refreshScriptOptions() {
+  if (!keyScriptSelect) return;
+  const { data: scripts, error } = await sb
+    .from("scripts").select("id, name, created_at, key_required")
+    .eq("user_id", currentUser.id).order("created_at", { ascending: false });
+  if (error) { console.error("Failed to load scripts:", error); return; }
+
+  keyScriptSelect.innerHTML = '<option value="">-- Select a script --</option>';
+  (scripts || []).forEach((s) => {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    const mode = s.key_required === false ? " [FREE]" : "";
+    opt.textContent = `${s.name || "(unnamed)"} - ${s.id}${mode}`;
+    if (s.key_required === false) opt.disabled = true;
+    keyScriptSelect.appendChild(opt);
+  });
+  if (lastSavedScriptId) keyScriptSelect.value = lastSavedScriptId;
+}
+
+async function loadUserKeys() {
+  if (!keysList) return;
+  await refreshScriptOptions();
+  const { data: keys, error } = await sb
+    .from("user_keys").select("*, scripts(name)")
+    .eq("owner_id", currentUser.id).order("created_at", { ascending: false });
+  if (error) {
+    console.error("Failed to load keys:", error);
+    keysList.innerHTML = '<p class="muted">Failed to load keys.</p>';
+    return;
+  }
+  if (!keys || keys.length === 0) {
+    keysList.innerHTML = '<p class="muted">No keys generated yet. Create one above.</p>';
+    return;
+  }
+  keysList.innerHTML = keys.map((k) => renderKeyRow(k)).join("");
+  keysList.querySelectorAll("[data-action]").forEach((btn) => {
+    btn.addEventListener("click", handleKeyAction);
+  });
+}
+
+function renderKeyRow(k) {
+  const scriptName = k.scripts?.name || "(unnamed)";
+  const status = k.revoked
+    ? '<span class="badge badge-danger">REVOKED</span>'
+    : (k.expires_at && new Date(k.expires_at) < new Date())
+    ? '<span class="badge badge-warning">EXPIRED</span>'
+    : '<span class="badge badge-success">ACTIVE</span>';
+  const hwidInfo = k.hwid
+    ? `<code class="hwid">${k.hwid.substring(0, 16)}...</code>`
+    : '<span class="muted">Not bound yet</span>';
+  const placeIds = k.place_id_whitelist?.length ? k.place_id_whitelist.join(", ") : "Any game";
+  const execInfo = k.max_executions ? `${k.execution_count} / ${k.max_executions}` : `${k.execution_count} / unlimited`;
+  const expiresInfo = k.expires_at ? new Date(k.expires_at).toLocaleDateString() : "Never";
+  return `
+    <div class="key-row">
+      <div class="key-row-head">
+        <code class="key-value">${k.key}</code>
+        ${status}
       </div>
-      <div class="user-info">
-        <span id="userEmail">Loading...</span>
-        <button id="logoutBtn" class="secondary small">Logout</button>
+      <div class="key-meta">
+        <div><strong>Script:</strong> ${scriptName} (${k.script_id})</div>
+        <div><strong>HWID:</strong> ${hwidInfo}</div>
+        <div><strong>Allowed PlaceIds:</strong> ${placeIds}</div>
+        <div><strong>Executions:</strong> ${execInfo}</div>
+        <div><strong>Expires:</strong> ${expiresInfo}</div>
       </div>
-    </nav>
-
-    <div class="app-container">
-      <div class="page-header">
-        <h1>Loadstring Generator</h1>
-        <p>Paste your Lua code below or upload a file.</p>
-      </div>
-
-      <!-- ============ CARD: SCRIPT INPUT ============ -->
-      <div class="card">
-        <div class="section-head">
-          <span class="icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          </span>
-          <div class="title-block">
-            <h2>Script Input</h2>
-            <span class="sub">Enter or upload your Lua source</span>
-          </div>
-        </div>
-
-        <div class="field">
-          <label for="scriptName">Script Name</label>
-          <input type="text" id="scriptName" placeholder="Enter script name" maxlength="100" />
-        </div>
-
-        <div class="field">
-          <label for="scriptCode">
-            <span>Lua Code</span>
-            <span id="charCount" class="hint">0 characters</span>
-          </label>
-          <textarea id="scriptCode" placeholder="Your Lua code here" spellcheck="false"></textarea>
-        </div>
-
-        <div class="upload-row" style="margin-top: 14px">
-          <input type="file" id="fileUpload" accept=".lua,.txt" style="display: none" />
-          <button type="button" id="uploadBtn" class="secondary small">Upload File</button>
-          <button type="button" id="clearBtn" class="secondary small">Clear</button>
-          <span id="fileName"></span>
-        </div>
-
-        <!-- v24 NEW: Reference Script upload -->
-        <hr class="card-divider" />
-        <div class="field">
-          <label for="referenceUpload">
-            <span>Reference Script <span class="badge badge-info" style="margin-left: 6px;">OPTIONAL</span></span>
-            <span class="hint">Extra safety guide for the obfuscator</span>
-          </label>
-          <small>Upload a working Lua file (e.g. a previously obfuscated script that ran successfully). Every identifier, string, and property name in it will be added to the auto-preserve whitelist for THIS obfuscation only. Nothing is saved server-side.</small>
-          <div class="upload-row" style="margin-top: 10px">
-            <input type="file" id="referenceUpload" accept=".lua,.txt" style="display: none" />
-            <button type="button" id="referenceUploadBtn" class="secondary small">Choose Reference File</button>
-            <button type="button" id="referenceClearBtn" class="secondary small hidden">Clear Reference</button>
-            <span id="referenceFileName" style="font-size: 12px; color: rgba(255, 255, 255, 0.55)"></span>
-          </div>
-        </div>
-      </div>
-
-      <!-- ============ CARD: PROTECTION SETTINGS ============ -->
-      <div class="card">
-        <div class="section-head">
-          <span class="icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          </span>
-          <div class="title-block">
-            <h2>Protection Settings</h2>
-            <span class="sub">Choose obfuscation level and licensing</span>
-          </div>
-        </div>
-
-        <div class="field">
-          <label for="obfuscationLevel">Obfuscation Level</label>
-          <select id="obfuscationLevel">
-            <option value="none">None</option>
-            <option value="basic">Basic</option>
-            <option value="medium" selected>Medium</option>
-            <option value="maximum">Maximum</option>
-          </select>
-        </div>
-
-        <hr class="card-divider" />
-
-        <div class="toggle-row">
-          <input type="checkbox" id="requireKey" checked />
-          <label for="requireKey">
-            <div class="t-title">Require license key</div>
-            <div class="t-desc">
-              When checked, this script needs a valid key to run. When unchecked,
-              it becomes a free loadstring anyone with the URL can execute.
-            </div>
-          </label>
-        </div>
-
-        <!-- v16: Advanced options collapsible -->
-        <div style="margin-top: 14px">
-          <div class="collapsible-toggle" id="advOptionsToggle">
-            <span>Advanced options</span>
-            <span class="caret">â€º</span>
-          </div>
-          <div class="collapsible-body" id="advOptionsBody">
-            <div class="toggle-row" style="margin-top: 12px">
-              <input type="checkbox" id="forceMaximum" />
-              <label for="forceMaximum">
-                <div class="t-title" style="color: #ff9b9b">Force maximum tier (unsafe)</div>
-                <div class="t-desc">
-                  Bypasses the auto-downgrade safety check. Only enable if you know
-                  your script does NOT use hookfunction/hookmetamethod/custom debug
-                  hooks that would break under VM virtualization. You'll be asked
-                  to confirm before obfuscation runs.
-                </div>
-              </label>
-            </div>
-
-            <!-- Phase 2a: per-layer overrides -->
-            <div class="layer-override-block">
-              <div class="lob-title">Per-layer overrides</div>
-              <div class="lob-desc">
-                Auto = smart-skip decides. Force = always try (bypass smart-skip). Skip = never emit. Hints refresh after obfuscation to preview what Auto would do for your current script.
-              </div>
-
-              <div class="layer-override-row">
-                <span class="name">Anti-debugger</span>
-                <select class="override-select" id="ovr_antiDebugger">
-                  <option value="auto">Auto</option>
-                  <option value="force">Force enable</option>
-                  <option value="skip">Skip</option>
-                </select>
-                <span class="hint" id="ovrHint_antiDebugger">Auto: default behavior</span>
-              </div>
-
-              <div class="layer-override-row">
-                <span class="name">Anti-dump</span>
-                <select class="override-select" id="ovr_antiDump">
-                  <option value="auto">Auto</option>
-                  <option value="force">Force enable</option>
-                  <option value="skip">Skip</option>
-                </select>
-                <span class="hint" id="ovrHint_antiDump">Auto: default behavior</span>
-              </div>
-
-              <div class="layer-override-row">
-                <span class="name">Anti-tamper</span>
-                <select class="override-select" id="ovr_antiTamper">
-                  <option value="auto">Auto</option>
-                  <option value="force">Force enable</option>
-                  <option value="skip">Skip</option>
-                </select>
-                <span class="hint" id="ovrHint_antiTamper">Auto: default behavior</span>
-              </div>
-
-              <div class="layer-override-row">
-                <span class="name">Byte-level XOR</span>
-                <select class="override-select" id="ovr_byteLevelXor">
-                  <option value="auto">Auto</option>
-                  <option value="force">Force enable</option>
-                  <option value="skip">Skip</option>
-                </select>
-                <span class="hint" id="ovrHint_byteLevelXor">Auto: default behavior</span>
-              </div>
-
-              <div class="layer-override-row">
-                <span class="name">Inner VM wrap</span>
-                <select class="override-select" id="ovr_vmWrap">
-                  <option value="auto">Auto</option>
-                  <option value="force">Force enable</option>
-                  <option value="skip">Skip</option>
-                </select>
-                <span class="hint" id="ovrHint_vmWrap">Auto: default behavior</span>
-              </div>
-
-              <div class="layer-override-row">
-                <span class="name">Multi-layer outer VM</span>
-                <select class="override-select" id="ovr_outerVM">
-                  <option value="auto">Auto</option>
-                  <option value="force">Force enable</option>
-                  <option value="skip">Skip</option>
-                </select>
-                <span class="hint" id="ovrHint_outerVM">Auto: default behavior</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="row" style="margin-top: 20px; gap: 10px">
-          <button type="button" id="previewBtn" class="secondary" disabled>Preview Output</button>
-          <button type="button" id="saveBtn" class="primary" disabled>Save Script</button>
-        </div>
-
-        <div id="message" class="message hidden" style="margin-top: 14px"></div>
-      </div>
-
-      <!-- ============ v16 NEW: OBFUSCATION REPORT CARD (hidden until preview) ============ -->
-      <div id="reportCard" class="card hidden">
-        <div class="section-head">
-          <span class="icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11H1l8-8v8zm14 3h-8l8 8v-8z"/><path d="M9 3v18M15 3v18"/></svg>
-          </span>
-          <div class="title-block">
-            <h2>Obfuscation Report</h2>
-            <span class="sub">What actually happened when your script was obfuscated</span>
-          </div>
-          <div class="head-actions">
-            <button type="button" id="abCompareBtn" class="secondary small">Compare A/B</button>
-            <button type="button" id="closeReportBtn" class="secondary small">Close</button>
-          </div>
-        </div>
-
-        <!-- Hero: requested vs actual -->
-        <div class="report-hero">
-          <div class="report-hero-item">
-            <div class="label">Requested</div>
-            <div class="value"><span id="reportRequestedLevel">-</span></div>
-          </div>
-          <div class="report-hero-item">
-            <div class="label">Applied</div>
-            <div class="value">
-              <span id="reportActualLevel">-</span>
-              <span id="reportDowngradeBadge" class="badge badge-warning hidden">DOWNGRADED</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Downgrade / error banner -->
-        <div id="reportDowngradeBanner" class="report-downgrade-banner hidden">
-          <svg class="warn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          <div class="warn-body">
-            <div class="warn-title" id="reportDowngradeTitle">Auto-downgrade applied</div>
-            <div class="warn-msg" id="reportDowngradeMsg"></div>
-          </div>
-        </div>
-
-        <!-- Script profile -->
-        <div style="margin-bottom: 20px">
-          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Script profile</div>
-          <div class="profile-grid" id="reportProfile">
-            <div>Risk tier<strong id="profRisk">-</strong></div>
-            <div>Complexity<strong id="profComplexity">-</strong></div>
-            <div>Max depth<strong id="profDepth">-</strong></div>
-            <div>Functions<strong id="profFuncs">-</strong></div>
-            <div>pcalls<strong id="profPcalls">-</strong></div>
-            <div>Uses hooks<strong id="profHooks">-</strong></div>
-          </div>
-        </div>
-
-        <!-- Protection layers -->
-        <div style="margin-bottom: 20px">
-          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Protection layers</div>
-          <div class="layers-grid" id="reportLayers"></div>
-        </div>
-
-        <!-- v22 NEW: Reference Manifest (auto-whitelist from source) -->
-        <div id="reportManifestSection" style="margin-bottom: 20px" class="hidden">
-          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">
-            Reference manifest
-            <span class="badge badge-info" style="margin-left: 8px; font-weight: 600;">AUTO-PROTECTED</span>
-          </div>
-          <div style="font-size: 12px; color: rgba(255,255,255,0.55); margin-bottom: 12px; line-height: 1.55;">
-            Items extracted from your source code that were automatically preserved during obfuscation. Higher counts mean better protection against rename or encryption bugs.
-          </div>
-          <div class="profile-grid" id="reportManifest">
-            <div>Identifiers<strong id="manifestIdentifiers">-</strong></div>
-            <div>Strings<strong id="manifestStrings">-</strong></div>
-            <div>Property names<strong id="manifestPropertyNames">-</strong></div>
-            <div>Zero-init locals<strong id="manifestZeroInits">-</strong></div>
-            <div>Forward refs<strong id="manifestForwardRefs">-</strong></div>
-            <div>Method bases<strong id="manifestMethodBases">-</strong></div>
-          </div>
-        </div>
-
-        <!-- Stats -->
-        <div style="margin-bottom: 20px">
-          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Stats</div>
-          <div class="stats-grid">
-            <div>Original size<strong id="statOrig">-</strong></div>
-            <div>Obfuscated size<strong id="statObf">-</strong></div>
-            <div>Size ratio<strong id="statRatio">-</strong></div>
-            <div>Elapsed<strong id="statElapsed">-</strong></div>
-            <div>Strings encrypted<strong id="statStrEnc">-</strong></div>
-            <div>Strings skipped<strong id="statStrSkip">-</strong></div>
-            <div>Numerics obfuscated<strong id="statNumObf">-</strong></div>
-            <div>VM statements<strong id="statVmStmt">-</strong></div>
-          </div>
-        </div>
-
-        <!-- Warnings (only shown if any) -->
-        <div id="reportWarningsWrap" class="hidden" style="margin-bottom: 20px">
-          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Warnings</div>
-          <ul class="warnings-list" id="reportWarningsList"></ul>
-        </div>
-
-        <!-- View generated code (collapsible) -->
-        <div>
-          <div class="collapsible-toggle" id="viewCodeToggle">
-            <span>View generated code <span id="viewCodeChars" style="color: rgba(255,255,255,0.4); font-weight: 400; margin-left: 6px"></span></span>
-            <span class="caret">â€º</span>
-          </div>
-          <div class="collapsible-body" id="viewCodeBody">
-            <pre style="margin-top: 12px"><code id="reportCodeOutput" class="language-lua"></code></pre>
-            <div class="row" style="margin-top: 12px">
-              <button type="button" id="copyReportCodeBtn" class="secondary small">Copy Generated Code</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- A/B compare result (hidden until compare runs) -->
-        <div id="abCompareResult" class="hidden" style="margin-top: 24px">
-          <hr class="card-divider" />
-          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">A/B comparison</div>
-          <div class="report-hero" style="grid-template-columns: 1fr 1fr; margin-bottom: 0">
-            <div class="report-hero-item">
-              <div class="label">This run</div>
-              <div style="font-size: 13px; color: rgba(255,255,255,0.85); line-height: 1.6">
-                <div><strong id="abThisLevel" style="color:#fff">-</strong></div>
-                <div id="abThisSize" style="color: rgba(255,255,255,0.55); font-size: 11px; margin-top: 4px">-</div>
-              </div>
-            </div>
-            <div class="report-hero-item">
-              <div class="label">Alternate</div>
-              <div style="font-size: 13px; color: rgba(255,255,255,0.85); line-height: 1.6">
-                <div><strong id="abAltLevel" style="color:#fff">-</strong></div>
-                <div id="abAltSize" style="color: rgba(255,255,255,0.55); font-size: 11px; margin-top: 4px">-</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- ============ CARD: PREVIEW (now uses Prism highlighting) ============ -->
-      <div id="previewCard" class="card hidden">
-        <div class="section-head">
-          <span class="icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-          </span>
-          <div class="title-block">
-            <h2>Obfuscated Preview</h2>
-            <span class="sub" id="previewStats"></span>
-          </div>
-          <div class="head-actions">
-            <button type="button" id="closePreviewBtn" class="secondary small">Close</button>
-          </div>
-        </div>
-
-        <pre><code id="previewOutput" class="language-lua"></code></pre>
-        <div class="row" style="margin-top: 14px">
-          <button type="button" id="copyPreviewBtn" class="secondary small">Copy Obfuscated Code</button>
-        </div>
-      </div>
-
-      <!-- ============ CARD: RESULT (hidden) ============ -->
-      <div id="resultCard" class="card hidden">
-        <div class="section-head">
-          <span class="icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-          </span>
-          <div class="title-block">
-            <h2>Script Saved</h2>
-            <span class="sub">Copy the loadstring below to run your script</span>
-          </div>
-        </div>
-
-        <div class="output-box small">
-          <code id="loadstringOutput"></code>
-        </div>
-        <div class="row" style="margin-top: 14px">
-          <button type="button" id="copyBtn" class="secondary small">Copy Loadstring</button>
-          <a href="saved.html" class="muted" style="font-size: 13px; align-self: center; text-decoration: none">View all saved scripts</a>
-        </div>
-      </div>
-
-      <!-- ============ CARD: LICENSE KEYS (unchanged) ============ -->
-      <div id="keysCard" class="card">
-        <div class="section-head">
-          <span class="icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-          </span>
-          <div class="title-block">
-            <h2>License Keys</h2>
-            <span class="sub">Applies only to scripts with license requirement enabled</span>
-          </div>
-        </div>
-
-        <div class="field">
-          <label for="keyScriptSelect">Script to protect</label>
-          <select id="keyScriptSelect"><option value="">-- Select a script --</option></select>
-        </div>
-
-        <div class="form-grid" style="margin-top: 18px">
-          <div class="field">
-            <label for="keyPlaceIds">Allowed PlaceIds <span class="hint">optional</span></label>
-            <input type="text" id="keyPlaceIds" placeholder="123456789, 987654321" />
-            <small>Comma-separated. Empty means any game.</small>
-          </div>
-          <div class="field">
-            <label for="keyMaxExec">Max executions <span class="hint">optional</span></label>
-            <input type="number" id="keyMaxExec" placeholder="e.g. 1000" min="1" />
-            <small>Empty means unlimited.</small>
-          </div>
-          <div class="field">
-            <label for="keyExpires">Expires on <span class="hint">optional</span></label>
-            <input type="datetime-local" id="keyExpires" />
-            <small>Empty means no expiration.</small>
-          </div>
-        </div>
-
-        <div class="row" style="margin-top: 18px">
-          <button type="button" id="generateKeyBtn" class="primary">Generate New Key</button>
-        </div>
-
-        <hr class="card-divider" />
-
-        <div class="section-head" style="border-bottom: 0; padding-bottom: 0; margin-bottom: 14px">
-          <div class="title-block">
-            <h2>Your Keys</h2>
-            <span class="sub">Copy the loader to share with your users</span>
-          </div>
-        </div>
-
-        <div id="keysList"><p class="muted">Loading...</p></div>
+      <div class="key-actions row" style="gap: 8px; flex-wrap: wrap">
+        <button data-action="copy-loader" data-key="${k.key}" data-script="${k.script_id}" class="secondary small">Copy Loader</button>
+        <button data-action="reset-hwid" data-key="${k.key}" class="secondary small" ${!k.hwid ? "disabled" : ""}>Reset HWID</button>
+        ${k.revoked
+          ? `<button data-action="unrevoke" data-key="${k.key}" class="secondary small">Unrevoke</button>`
+          : `<button data-action="revoke" data-key="${k.key}" class="secondary small">Kill (Revoke)</button>`}
+        <button data-action="delete" data-key="${k.key}" class="secondary small">Delete</button>
       </div>
     </div>
+  `;
+}
 
-    <!-- ============ v16 NEW: FORCE MAXIMUM CONFIRM MODAL ============ -->
-    <div class="modal-backdrop" id="forceMaxModal">
-      <div class="modal-dialog">
-        <h3 class="modal-title">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          Force maximum tier?
-        </h3>
-        <div class="modal-body">
-          You're about to override the auto-downgrade safety check. The obfuscator's
-          profile detected that your script uses <strong>executor hooks</strong>
-          (hookfunction, hookmetamethod, or deep debug reflection) that will
-          <strong>likely break</strong> when wrapped in the VM.
-          <br /><br />
-          Force-maximum should only be used if you've tested that your specific
-          script works with full virtualization, or if the profiler is mistaken
-          about your hook usage.
-        </div>
-        <label class="modal-check">
-          <input type="checkbox" id="forceMaxConfirmCheck" />
-          I understand this may break my script
-        </label>
-        <div class="modal-actions">
-          <button type="button" id="forceMaxCancelBtn" class="secondary">Cancel</button>
-          <button type="button" id="forceMaxProceedBtn" class="danger-solid" disabled>Proceed with force maximum</button>
-        </div>
-      </div>
-    </div>
+async function handleKeyAction(e) {
+  const action = e.currentTarget.dataset.action;
+  const key = e.currentTarget.dataset.key;
+  const scriptId = e.currentTarget.dataset.script;
+  if (action === "copy-loader") {
+    const loader = buildProtectedLoadstring(scriptId, key);
+    try {
+      await navigator.clipboard.writeText(loader);
+      const original = e.currentTarget.textContent;
+      e.currentTarget.textContent = "Copied!";
+      setTimeout(() => (e.currentTarget.textContent = original), 1500);
+    } catch (err) {
+      showMessage("Failed to copy loader.", "error");
+    }
+    return;
+  }
+  if (action === "reset-hwid") {
+    if (!confirm("Reset HWID for this key? User will be able to re-bind on next execution.")) return;
+    const { error } = await sb.from("user_keys").update({ hwid: null, first_used_at: null }).eq("key", key);
+    if (error) { showMessage("Reset failed: " + error.message, "error"); return; }
+    showMessage("HWID reset.", "success");
+    await loadUserKeys();
+    return;
+  }
+  if (action === "revoke") {
+    if (!confirm("Revoke this key? User will get an error on next execution.")) return;
+    const { error } = await sb.from("user_keys").update({ revoked: true }).eq("key", key);
+    if (error) { showMessage("Revoke failed: " + error.message, "error"); return; }
+    showMessage("Key revoked.", "success");
+    await loadUserKeys();
+    return;
+  }
+  if (action === "unrevoke") {
+    const { error } = await sb.from("user_keys").update({ revoked: false }).eq("key", key);
+    if (error) { showMessage("Unrevoke failed: " + error.message, "error"); return; }
+    showMessage("Key restored.", "success");
+    await loadUserKeys();
+    return;
+  }
+  if (action === "delete") {
+    if (!confirm("Delete this key permanently? This cannot be undone.")) return;
+    const { error } = await sb.from("user_keys").delete().eq("key", key);
+    if (error) { showMessage("Delete failed: " + error.message, "error"); return; }
+    showMessage("Key deleted.", "success");
+    await loadUserKeys();
+    return;
+  }
+}
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-lua.min.js"></script>
-    <script src="supabase-client.js"></script>
-    <script src="dashboard.js"></script>
-    <script src="anti-tamper.js"></script>
-  </body>
-</html>
+generateKeyBtn?.addEventListener("click", async () => {
+  const scriptId = keyScriptSelect.value;
+  if (!scriptId) { showMessage("Select a script first.", "error"); return; }
+  const key = generateLicenseKey();
+  const placeIdsRaw = (keyPlaceIdsInput.value || "").trim();
+  const placeIds = placeIdsRaw
+    ? placeIdsRaw.split(",").map((s) => Number(s.trim())).filter((n) => n > 0)
+    : null;
+  const maxExec = keyMaxExecInput.value ? Number(keyMaxExecInput.value) : null;
+  const expiresAt = keyExpiresInput.value ? new Date(keyExpiresInput.value).toISOString() : null;
+
+  generateKeyBtn.disabled = true;
+  const original = generateKeyBtn.textContent;
+  generateKeyBtn.textContent = "Creating...";
+  try {
+    const { error } = await sb.from("user_keys").insert({
+      key, script_id: scriptId, owner_id: currentUser.id,
+      place_id_whitelist: placeIds, max_executions: maxExec,
+      expires_at: expiresAt, execution_count: 0, revoked: false,
+    });
+    if (error) throw error;
+    showMessage(`Key created: ${key}`, "success");
+    keyPlaceIdsInput.value = "";
+    keyMaxExecInput.value = "";
+    keyExpiresInput.value = "";
+    await loadUserKeys();
+  } catch (err) {
+    showMessage("Failed to create key: " + err.message, "error");
+  } finally {
+    generateKeyBtn.disabled = false;
+    generateKeyBtn.textContent = original;
+  }
+});
+
+// ============================================================================
+// UTIL
+// ============================================================================
+function showMessage(text, type = "info") {
+  messageDiv.textContent = text;
+  messageDiv.className = `message message-${type}`;
+  messageDiv.classList.remove("hidden");
+}
+function hideMessage() { messageDiv.classList.add("hidden"); }
