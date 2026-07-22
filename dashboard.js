@@ -37,7 +37,7 @@ const referenceUpload = document.getElementById("referenceUpload");
 const referenceUploadBtn = document.getElementById("referenceUploadBtn");
 const referenceClearBtn = document.getElementById("referenceClearBtn");
 const referenceFileNameEl = document.getElementById("referenceFileName");
-let referenceCode = "";  // in-memory only Ã¢â‚¬â€ not persisted
+let referenceCode = "";  // in-memory only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â not persisted
 let referenceFileName = "";
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -486,9 +486,14 @@ function renderReport(report, generatedCode) {
   document.getElementById("statNumObf").textContent = s.numericConstsObfuscated != null ? s.numericConstsObfuscated : "-";
   document.getElementById("statVmStmt").textContent = s.vmCompiledStatements != null ? s.vmCompiledStatements : "0";
 
-  // Warnings
+  // Warnings â€” v2: with Copy all + Console toggle
   const warningsWrap = document.getElementById("reportWarningsWrap");
   const warningsList = document.getElementById("reportWarningsList");
+  const warningsCount = document.getElementById("reportWarningsCount");
+  const reportConsole = document.getElementById("reportConsole");
+  const copyWarningsBtn = document.getElementById("copyWarningsBtn");
+  const toggleConsoleBtn = document.getElementById("toggleConsoleBtn");
+
   if (report.warnings && report.warnings.length > 0) {
     warningsWrap.classList.remove("hidden");
     warningsList.innerHTML = "";
@@ -497,8 +502,77 @@ function renderReport(report, generatedCode) {
       li.textContent = w;
       warningsList.appendChild(li);
     }
+    if (warningsCount) {
+      warningsCount.textContent = "(" + report.warnings.length + ")";
+    }
+
+    // Build console text: warnings + stage flow + timings + stats summary
+    const consoleLines = [];
+    consoleLines.push("=== OBFUSCATION REPORT ===");
+    consoleLines.push("Requested: " + (report.requestedLevel || "?") + "  |  Applied: " + (report.actualLevel || "?"));
+    if (report.wasDowngraded) {
+      consoleLines.push("!!! DOWNGRADED: " + (report.downgradeReason || "(no reason given)"));
+    }
+    consoleLines.push("");
+    consoleLines.push("=== STATS ===");
+    if (report.stats) {
+      for (const k of Object.keys(report.stats)) {
+        consoleLines.push("  " + k + ": " + JSON.stringify(report.stats[k]));
+      }
+    }
+    if (report.stageTimings && Object.keys(report.stageTimings).length > 0) {
+      consoleLines.push("");
+      consoleLines.push("=== STAGE TIMINGS (ms) ===");
+      for (const k of Object.keys(report.stageTimings)) {
+        consoleLines.push("  " + k + ": " + report.stageTimings[k] + " ms");
+      }
+    }
+    if (report.stagesSucceeded && report.stagesSucceeded.length > 0) {
+      consoleLines.push("");
+      consoleLines.push("=== STAGES SUCCEEDED ===");
+      for (const s of report.stagesSucceeded) consoleLines.push("  âœ“ " + s);
+    }
+    if (report.stagesSkipped && report.stagesSkipped.length > 0) {
+      consoleLines.push("");
+      consoleLines.push("=== STAGES SKIPPED ===");
+      for (const s of report.stagesSkipped) consoleLines.push("  âœ— " + s);
+    }
+    consoleLines.push("");
+    consoleLines.push("=== WARNINGS (" + report.warnings.length + ") ===");
+    report.warnings.forEach((w, i) => {
+      consoleLines.push("[" + (i + 1) + "] " + w);
+      consoleLines.push("");
+    });
+    const consoleText = consoleLines.join("\n");
+    reportConsole.textContent = consoleText;
+
+    // Wire Copy all â€” copies raw warning list (what most users want)
+    if (copyWarningsBtn && !copyWarningsBtn._wired) {
+      copyWarningsBtn._wired = true;
+      copyWarningsBtn.addEventListener("click", async () => {
+        const text = report.warnings.map((w, i) => "[" + (i + 1) + "] " + w).join("\n\n");
+        try {
+          await navigator.clipboard.writeText(text);
+          const orig = copyWarningsBtn.textContent;
+          copyWarningsBtn.textContent = "Copied!";
+          setTimeout(() => { copyWarningsBtn.textContent = orig; }, 1500);
+        } catch (e) {
+          copyWarningsBtn.textContent = "Copy failed";
+        }
+      });
+    }
+
+    // Wire console toggle
+    if (toggleConsoleBtn && !toggleConsoleBtn._wired) {
+      toggleConsoleBtn._wired = true;
+      toggleConsoleBtn.addEventListener("click", () => {
+        const hidden = reportConsole.classList.toggle("hidden");
+        toggleConsoleBtn.textContent = hidden ? "Show console" : "Hide console";
+      });
+    }
   } else {
     warningsWrap.classList.add("hidden");
+    if (warningsCount) warningsCount.textContent = "";
   }
 
   // Phase 2a: refresh override hints based on the new profile
