@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.17 - Diagnostic serializer (Option B: surface unknown node types)
+// AzureVM Obfuscator v25.18 - Diagnostic warnings v2 (shows invalid-Lua snippet + column)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1229,6 +1229,24 @@ function serialize(node) {
 // SECTION 10 - Validator + parser helper
 // ============================================================================
 
+// v25.18 diagnostic: pull ~140 chars around a (line,column) so warnings can
+// show the actual invalid-Lua snippet instead of just "at line N".
+function _snippetAround(code, line, column) {
+  if (!code || typeof code !== "string" || !line) return "";
+  const lines = code.split("\n");
+  const lineIdx = Math.max(0, (line | 0) - 1);
+  const targetLine = lines[lineIdx] || "";
+  const col = Math.max(0, (column | 0) - 1);
+  const s = Math.max(0, col - 60);
+  const e = Math.min(targetLine.length, col + 60);
+  let snip = targetLine.slice(s, e);
+  snip = snip.replace(/[\x00-\x1f\x7f]/g, ch =>
+    "\\x" + ch.charCodeAt(0).toString(16).padStart(2, "0"));
+  const caretPos = col - s;
+  return " snippet=[" + snip + "] caret@" + caretPos +
+         " (lineLen=" + targetLine.length + ")";
+}
+
 function validate(code) {
   try {
     luaparse.parse(code, { luaVersion: "5.3", comments: false });
@@ -1616,7 +1634,8 @@ function runStage(name, ast, ctx, fn, report) {
     const check = validate(code);
     if (!check.ok) {
       report.warn("Stage \"" + name + "\" produced invalid Lua (" +
-                  check.error + " at line " + check.line + ") - skipped");
+                  check.error + " at " + (check.line||"?") + ":" + (check.column||"?") + ")" +
+                  _snippetAround(code, check.line, check.column) + " - skipped");
       report.stagesSkipped.push(name);
       return { ok: false };
     }
@@ -1839,7 +1858,7 @@ function _pipeline(rawCode, level, options, report) {
             report.stats.vmStatements = wrappedCount;
           }
         } else {
-          report.warn("VM wrap produced invalid Lua (" + chk.error + ") - skipped");
+          report.warn("VM wrap produced invalid Lua (" + chk.error + " at " + (chk.line||"?") + ":" + (chk.column||"?") + ")" + _snippetAround(combined, chk.line, chk.column) + " - skipped");
           report.stagesSkipped.push("vm-wrap");
         }
       }
@@ -1937,7 +1956,7 @@ function _pipeline(rawCode, level, options, report) {
           wrapped = combined;
           outerVmActive = true;
         } else {
-          report.warn("Outer VM produced invalid Lua (" + chk.error + ") - falling back to inner-only");
+          report.warn("Outer VM produced invalid Lua (" + chk.error + " at " + (chk.line||"?") + ":" + (chk.column||"?") + ")" + _snippetAround(combined, chk.line, chk.column) + " - falling back to inner-only");
           // Fall back to plain inner-VM prepend (v25.6 behavior).
           wrapped = innerBcTable + " " + dispatcherSrc + " " + wrapped;
         }
@@ -2031,7 +2050,7 @@ function _pipeline(rawCode, level, options, report) {
           report.layers.antiDebugger = true;
           report.stagesSucceeded.push("anti-debugger");
         } else {
-          report.warn("Anti-debugger produced invalid Lua (" + chk.error + ") - skipped");
+          report.warn("Anti-debugger produced invalid Lua (" + chk.error + " at " + (chk.line||"?") + ":" + (chk.column||"?") + ")" + _snippetAround(withAD, chk.line, chk.column) + " - skipped");
           report.stagesSkipped.push("anti-debugger");
         }
       } catch (e) {
@@ -2058,7 +2077,7 @@ function _pipeline(rawCode, level, options, report) {
           report.layers.antiDump = true;
           report.stagesSucceeded.push("anti-dump");
         } else {
-          report.warn("Anti-dump produced invalid Lua (" + chk.error + ") - skipped");
+          report.warn("Anti-dump produced invalid Lua (" + chk.error + " at " + (chk.line||"?") + ":" + (chk.column||"?") + ")" + _snippetAround(withAX, chk.line, chk.column) + " - skipped");
           report.stagesSkipped.push("anti-dump");
         }
       } catch (e) {
@@ -2093,7 +2112,7 @@ function _pipeline(rawCode, level, options, report) {
           report.layers.antiTamper = true;
           report.stagesSucceeded.push("anti-tamper");
         } else {
-          report.warn("Anti-tamper produced invalid Lua (" + chk.error + ") - skipped");
+          report.warn("Anti-tamper produced invalid Lua (" + chk.error + " at " + (chk.line||"?") + ":" + (chk.column||"?") + ")" + _snippetAround(withAT, chk.line, chk.column) + " - skipped");
           report.stagesSkipped.push("anti-tamper");
         }
       } catch (e) {
@@ -2115,7 +2134,7 @@ function _pipeline(rawCode, level, options, report) {
       report.layers.integrityCheck = true;
       report.stagesSucceeded.push("integrity-check");
     } else {
-      report.warn("Integrity check produced invalid Lua (" + chk.error + ") - skipped");
+      report.warn("Integrity check produced invalid Lua (" + chk.error + " at " + (chk.line||"?") + ":" + (chk.column||"?") + ")" + _snippetAround(withIntegrity, chk.line, chk.column) + " - skipped");
       report.stagesSkipped.push("integrity-check");
     }
   } catch (e) {
@@ -2537,7 +2556,7 @@ async function obfuscateWithStream(luaCode, level, userId, options) {
       if (chk.ok) {
         wrapped = withAD;
       } else {
-        report.warn("Anti-debugger wrap produced invalid Lua - skipped");
+        report.warn("Anti-debugger wrap produced invalid Lua (" + (chk.error||"?") + " at " + (chk.line||"?") + ":" + (chk.column||"?") + ")" + _snippetAround(withAD, chk.line, chk.column) + " - skipped");
         report.layers.antiDebugger = false;
       }
     } catch (e) {
@@ -2552,7 +2571,7 @@ async function obfuscateWithStream(luaCode, level, userId, options) {
       if (chk.ok) {
         wrapped = withIntegrity;
       } else {
-        report.warn("Integrity wrap produced invalid Lua - skipped");
+        report.warn("Integrity wrap produced invalid Lua (" + (chk.error||"?") + " at " + (chk.line||"?") + ":" + (chk.column||"?") + ")" + _snippetAround(withIntegrity, chk.line, chk.column) + " - skipped");
         report.layers.integrityCheck = false;
       }
     } catch (e) {
