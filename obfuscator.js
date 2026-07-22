@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.4 - + Anti-tamper wrapper (relaxed, 5s timing threshold)
+// AzureVM Obfuscator v25.5 - + Byte-level XOR (4-byte mask, additive on string encryption)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -592,21 +592,46 @@ function encodeNumber(n) {
 // SECTION 6 - String encryption
 // ============================================================================
 
-function encryptStringBytes(str, key, shift) {
+function encryptStringBytes(str, key, shift, mask) {
+  // mask: optional 4-byte array [m0, m1, m2, m3]. Applied via mask[i%4]
+  // AFTER the existing per-index XOR. When absent OR all zeros, behaves
+  // identically to the pre-v25.5 encoder (backward-compatible).
+  const m0 = mask ? (mask[0] & 0xff) : 0;
+  const m1 = mask ? (mask[1] & 0xff) : 0;
+  const m2 = mask ? (mask[2] & 0xff) : 0;
+  const m3 = mask ? (mask[3] & 0xff) : 0;
+  const mArr = [m0, m1, m2, m3];
   const bytes = [];
   for (let i = 0; i < str.length; i++) {
     const c = str.charCodeAt(i);
     const k = (key + ((i + shift) % 11)) & 0xff;
-    bytes.push((c ^ k) & 0xff);
+    const enc = (c ^ k) & 0xff;
+    bytes.push((enc ^ mArr[i & 3]) & 0xff);
   }
   return bytes;
 }
 
-function makeStringDecoder(fnName, key, shift) {
+function makeStringDecoder(fnName, key, shift, mask) {
+  // If no mask (or all zeros), emit the legacy decoder verbatim.
+  const hasMask = mask && (mask[0] || mask[1] || mask[2] || mask[3]);
+  if (!hasMask) {
+    return "local function " + fnName + "(t) " +
+      "local k=" + key + " local s='' " +
+      "for i=1,#t do " +
+        "s=s..string.char(bit32.bxor(t[i],(k+((i-1+" + shift + ")%11)))%256) " +
+      "end return s end";
+  }
+  // Mask-enhanced decoder. Emits a small mask lookup table then inverts
+  // the mask XOR BEFORE the per-index XOR (opposite order of encoding).
+  const m0 = mask[0] & 0xff, m1 = mask[1] & 0xff;
+  const m2 = mask[2] & 0xff, m3 = mask[3] & 0xff;
   return "local function " + fnName + "(t) " +
-    "local k=" + key + " local s='' " +
+    "local k=" + key + " " +
+    "local m={[0]=" + m0 + "," + m1 + "," + m2 + "," + m3 + "} " +
+    "local s='' " +
     "for i=1,#t do " +
-      "s=s..string.char(bit32.bxor(t[i],(k+((i-1+" + shift + ")%11)))%256) " +
+      "local b=bit32.bxor(t[i],m[(i-1)%4]) " +
+      "s=s..string.char(bit32.bxor(b,(k+((i-1+" + shift + ")%11)))%256) " +
     "end return s end";
 }
 
@@ -820,7 +845,7 @@ function walkTransform(node, ctx) {
   if (ctx.encStrings && node.type === "StringLiteral"
       && typeof node.value === "string" && !node.__obf) {
     if (_shouldEncrypt(node.value, ctx.manifest, ctx.strict)) {
-      const bytes = encryptStringBytes(node.value, ctx.encKey, ctx.encShift);
+      const bytes = encryptStringBytes(node.value, ctx.encKey, ctx.encShift, ctx.xorMask);
       node.__obf = { type: "str", bytes };
       ctx.strMeta.encrypted++;
     } else {
@@ -1426,6 +1451,19 @@ function _pipeline(rawCode, level, options, report) {
   const strMeta = { encrypted: 0, skipped: 0 };
   const strict = effectiveLevel === "maximum";
 
+  // Byte-level XOR mask (v25.5). Maximum tier only, and only when the
+  // payload does NOT use hooks/reflection (same smart-skip contract as
+  // the other v25.x guards). When the mask stays null, encryptStringBytes
+  // and makeStringDecoder emit the pre-v25.5 output byte-for-byte, so
+  // enabling/disabling this layer is a pure superset -- never a break.
+  let xorMask = null;
+  if (effectiveLevel === "maximum" &&
+      !profile.hasHookfunction && !profile.hasHookmetamethod &&
+      !profile.hasRuntimeReflection) {
+    const buf = crypto.randomBytes(4);
+    xorMask = [buf[0], buf[1], buf[2], buf[3]];
+  }
+
   // Stage: numeric encoding
   {
     const ctx = { encNumbers: true, manifest, strMeta: { encrypted: 0, skipped: 0 } };
@@ -1443,6 +1481,7 @@ function _pipeline(rawCode, level, options, report) {
     const ctx = {
       encStrings: true, manifest, strict,
       encKey, encShift, decoderFn,
+      xorMask,
       strMeta: local,
     };
     const r = runStage("string-encryption", goodAst, ctx, walkTransform, report);
@@ -1467,10 +1506,16 @@ function _pipeline(rawCode, level, options, report) {
   }
 
   // Wrap: decoder + optional poison pool.
+  // v25.5: pass xorMask into makeStringDecoder. When mask is null the
+  // decoder is byte-for-byte identical to the pre-v25.5 version.
   let wrapped = goodCode;
   if (report.layers.stringEncryption) {
-    const decoderCode = makeStringDecoder(decoderFn, encKey, encShift);
+    const decoderCode = makeStringDecoder(decoderFn, encKey, encShift, xorMask);
     wrapped = decoderCode + " local _D=" + decoderFn + " " + wrapped;
+    if (xorMask) {
+      report.layers.byteLevelXor = true;
+      report.stagesSucceeded.push("byte-level-xor");
+    }
   }
   if (effectiveLevel === "maximum") {
     const poolVar = "_CP" + randHexName(2).slice(3);
@@ -1590,6 +1635,7 @@ function _pipeline(rawCode, level, options, report) {
     wrapped = goodCode;
     report.layers.constantPool = false;
     report.layers.stringEncryption = false;
+    report.layers.byteLevelXor = false;
     report.layers.antiDebugger = false;
     report.layers.antiDump = false;
     report.layers.antiTamper = false;
