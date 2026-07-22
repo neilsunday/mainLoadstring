@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.29-diagnostic - Luau walkers DISABLED for bug isolation
+// AzureVM Obfuscator v25.30-forensic - v25.28 + wide-snippet capture on stage failure
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -560,8 +560,7 @@ function preprocess(rawCode) {
   // paren-balance walker (Option 2)." This IS that walker. Instead of a regex
   // that miscounts nested parens, we scan token-by-token, track paren depth,
   // and only strip `: Type` inside function parameter lists.
-  // DIAGNOSTIC v25.29: param stripper disabled
-  // work = _stripLuauParamTypes(work);
+  work = _stripLuauParamTypes(work);
   changesMarker: /* v25.19-comment-preserved-below */
   // (b-legacy) function params (name: Type, ...) -- ORIGINAL v25.19 removal note.
   // The old paren-walker regex mangled nested calls like fn((a or {})) by
@@ -578,8 +577,7 @@ function preprocess(rawCode) {
   // Luau test case (regex stripped ":method" because "local" followed).
   // The new implementation only strips return-type annotations that appear
   // immediately after a function's parameter-list closing paren.
-  // DIAGNOSTIC v25.29: return-type stripper disabled
-  // work = _stripLuauReturnTypes(work);
+  work = _stripLuauReturnTypes(work);
   // (d) type Foo = ...
   work = work.replace(/^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:<[^>]*>)?\s*=.*$/gm, "");
   // (e) export type ...
@@ -1991,6 +1989,7 @@ class ObfuscationReport {
     };
     // v25.23: per-stage timing so we can see exactly where time is spent.
     this.stageTimings = {};
+    this.stageDebug = [];  // v25.30 forensic captures
     this.warnings = [];
     this.stagesSucceeded = [];
     this.stagesSkipped = [];
@@ -2047,22 +2046,32 @@ function runStage(name, ast, ctx, fn, report) {
   const _t0 = Date.now();
   try {
     if (_SAFE_STAGES.has(name)) {
-      // Fast path: mutate in place (safe -- only __obf markers), skip validate.
       fn(ast, ctx);
       const code = serialize(ast);
       report.stagesSucceeded.push(name);
       if (report.stageTimings) report.stageTimings[name] = Date.now() - _t0;
       return { ok: true, ast, code };
     }
-    // Slow path: clone + validate for stages that can restructure the AST.
     const clone = cloneAst(ast);
     fn(clone, ctx);
     const code = serialize(clone);
     const check = validate(code);
     if (!check.ok) {
+      // v25.30 FORENSIC: capture 200 bytes before + 200 after caret from the
+      // generated code, so we can see EXACTLY what the stage produced.
+      const caretPos = _columnToCharPos(code, check.line || 1, check.column || 0);
+      const wide = _wideSnippet(code, caretPos, 200);
       report.warn("Stage \"" + name + "\" produced invalid Lua (" +
                   check.error + " at " + (check.line||"?") + ":" + (check.column||"?") + ")" +
                   _snippetAround(code, check.line, check.column) + " - skipped");
+      // Attach the forensic block to a separate report field
+      if (!report.stageDebug) report.stageDebug = [];
+      report.stageDebug.push({
+        stage: name,
+        caretByteOffset: caretPos,
+        outputTotalLen: code.length,
+        wideSnippet: wide,
+      });
       report.stagesSkipped.push(name);
       if (report.stageTimings) report.stageTimings[name] = Date.now() - _t0;
       return { ok: false };
@@ -2076,6 +2085,30 @@ function runStage(name, ast, ctx, fn, report) {
     if (report.stageTimings) report.stageTimings[name] = Date.now() - _t0;
     return { ok: false };
   }
+}
+
+// v25.30 helpers for forensic logging
+function _columnToCharPos(code, line, col) {
+  // luaparse errors use 1-indexed line and 0-indexed column
+  if (line <= 1) return Math.max(0, col);
+  const lines = code.split("\n");
+  let pos = 0;
+  for (let i = 0; i < line - 1 && i < lines.length; i++) pos += lines[i].length + 1;
+  return pos + col;
+}
+function _wideSnippet(code, pos, radius) {
+  const s = Math.max(0, pos - radius);
+  const e = Math.min(code.length, pos + radius);
+  const before = code.substring(s, pos);
+  const at = code.substring(pos, pos + 1);
+  const after = code.substring(pos + 1, e);
+  return {
+    before: before,
+    atChar: at,
+    after: after,
+    absoluteStart: s,
+    absoluteEnd: e,
+  };
 }
 
 function _pipeline(rawCode, level, options, report) {
