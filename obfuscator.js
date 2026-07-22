@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.16 - CRLF normalization + no tier downgrade (Fix 1+2)
+// AzureVM Obfuscator v25.17 - Diagnostic serializer (Option B: surface unknown node types)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1215,7 +1215,13 @@ function serialize(node) {
       });
       return "{" + fs.join(",") + "}";
     }
-    default: return "";
+    default:
+      // v25.17 Option B diagnostic: surface unknown node types instead of
+      // silently emitting an empty string. Every caller of serialize() sits
+      // inside a try/catch that routes errors into report.warn(), so this
+      // change makes the failing AST node type visible in the dashboard
+      // Warnings panel instead of producing invalid Lua downstream.
+      throw new Error("serialize: unhandled node type \"" + (node && node.type) + "\"");
   }
 }
 
