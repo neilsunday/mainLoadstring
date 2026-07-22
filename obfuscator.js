@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.2 - Anti-debugger wired into _pipeline (server path)
+// AzureVM Obfuscator v25.3 - + Anti-dump (relaxed, silent-exit)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1014,6 +1014,37 @@ function generatePoisonPool(varName, poolKey, poolShift) {
 // a crash.
 // ============================================================================
 
+function generateAntiDump() {
+  // Silent-exit anti-dump. Runs ONCE at load time before the payload.
+  // Detects:
+  //   1. `getscriptbytecode` global exists AND is callable (bytecode dumper)
+  //   2. `decompile` global exists AND is callable (decompiler active)
+  // Both probes are pcall-wrapped. If `type()` itself throws (impossible on
+  // any real executor but defensively wrapped anyway), we treat that as
+  // "environment blocks introspection" -- safe, no trigger. Only a positive
+  // type == "function" reading triggers silent exit.
+  const fn = randHexName(3);
+  const okVar = randHexName(2);
+  const tVar = randHexName(2);
+  return "local function " + fn + "() " +
+    // Probe 1: getscriptbytecode. Uses rawget on the global env so we avoid
+    // firing __index metamethods that a sandbox might set up. If the value
+    // exists and its type is "function", a dumper is exposed.
+    "local " + okVar + "," + tVar + "=pcall(function() " +
+    "local g=rawget(getfenv(0),\"getscriptbytecode\") " +
+    "return g~=nil and type(g)==\"function\" end) " +
+    "if " + okVar + " and " + tVar + "==true then return true end " +
+    // Probe 2: decompile, same shape.
+    "local " + okVar + "2," + tVar + "2=pcall(function() " +
+    "local g=rawget(getfenv(0),\"decompile\") " +
+    "return g~=nil and type(g)==\"function\" end) " +
+    "if " + okVar + "2 and " + tVar + "2==true then return true end " +
+    "return false " +
+    "end " +
+    // Silent exit: top-level return, script does nothing further.
+    "if " + fn + "() then return end";
+}
+
 function generateAntiDebugger() {
   // Silent-exit anti-debugger. Runs ONCE at load time before the payload.
   // Detects:
@@ -1433,10 +1464,38 @@ function _pipeline(rawCode, level, options, report) {
     }
   }
 
+  // Stage: anti-dump (silent-exit guard against bytecode dumpers).
+  // Only maximum tier, and only when the payload does NOT itself use
+  // hooks/reflection -- our probes for getscriptbytecode/decompile would
+  // false-positive on scripts that legitimately look them up.
+  if (effectiveLevel === "maximum") {
+    if (profile.hasHookfunction || profile.hasHookmetamethod ||
+        profile.hasRuntimeReflection) {
+      report.warn("Anti-dump skipped: script uses hooks/reflection (would false-positive)");
+      report.stagesSkipped.push("anti-dump");
+    } else {
+      try {
+        const withAX = generateAntiDump() + " " + wrapped;
+        const chk = validate(withAX);
+        if (chk.ok) {
+          wrapped = withAX;
+          report.layers.antiDump = true;
+          report.stagesSucceeded.push("anti-dump");
+        } else {
+          report.warn("Anti-dump produced invalid Lua (" + chk.error + ") - skipped");
+          report.stagesSkipped.push("anti-dump");
+        }
+      } catch (e) {
+        report.warn("Anti-dump threw: " + e.message + " - skipped");
+        report.stagesSkipped.push("anti-dump");
+      }
+    }
+  }
+
   // Stage: integrity check (payload tamper detection).
-  // Prepended AFTER decoder + pool + anti-debugger so the checksum covers
-  // all wrapper code too. Wrapped in try/validate so a bad checksum output
-  // can't kill the run.
+  // Prepended AFTER decoder + pool + anti-debugger + anti-dump so the
+  // checksum covers all wrapper code too. Wrapped in try/validate so a bad
+  // checksum output can't kill the run.
   try {
     const withIntegrity = generateIntegrityCheck(wrapped) + " " + wrapped;
     const chk = validate(withIntegrity);
@@ -1463,6 +1522,7 @@ function _pipeline(rawCode, level, options, report) {
     report.layers.constantPool = false;
     report.layers.stringEncryption = false;
     report.layers.antiDebugger = false;
+    report.layers.antiDump = false;
     report.layers.integrityCheck = false;
   }
 
