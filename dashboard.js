@@ -37,7 +37,7 @@ const referenceUpload = document.getElementById("referenceUpload");
 const referenceUploadBtn = document.getElementById("referenceUploadBtn");
 const referenceClearBtn = document.getElementById("referenceClearBtn");
 const referenceFileNameEl = document.getElementById("referenceFileName");
-let referenceCode = "";  // in-memory only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â not persisted
+let referenceCode = "";  // in-memory only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â not persisted
 let referenceFileName = "";
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -97,6 +97,37 @@ const keyPlaceIdsInput = document.getElementById("keyPlaceIds");
 const keyMaxExecInput = document.getElementById("keyMaxExec");
 const keyExpiresInput = document.getElementById("keyExpires");
 
+// v25 FIX: Bulletproof safe-DOM helpers. Every DOM interaction routes through
+// these to no-op silently when an element is missing, preventing the
+// "Cannot read properties of null (reading 'classList')" family of crashes.
+function _cls(el, action, ...classes) {
+  if (!el || !el.classList) return;
+  try { el.classList[action](...classes); } catch (_) {}
+}
+function _clsAdd(el, ...cs) { _cls(el, "add", ...cs); }
+function _clsRemove(el, ...cs) { _cls(el, "remove", ...cs); }
+function _clsToggle(el, cls, force) {
+  if (!el || !el.classList) return;
+  try {
+    if (typeof force === "boolean") _clsToggle(el, cls, force);
+    else _clsToggle(el, cls);
+  } catch (_) {}
+}
+function _setText(id, value) {
+  const el = typeof id === "string" ? document.getElementById(id) : id;
+  if (el) el.textContent = value;
+}
+function _setHtml(el, value) {
+  if (el) el.innerHTML = value;
+}
+function _scroll(el, opts) {
+  if (el && el.scrollIntoView) try { el.scrollIntoView(opts); } catch (_) {}
+}
+function _click(el, handler) {
+  if (el && el.addEventListener) el.addEventListener("click", handler);
+}
+function _focus(el) { if (el && el.focus) try { el.focus(); } catch (_) {} }
+
 let currentUser = null;
 let lastPreviewedCode = "";
 let lastReport = null;         // v16: cached most recent report
@@ -113,18 +144,18 @@ let lastSavedScriptId = null;
 })();
 
 logoutBtn?.addEventListener("click", async () => {
-  logoutBtn.disabled = true;
-  logoutBtn.textContent = "Logging out...";
+  if (logoutBtn) logoutBtn.disabled = true;
+  if (logoutBtn) logoutBtn.textContent = "Logging out...";
   try { await sb.auth.signOut(); } catch (err) {}
   finally { window.location.href = "index.html"; }
 });
 
 function updateUI() {
   const len = scriptCodeInput.value.length;
-  charCountEl.textContent = `${len.toLocaleString()} characters`;
+  if (charCountEl) charCountEl.textContent = `${len.toLocaleString()} characters`;
   const hasCode = len > 0;
-  saveBtn.disabled = !hasCode;
-  previewBtn.disabled = !hasCode;
+  if (saveBtn) saveBtn.disabled = !hasCode;
+  if (previewBtn) previewBtn.disabled = !hasCode;
 }
 
 scriptCodeInput.addEventListener("input", updateUI);
@@ -150,9 +181,9 @@ referenceUpload?.addEventListener("change", (e) => {
   reader.onload = (event) => {
     referenceCode = event.target.result;
     referenceFileName = file.name;
-    referenceFileNameEl.textContent = "Reference: " + file.name + " (" +
+    if (referenceFileNameEl) referenceFileNameEl.textContent = "Reference: " + file.name + " (" +
       referenceCode.length.toLocaleString() + " chars)";
-    referenceClearBtn.classList.remove("hidden");
+    _clsRemove(referenceClearBtn, "hidden");
     showMessage("Reference file loaded. It will be used for the next obfuscation.", "success");
   };
   reader.onerror = () => showMessage("Failed to read reference file.", "error");
@@ -163,8 +194,8 @@ referenceClearBtn?.addEventListener("click", () => {
   referenceCode = "";
   referenceFileName = "";
   referenceUpload.value = "";
-  referenceFileNameEl.textContent = "";
-  referenceClearBtn.classList.add("hidden");
+  if (referenceFileNameEl) referenceFileNameEl.textContent = "";
+  _clsAdd(referenceClearBtn, "hidden");
   showMessage("Reference cleared.", "info");
 });
 
@@ -178,7 +209,7 @@ fileUpload.addEventListener("change", (e) => {
   const reader = new FileReader();
   reader.onload = (event) => {
     scriptCodeInput.value = event.target.result;
-    fileNameEl.textContent = `Loaded: ${file.name}`;
+    if (fileNameEl) fileNameEl.textContent = `Loaded: ${file.name}`;
     if (!scriptNameInput.value.trim()) {
       const nameWithoutExt = file.name.replace(/\.(lua|txt)$/i, "");
       scriptNameInput.value = nameWithoutExt;
@@ -195,12 +226,12 @@ clearBtn.addEventListener("click", () => {
   if (confirm("Clear the script editor?")) {
     scriptNameInput.value = "";
     scriptCodeInput.value = "";
-    fileNameEl.textContent = "";
+    if (fileNameEl) fileNameEl.textContent = "";
     fileUpload.value = "";
     hideMessage();
-    resultCard.classList.add("hidden");
-    previewCard.classList.add("hidden");
-    reportCard.classList.add("hidden");
+    _clsAdd(resultCard, "hidden");
+    _clsAdd(previewCard, "hidden");
+    _clsAdd(reportCard, "hidden");
     updateUI();
   }
 });
@@ -295,13 +326,13 @@ async function obfuscateCode(code, level, options) {
 function openForceMaxModal() {
   return new Promise((resolve) => {
     forceMaxConfirmCheck.checked = false;
-    forceMaxProceedBtn.disabled = true;
-    forceMaxModal.classList.add("open");
+    if (forceMaxProceedBtn) forceMaxProceedBtn.disabled = true;
+    _clsAdd(forceMaxModal, "open");
     const onCheck = () => { forceMaxProceedBtn.disabled = !forceMaxConfirmCheck.checked; };
     const onProceed = () => { cleanup(); resolve(true); };
     const onCancel = () => { cleanup(); resolve(false); };
     const cleanup = () => {
-      forceMaxModal.classList.remove("open");
+      _clsRemove(forceMaxModal, "open");
       forceMaxConfirmCheck.removeEventListener("change", onCheck);
       forceMaxProceedBtn.removeEventListener("click", onProceed);
       forceMaxCancelBtn.removeEventListener("click", onCancel);
@@ -373,7 +404,7 @@ async function obfuscateCodeLive(code, level, options) {
       _liveState.stages = d.stages || [];
       renderLiveStages(_liveState.stages);
       const lvl = (d.effectiveLevel || d.level || "").toUpperCase();
-      liveSubtitleEl.textContent = "Applying " + lvl + " tier - " +
+      if (liveSubtitleEl) liveSubtitleEl.textContent = "Applying " + lvl + " tier - " +
         _liveState.stages.length + " protection layer" +
         (_liveState.stages.length === 1 ? "" : "s") + " queued.";
       if (d.wasDowngraded && d.downgradeReason) {
@@ -416,8 +447,8 @@ async function obfuscateCodeLive(code, level, options) {
       const d = JSON.parse(ev.data);
       _liveState.finalPayload = d;
       setLiveStatus("Done - " + ((d.report && d.report.stats && d.report.stats.elapsedMs) || 0) + " ms total");
-      liveCancelBtn.classList.add("hidden");
-      liveCloseBtn.classList.remove("hidden");
+      _clsAdd(liveCancelBtn, "hidden");
+      _clsRemove(liveCloseBtn, "hidden");
       cleanup("complete");
       if (d && typeof d.code === "string") {
         resolve({
@@ -435,8 +466,8 @@ async function obfuscateCodeLive(code, level, options) {
     es.addEventListener("session-error", (ev) => {
       const d = JSON.parse(ev.data);
       setLiveStatus("Error: " + (d.error || "unknown"));
-      liveCancelBtn.classList.add("hidden");
-      liveCloseBtn.classList.remove("hidden");
+      _clsAdd(liveCancelBtn, "hidden");
+      _clsRemove(liveCloseBtn, "hidden");
       cleanup("error");
       reject(new Error(d.error || "Streaming pipeline failed"));
     });
@@ -444,8 +475,8 @@ async function obfuscateCodeLive(code, level, options) {
     es.onerror = () => {
       if (_liveState && _liveState.finalPayload) return; // already completed
       setLiveStatus("Connection lost");
-      liveCancelBtn.classList.add("hidden");
-      liveCloseBtn.classList.remove("hidden");
+      _clsAdd(liveCancelBtn, "hidden");
+      _clsRemove(liveCloseBtn, "hidden");
       cleanup("connection-error");
       reject(new Error("SSE connection lost"));
     };
@@ -467,15 +498,15 @@ async function sendLiveDecision(stage, skip) {
 }
 
 function openLiveModal() {
-  liveStagesEl.innerHTML = "";
+  if (liveStagesEl) liveStagesEl.innerHTML = "";
   liveProgressFill.style.width = "0%";
-  liveCancelBtn.classList.remove("hidden");
-  liveCloseBtn.classList.add("hidden");
-  liveModal.classList.add("open");
+  _clsRemove(liveCancelBtn, "hidden");
+  _clsAdd(liveCloseBtn, "hidden");
+  _clsAdd(liveModal, "open");
 }
 
 function closeLiveModal() {
-  liveModal.classList.remove("open");
+  _clsRemove(liveModal, "open");
   // v25 FIX: reject any pending promise so the caller does not hang forever
   // if the user closes the modal mid-run.
   if (_liveState) {
@@ -494,7 +525,7 @@ function setLiveStatus(text) {
 }
 
 function renderLiveStages(stages) {
-  liveStagesEl.innerHTML = "";
+  if (liveStagesEl) liveStagesEl.innerHTML = "";
   for (const s of stages) {
     const div = document.createElement("div");
     div.className = "live-stage pending";
@@ -524,8 +555,8 @@ function renderLiveStages(stages) {
 function updateLiveStage(stageName, status, label, detail) {
   const el = liveStagesEl.querySelector('[data-stage="' + stageName + '"]');
   if (!el) return;
-  el.classList.remove("pending", "running", "awaiting", "success", "skipped", "failed");
-  el.classList.add(status);
+  _clsRemove(el, "pending", "running", "awaiting", "success", "skipped", "failed");
+  _clsAdd(el, status);
   const iconEl = el.querySelector('[data-role="icon"]');
   if (iconEl) iconEl.innerHTML = _stageIconSvg(status);
   if (label) {
@@ -576,8 +607,8 @@ liveCloseBtn?.addEventListener("click", closeLiveModal);
 // v16: ADVANCED OPTIONS COLLAPSIBLE
 // ============================================================================
 advOptionsToggle?.addEventListener("click", () => {
-  advOptionsToggle.classList.toggle("open");
-  advOptionsBody.classList.toggle("open");
+  _clsToggle(advOptionsToggle, "open");
+  _clsToggle(advOptionsBody, "open");
 });
 
 // ============================================================================
@@ -591,39 +622,39 @@ function _setText(id, value) {
 
 function renderReport(report, generatedCode) {
   if (!report) {
-    reportCard.classList.add("hidden");
+    _clsAdd(reportCard, "hidden");
     return;
   }
-  reportCard.classList.remove("hidden");
-  if (abCompareResult) abCompareResult.classList.add("hidden");
+  _clsRemove(reportCard, "hidden");
+  if (abCompareResult) _clsAdd(abCompareResult, "hidden");
 
   // Hero
   _setText("reportRequestedLevel", (report.requestedLevel || "-").toUpperCase());
   _setText("reportActualLevel", (report.actualLevel || "-").toUpperCase());
   const downgradeBadge = document.getElementById("reportDowngradeBadge");
   if (report.wasDowngraded && downgradeBadge) {
-    downgradeBadge.classList.remove("hidden");
-    downgradeBadge.textContent = report.actualLevel === "fallback" || report.actualLevel === "minified"
+    _clsRemove(downgradeBadge, "hidden");
+    if (downgradeBadge) downgradeBadge.textContent = report.actualLevel === "fallback" || report.actualLevel === "minified"
       ? "FALLBACK" : "DOWNGRADED";
     downgradeBadge.className = "badge " + (
       report.actualLevel === "fallback" || report.actualLevel === "minified"
         ? "badge-danger" : "badge-warning"
     );
   } else if (downgradeBadge) {
-    downgradeBadge.classList.add("hidden");
+    _clsAdd(downgradeBadge, "hidden");
   }
 
   // Downgrade banner
   const banner = document.getElementById("reportDowngradeBanner");
   if (report.wasDowngraded && report.downgradeReason && banner) {
-    banner.classList.remove("hidden");
+    _clsRemove(banner, "hidden");
     const isError = report.actualLevel === "fallback" || report.actualLevel === "minified";
-    banner.classList.toggle("error", isError);
+    _clsToggle(banner, "error", isError);
     _setText("reportDowngradeTitle", isError
       ? "Fallback mode active" : "Auto-downgrade applied");
     _setText("reportDowngradeMsg", report.downgradeReason);
   } else if (banner) {
-    banner.classList.add("hidden");
+    _clsAdd(banner, "hidden");
   }
 
   // Profile
@@ -640,7 +671,7 @@ function renderReport(report, generatedCode) {
 
   // Layers
   const layersEl = document.getElementById("reportLayers");
-  layersEl.innerHTML = "";
+  if (layersEl) layersEl.innerHTML = "";
   const L = report.layers || {};
   const layerDefs = [
     { key: "vmWrap", name: "Inner VM wrap" },
@@ -674,7 +705,7 @@ function renderReport(report, generatedCode) {
   const manifestSection = document.getElementById("reportManifestSection");
   const m = report.manifest;
   if (m && !m.error && typeof m.identifiers === "number" && manifestSection) {
-    manifestSection.classList.remove("hidden");
+    _clsRemove(manifestSection, "hidden");
     _setText("manifestIdentifiers", m.identifiers.toLocaleString());
     _setText("manifestStrings", (m.strings || 0).toLocaleString());
     _setText("manifestPropertyNames", (m.propertyNames || 0).toLocaleString());
@@ -682,7 +713,7 @@ function renderReport(report, generatedCode) {
     _setText("manifestForwardRefs", (m.forwardRefs || 0).toLocaleString());
     _setText("manifestMethodBases", (m.methodCallBases || 0).toLocaleString());
   } else if (manifestSection) {
-    manifestSection.classList.add("hidden");
+    _clsAdd(manifestSection, "hidden");
   }
 
   // Stats
@@ -700,15 +731,15 @@ function renderReport(report, generatedCode) {
   const warningsWrap = document.getElementById("reportWarningsWrap");
   const warningsList = document.getElementById("reportWarningsList");
   if (report.warnings && report.warnings.length > 0 && warningsWrap) {
-    warningsWrap.classList.remove("hidden");
-    warningsList.innerHTML = "";
+    _clsRemove(warningsWrap, "hidden");
+    if (warningsList) warningsList.innerHTML = "";
     for (const w of report.warnings) {
       const li = document.createElement("li");
       li.textContent = w;
       warningsList.appendChild(li);
     }
   } else if (warningsWrap) {
-    warningsWrap.classList.add("hidden");
+    _clsAdd(warningsWrap, "hidden");
   }
 
   // Generated code preview (Prism)
@@ -718,15 +749,15 @@ function renderReport(report, generatedCode) {
     const shown = generatedCode.length > MAX_SHOW
       ? generatedCode.slice(0, MAX_SHOW) + "\n\n-- ... (truncated, " + (generatedCode.length - MAX_SHOW).toLocaleString() + " chars hidden. Use Copy button for full code) --"
       : generatedCode;
-    reportCodeOutput.textContent = shown;
-    viewCodeChars.textContent = "(" + generatedCode.length.toLocaleString() + " chars)";
+    if (reportCodeOutput) reportCodeOutput.textContent = shown;
+    if (viewCodeChars) viewCodeChars.textContent = "(" + generatedCode.length.toLocaleString() + " chars)";
     // Trigger Prism re-highlight
     if (window.Prism && window.Prism.highlightElement) {
       try { window.Prism.highlightElement(reportCodeOutput); } catch (e) {}
     }
   } else {
-    reportCodeOutput.textContent = "-- No code available --";
-    viewCodeChars.textContent = "";
+    if (reportCodeOutput) reportCodeOutput.textContent = "-- No code available --";
+    if (viewCodeChars) viewCodeChars.textContent = "";
   }
 }
 
@@ -736,11 +767,11 @@ function escapeHtml(s) {
   })[c]);
 }
 
-closeReportBtn?.addEventListener("click", () => reportCard.classList.add("hidden"));
+closeReportBtn?.addEventListener("click", () => _clsAdd(reportCard, "hidden"));
 
 viewCodeToggle?.addEventListener("click", () => {
-  viewCodeToggle.classList.toggle("open");
-  viewCodeBody.classList.toggle("open");
+  _clsToggle(viewCodeToggle, "open");
+  _clsToggle(viewCodeBody, "open");
 });
 
 copyReportCodeBtn?.addEventListener("click", async () => {
@@ -748,7 +779,7 @@ copyReportCodeBtn?.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(lastPreviewedCode);
     const original = copyReportCodeBtn.textContent;
-    copyReportCodeBtn.textContent = "Copied!";
+    if (copyReportCodeBtn) copyReportCodeBtn.textContent = "Copied!";
     setTimeout(() => (copyReportCodeBtn.textContent = original), 1500);
   } catch (err) {
     showMessage("Failed to copy. Select and copy manually.", "error");
@@ -770,14 +801,14 @@ abCompareBtn?.addEventListener("click", async () => {
              : actual === "basic" ? "medium"
              : "basic";
 
-  abCompareBtn.disabled = true;
+  if (abCompareBtn) abCompareBtn.disabled = true;
   const originalText = abCompareBtn.textContent;
-  abCompareBtn.textContent = "Running " + alt + "...";
+  if (abCompareBtn) abCompareBtn.textContent = "Running " + alt + "...";
 
   try {
     const altResult = await obfuscateCodeAny(code, alt, { forceMaximum: false });
 
-    abCompareResult.classList.remove("hidden");
+    _clsRemove(abCompareResult, "hidden");
     document.getElementById("abThisLevel").textContent = actual.toUpperCase();
     document.getElementById("abThisSize").textContent =
       `${(lastReport.stats.obfuscatedBytes || 0).toLocaleString()} B (${(lastReport.stats.sizeRatio || 0).toFixed(2)}x) - ${lastReport.stats.elapsedMs || 0} ms`;
@@ -791,8 +822,8 @@ abCompareBtn?.addEventListener("click", async () => {
   } catch (err) {
     showMessage("A/B compare failed: " + err.message, "error");
   } finally {
-    abCompareBtn.disabled = false;
-    abCompareBtn.textContent = originalText;
+    if (abCompareBtn) abCompareBtn.disabled = false;
+    if (abCompareBtn) abCompareBtn.textContent = originalText;
   }
 });
 
@@ -816,9 +847,9 @@ previewBtn.addEventListener("click", async () => {
     forceMaximum = true;
   }
 
-  previewBtn.disabled = true;
+  if (previewBtn) previewBtn.disabled = true;
   const originalText = previewBtn.textContent;
-  previewBtn.textContent = "Generating preview...";
+  if (previewBtn) previewBtn.textContent = "Generating preview...";
 
   try {
     const result = await obfuscateCodeAny(code, level, { forceMaximum });
@@ -833,38 +864,38 @@ previewBtn.addEventListener("click", async () => {
     const statsText = level === "none"
       ? `Level: none | ${result.originalSize.toLocaleString()} chars (no changes)`
       : `Applied: ${actualLevel} | ${result.originalSize.toLocaleString()} chars -> ${result.obfuscatedSize.toLocaleString()} chars (${ratioStr}x) | ${result.elapsed}ms`;
-    previewStats.textContent = statsText;
+    if (previewStats) previewStats.textContent = statsText;
 
     // Prism-highlighted preview (limit for perf)
     const MAX_SHOW = 30000;
     const shown = result.code.length > MAX_SHOW
       ? result.code.slice(0, MAX_SHOW) + "\n\n-- ... (truncated) --"
       : result.code;
-    previewOutput.textContent = shown;
+    if (previewOutput) previewOutput.textContent = shown;
     if (window.Prism && window.Prism.highlightElement) {
       try { window.Prism.highlightElement(previewOutput); } catch (e) {}
     }
-    previewCard.classList.remove("hidden");
+    _clsRemove(previewCard, "hidden");
 
     // v16: Report card (render with generated code, close preview code section by default)
     renderReport(result.report, result.code);
     // Make sure the collapsible starts closed
-    viewCodeToggle.classList.remove("open");
-    viewCodeBody.classList.remove("open");
+    _clsRemove(viewCodeToggle, "open");
+    _clsRemove(viewCodeBody, "open");
 
-    reportCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (reportCard && reportCard.scrollIntoView) reportCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
     showMessage(`Preview ready. Check the report below, then click Save Script.`, "success");
   } catch (err) {
     showMessage(err.message || "Failed to preview.", "error");
   } finally {
-    previewBtn.disabled = false;
-    previewBtn.textContent = originalText;
+    if (previewBtn) previewBtn.disabled = false;
+    if (previewBtn) previewBtn.textContent = originalText;
     updateUI();
   }
 });
 
 closePreviewBtn.addEventListener("click", () => {
-  previewCard.classList.add("hidden");
+  _clsAdd(previewCard, "hidden");
 });
 
 copyPreviewBtn.addEventListener("click", async () => {
@@ -872,7 +903,7 @@ copyPreviewBtn.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(lastPreviewedCode);
     const original = copyPreviewBtn.textContent;
-    copyPreviewBtn.textContent = "Copied!";
+    if (copyPreviewBtn) copyPreviewBtn.textContent = "Copied!";
     setTimeout(() => (copyPreviewBtn.textContent = original), 1500);
   } catch (err) {
     showMessage("Failed to copy. Select and copy manually.", "error");
@@ -901,7 +932,7 @@ saveBtn.addEventListener("click", async () => {
     forceMaximum = true;
   }
 
-  saveBtn.disabled = true;
+  if (saveBtn) saveBtn.disabled = true;
   const originalText = saveBtn.textContent;
 
   try {
@@ -909,7 +940,7 @@ saveBtn.addEventListener("click", async () => {
     let sizeInfo = "";
     let report = null;
     if (level !== "none") {
-      saveBtn.textContent = "Obfuscating...";
+      if (saveBtn) saveBtn.textContent = "Obfuscating...";
       showMessage(`Obfuscating with level: ${level}${forceMaximum ? " (forced)" : ""}...`, "info");
       const result = await obfuscateCodeAny(code, level, { forceMaximum });
       finalCode = result.code;
@@ -920,7 +951,7 @@ saveBtn.addEventListener("click", async () => {
       sizeInfo = ` (${result.originalSize.toLocaleString()} -> ${result.obfuscatedSize.toLocaleString()} chars)`;
     }
 
-    saveBtn.textContent = "Saving...";
+    if (saveBtn) saveBtn.textContent = "Saving...";
     showMessage("Saving to database...", "info");
 
     let scriptId = null;
@@ -937,17 +968,17 @@ saveBtn.addEventListener("click", async () => {
 
     lastSavedScriptId = scriptId;
     const loadstring = buildLoadstring(scriptId);
-    loadstringOutput.textContent = loadstring;
-    resultCard.classList.remove("hidden");
+    if (loadstringOutput) loadstringOutput.textContent = loadstring;
+    _clsRemove(resultCard, "hidden");
 
     // v16: Also render report if available
     if (report) {
       renderReport(report, finalCode);
-      viewCodeToggle.classList.remove("open");
-      viewCodeBody.classList.remove("open");
+      _clsRemove(viewCodeToggle, "open");
+      _clsRemove(viewCodeBody, "open");
     }
 
-    resultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (resultCard && resultCard.scrollIntoView) resultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
     const actualLevel = report ? report.actualLevel : level;
     const modeInfo = requireKey
@@ -962,8 +993,8 @@ saveBtn.addEventListener("click", async () => {
   } catch (err) {
     showMessage(err.message || "Failed to save script.", "error");
   } finally {
-    saveBtn.disabled = false;
-    saveBtn.textContent = originalText;
+    if (saveBtn) saveBtn.disabled = false;
+    if (saveBtn) saveBtn.textContent = originalText;
     updateUI();
   }
 });
@@ -972,7 +1003,7 @@ copyBtn.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(loadstringOutput.textContent);
     const originalText = copyBtn.textContent;
-    copyBtn.textContent = "Copied!";
+    if (copyBtn) copyBtn.textContent = "Copied!";
     setTimeout(() => { copyBtn.textContent = originalText; }, 1500);
   } catch (err) {
     showMessage("Failed to copy. Select and copy manually.", "error");
@@ -990,12 +1021,12 @@ async function refreshScriptOptions() {
     .eq("user_id", currentUser.id).order("created_at", { ascending: false });
   if (error) { console.error("Failed to load scripts:", error); return; }
 
-  keyScriptSelect.innerHTML = '<option value="">-- Select a script --</option>';
+  if (keyScriptSelect) keyScriptSelect.innerHTML = '<option value="">-- Select a script --</option>';
   (scripts || []).forEach((s) => {
     const opt = document.createElement("option");
     opt.value = s.id;
     const mode = s.key_required === false ? " [FREE]" : "";
-    opt.textContent = `${s.name || "(unnamed)"} - ${s.id}${mode}`;
+    if (opt) opt.textContent = `${s.name || "(unnamed)"} - ${s.id}${mode}`;
     if (s.key_required === false) opt.disabled = true;
     keyScriptSelect.appendChild(opt);
   });
@@ -1010,14 +1041,14 @@ async function loadUserKeys() {
     .eq("owner_id", currentUser.id).order("created_at", { ascending: false });
   if (error) {
     console.error("Failed to load keys:", error);
-    keysList.innerHTML = '<p class="muted">Failed to load keys.</p>';
+    if (keysList) keysList.innerHTML = '<p class="muted">Failed to load keys.</p>';
     return;
   }
   if (!keys || keys.length === 0) {
-    keysList.innerHTML = '<p class="muted">No keys generated yet. Create one above.</p>';
+    if (keysList) keysList.innerHTML = '<p class="muted">No keys generated yet. Create one above.</p>';
     return;
   }
-  keysList.innerHTML = keys.map((k) => renderKeyRow(k)).join("");
+  if (keysList) keysList.innerHTML = keys.map((k) => renderKeyRow(k)).join("");
   keysList.querySelectorAll("[data-action]").forEach((btn) => {
     btn.addEventListener("click", handleKeyAction);
   });
@@ -1121,9 +1152,9 @@ generateKeyBtn?.addEventListener("click", async () => {
   const maxExec = keyMaxExecInput.value ? Number(keyMaxExecInput.value) : null;
   const expiresAt = keyExpiresInput.value ? new Date(keyExpiresInput.value).toISOString() : null;
 
-  generateKeyBtn.disabled = true;
+  if (generateKeyBtn) generateKeyBtn.disabled = true;
   const original = generateKeyBtn.textContent;
-  generateKeyBtn.textContent = "Creating...";
+  if (generateKeyBtn) generateKeyBtn.textContent = "Creating...";
   try {
     const { error } = await sb.from("user_keys").insert({
       key, script_id: scriptId, owner_id: currentUser.id,
@@ -1139,8 +1170,8 @@ generateKeyBtn?.addEventListener("click", async () => {
   } catch (err) {
     showMessage("Failed to create key: " + err.message, "error");
   } finally {
-    generateKeyBtn.disabled = false;
-    generateKeyBtn.textContent = original;
+    if (generateKeyBtn) generateKeyBtn.disabled = false;
+    if (generateKeyBtn) generateKeyBtn.textContent = original;
   }
 });
 
@@ -1148,8 +1179,8 @@ generateKeyBtn?.addEventListener("click", async () => {
 // UTIL
 // ============================================================================
 function showMessage(text, type = "info") {
-  messageDiv.textContent = text;
+  if (messageDiv) messageDiv.textContent = text;
   messageDiv.className = `message message-${type}`;
-  messageDiv.classList.remove("hidden");
+  _clsRemove(messageDiv, "hidden");
 }
-function hideMessage() { messageDiv.classList.add("hidden"); }
+function hideMessage() { _clsAdd(messageDiv, "hidden"); }
