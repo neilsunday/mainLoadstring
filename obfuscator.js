@@ -1467,8 +1467,335 @@ async function obfuscate(luaCode, level, userId) {
   return typeof result === "string" ? result : result.code;
 }
 
+// ============================================================================
+// SECTION 17 - Streaming API (live per-stage progress + skip/continue hooks)
+// ============================================================================
+//
+// obfuscateWithStream(luaCode, level, userId, options) -> {code, report}
+//
+// options adds two hooks on top of the standard shape:
+//   emit(event, data)          -- called before/after each stage. Fire-and-
+//                                 forget. Errors inside emit are swallowed.
+//   awaitDecision(stageName)   -- async, returns { skip: boolean } (or a
+//                                 primitive-truthy for skip). Called before
+//                                 every optional stage. If omitted, all
+//                                 stages run.
+//
+// Event names the caller can expect:
+//   "session-start"    { level, effectiveLevel, profile, manifest }
+//   "stage-start"      { stage, index, total, description }
+//   "stage-await"      { stage, index, total }   -- decision requested
+//   "stage-skip"       { stage, index, total, reason }
+//   "stage-success"    { stage, index, total, elapsedMs, detail }
+//   "stage-failure"    { stage, index, total, error }
+//   "session-complete" { report }
+//
+// The public event stream is intentionally small and stable so the SSE
+// bridge in server.js can pass events through 1:1 without translation.
+// ============================================================================
+
+// Stage catalog: metadata that both the pipeline and the dashboard consume.
+// order = the sequence stages fire in; skippable flag drives the "Skip"
+// button visibility on the client.
+const _STAGE_CATALOG = [
+  { name: "numeric-encoding",   label: "Numeric obfuscation",     skippable: true,  levels: ["medium", "maximum"] },
+  { name: "string-encryption",  label: "String encryption",       skippable: true,  levels: ["medium", "maximum"] },
+  { name: "identifier-rename",  label: "Identifier rename",       skippable: true,  levels: ["medium", "maximum"] },
+  { name: "constant-pool",      label: "Constant pool + poison",  skippable: true,  levels: ["maximum"] },
+  { name: "integrity-check",    label: "Integrity check",         skippable: true,  levels: ["medium", "maximum"] },
+];
+
+async function obfuscateWithStream(luaCode, level, userId, options) {
+  options = options || {};
+  const emit = typeof options.emit === "function" ? options.emit : () => {};
+  const awaitDecision = typeof options.awaitDecision === "function"
+    ? options.awaitDecision : null;
+  void userId;
+
+  const safeEmit = (evt, data) => {
+    try { emit(evt, data); } catch (_) { /* never let a listener kill the run */ }
+  };
+
+  const report = new ObfuscationReport(level || "medium");
+  report.requestedLevel = level || "medium";
+  report.actualLevel = report.requestedLevel;
+
+  if (typeof luaCode !== "string" || luaCode.length === 0) {
+    report.warn("Empty input");
+    safeEmit("session-complete", { report });
+    return { code: "", report };
+  }
+  const validLevels = new Set(["none", "basic", "medium", "maximum"]);
+  if (!validLevels.has(level)) {
+    report.warn("Unknown level \"" + level + "\" - defaulting to medium");
+    level = "medium";
+    report.requestedLevel = level;
+    report.actualLevel = level;
+  }
+
+  const startedAt = Date.now();
+
+  // Baseline: preprocess + parse.
+  let preprocessed, baselineAst;
+  try {
+    preprocessed = preprocess(luaCode);
+    baselineAst = _parseAst(preprocessed);
+  } catch (e) {
+    report.warn("Preprocess threw: " + e.message);
+  }
+
+  if (!baselineAst) {
+    report.warn("Baseline parse failed - returning minified source only");
+    report.actualLevel = "basic";
+    report.wasDowngraded = true;
+    report.downgradeReason = "Input script could not be parsed after preprocessing";
+    const min = minify(preprocessed || luaCode);
+    report.stats.originalBytes = luaCode.length;
+    report.stats.obfuscatedBytes = min.length;
+    report.stats.sizeRatio = min.length / Math.max(1, luaCode.length);
+    report.stats.elapsedMs = Date.now() - startedAt;
+    safeEmit("session-complete", { report });
+    return { code: min, report };
+  }
+
+  // Manifest + profile.
+  const manifest = ReferenceManifest.scan(preprocessed, options.referenceCode);
+  _currentManifest = manifest;
+  report.manifest = {
+    identifiers: manifest.identifiers.size,
+    strings: manifest.strings.size,
+    propertyNames: manifest.propertyNames.size,
+    zeroInitLocals: manifest.zeroInitLocals.size,
+    forwardRefs: manifest.forwardRefs.size,
+    methodCallBases: manifest.methodCallBases.size,
+    referenceUsed: !!(options.referenceCode && options.referenceCode.trim && options.referenceCode.trim().length > 0),
+  };
+  const profile = profileScript(baselineAst, preprocessed);
+  report.profile = {
+    riskTier: profile.riskTier,
+    complexityScore: profile.complexityScore,
+    maxBlockDepth: profile.maxBlockDepth,
+    functionCount: profile.functionCount,
+    pcallCount: profile.pcallCount,
+    hasHookfunction: profile.hasHookfunction,
+    hasHookmetamethod: profile.hasHookmetamethod,
+    hasSetmetatable: profile.hasSetmetatable,
+    hasRuntimeReflection: profile.hasRuntimeReflection,
+  };
+
+  // Auto-downgrade decision.
+  let effectiveLevel = level;
+  if (level === "maximum" && profile.riskTier === "extreme" && !options.forceMaximum) {
+    effectiveLevel = "medium";
+    report.wasDowngraded = true;
+    report.downgradeReason =
+      "Script risk tier is EXTREME (block depth " + profile.maxBlockDepth +
+      ", complexity " + profile.complexityScore + "). Auto-downgraded to medium " +
+      "to avoid runtime failures. Enable 'Force maximum' to override.";
+  }
+  report.actualLevel = effectiveLevel;
+
+  // Filter the stage catalog to what applies at this level.
+  const applicable = _STAGE_CATALOG.filter(s => s.levels.indexOf(effectiveLevel) >= 0);
+
+  safeEmit("session-start", {
+    level, effectiveLevel,
+    profile: report.profile,
+    manifest: report.manifest,
+    stages: applicable.map((s, i) => ({ name: s.name, label: s.label, index: i, total: applicable.length })),
+    wasDowngraded: report.wasDowngraded,
+    downgradeReason: report.downgradeReason,
+  });
+
+  // "none" / "basic" -- no interactive stages.
+  if (effectiveLevel === "none") {
+    report.stats.originalBytes = luaCode.length;
+    report.stats.obfuscatedBytes = luaCode.length;
+    report.stats.elapsedMs = Date.now() - startedAt;
+    safeEmit("session-complete", { report });
+    _currentManifest = null;
+    return { code: luaCode, report };
+  }
+  if (effectiveLevel === "basic") {
+    const min = minify(preprocessed);
+    report.stats.originalBytes = luaCode.length;
+    report.stats.obfuscatedBytes = min.length;
+    report.stats.sizeRatio = min.length / Math.max(1, luaCode.length);
+    report.stats.elapsedMs = Date.now() - startedAt;
+    safeEmit("session-complete", { report });
+    _currentManifest = null;
+    return { code: min, report };
+  }
+
+  // Interactive staged pipeline.
+  let goodAst = baselineAst;
+  let goodCode = serialize(baselineAst);
+  report.stagesSucceeded.push("baseline");
+
+  const encKey = randInt(30, 200);
+  const encShift = randInt(1, 20);
+  const decoderFn = randHexName(3);
+  const strMeta = { encrypted: 0, skipped: 0 };
+  const strict = effectiveLevel === "maximum";
+
+  // Helper: for AST stages, ask permission, then run and emit progress.
+  async function askThenRun(stage, index, total, applyFn) {
+    safeEmit("stage-start", { stage: stage.name, index, total, label: stage.label });
+    if (awaitDecision && stage.skippable) {
+      safeEmit("stage-await", { stage: stage.name, index, total, label: stage.label });
+      let decision;
+      try { decision = await awaitDecision(stage.name); }
+      catch (e) { decision = { skip: false }; }
+      const skip = decision === true || (decision && decision.skip);
+      if (skip) {
+        safeEmit("stage-skip", { stage: stage.name, index, total, reason: "user-requested" });
+        report.stagesSkipped.push(stage.name);
+        return { ran: false };
+      }
+    }
+    const started = Date.now();
+    try {
+      const result = applyFn();
+      const elapsedMs = Date.now() - started;
+      if (result && result.ok) {
+        safeEmit("stage-success", { stage: stage.name, index, total, elapsedMs, detail: result.detail || null });
+        return { ran: true, ok: true, ast: result.ast, code: result.code };
+      }
+      safeEmit("stage-failure", { stage: stage.name, index, total, error: (result && result.error) || "stage returned not-ok" });
+      report.stagesSkipped.push(stage.name);
+      return { ran: true, ok: false };
+    } catch (e) {
+      safeEmit("stage-failure", { stage: stage.name, index, total, error: e.message });
+      report.stagesSkipped.push(stage.name);
+      return { ran: true, ok: false };
+    }
+  }
+
+  const total = applicable.length;
+
+  for (let i = 0; i < applicable.length; i++) {
+    const stage = applicable[i];
+
+    if (stage.name === "numeric-encoding") {
+      const r = await askThenRun(stage, i, total, () => {
+        const ctx = { encNumbers: true, manifest, strMeta: { encrypted: 0, skipped: 0 } };
+        const s = runStage("numeric-encoding", goodAst, ctx, walkTransform, report);
+        if (s.ok) { goodAst = s.ast; goodCode = s.code; return { ok: true, ast: s.ast, code: s.code, detail: "numeric literals rewritten" }; }
+        return { ok: false, error: "stage validation failed" };
+      });
+      if (r.ran && r.ok) {
+        report.layers.numericObfuscation = true;
+        report.layers.constantObfuscation = true;
+      }
+      continue;
+    }
+
+    if (stage.name === "string-encryption") {
+      const r = await askThenRun(stage, i, total, () => {
+        const local = { encrypted: 0, skipped: 0 };
+        const ctx = { encStrings: true, manifest, strict, encKey, encShift, decoderFn, strMeta: local };
+        const s = runStage("string-encryption", goodAst, ctx, walkTransform, report);
+        if (s.ok) {
+          goodAst = s.ast; goodCode = s.code;
+          strMeta.encrypted = local.encrypted;
+          strMeta.skipped = local.skipped;
+          return { ok: true, ast: s.ast, code: s.code, detail: local.encrypted + " strings encrypted, " + local.skipped + " skipped" };
+        }
+        return { ok: false, error: "stage validation failed" };
+      });
+      if (r.ran && r.ok) {
+        report.layers.stringEncryption = true;
+        report.layers.stringEncryptionStrict = strict;
+      }
+      continue;
+    }
+
+    if (stage.name === "identifier-rename") {
+      const r = await askThenRun(stage, i, total, () => {
+        const rename = new RenameCtx(manifest);
+        const ctx = { rename, manifest, strMeta: { encrypted: 0, skipped: 0 } };
+        const s = runStage("identifier-rename", goodAst, ctx, walkTransform, report);
+        if (s.ok) { goodAst = s.ast; goodCode = s.code; return { ok: true, ast: s.ast, code: s.code, detail: manifest.identifiers.size + " identifiers considered" }; }
+        return { ok: false, error: "stage validation failed" };
+      });
+      if (r.ran && r.ok) report.layers.identifierRename = true;
+      continue;
+    }
+
+    if (stage.name === "constant-pool") {
+      // Only meaningful if string encryption ran (decoder needed).
+      const r = await askThenRun(stage, i, total, () => {
+        if (!report.layers.stringEncryption) {
+          return { ok: false, error: "constant-pool requires string encryption to be active" };
+        }
+        return { ok: true, detail: "poison pool queued for wrap phase" };
+      });
+      if (r.ran && r.ok) report.layers.constantPool = true;
+      continue;
+    }
+
+    if (stage.name === "integrity-check") {
+      // Integrity is a wrap-phase decision -- queue it, apply below.
+      const r = await askThenRun(stage, i, total, () => {
+        return { ok: true, detail: "integrity check queued for wrap phase" };
+      });
+      if (r.ran && r.ok) report.layers.integrityCheck = true;
+      continue;
+    }
+  }
+
+  // ---- Wrap phase: apply layer flags decided above. ----
+  let wrapped = goodCode;
+  if (report.layers.stringEncryption) {
+    const decoderCode = makeStringDecoder(decoderFn, encKey, encShift);
+    wrapped = decoderCode + " local _D=" + decoderFn + " " + wrapped;
+  }
+  if (report.layers.constantPool) {
+    const poolVar = "_CP" + randHexName(2).slice(3);
+    wrapped = generatePoisonPool(poolVar, encKey, encShift) + " " + wrapped;
+  }
+  if (report.layers.integrityCheck) {
+    try {
+      const withIntegrity = generateIntegrityCheck(wrapped) + " " + wrapped;
+      const chk = validate(withIntegrity);
+      if (chk.ok) {
+        wrapped = withIntegrity;
+      } else {
+        report.warn("Integrity wrap produced invalid Lua - skipped");
+        report.layers.integrityCheck = false;
+      }
+    } catch (e) {
+      report.warn("Integrity wrap threw: " + e.message + " - skipped");
+      report.layers.integrityCheck = false;
+    }
+  }
+
+  const finalCheck = validate(wrapped);
+  if (!finalCheck.ok) {
+    report.warn("Wrapped output failed validation (" + finalCheck.error +
+                ") - falling back to bare transformed source");
+    wrapped = goodCode;
+    report.layers.constantPool = false;
+    report.layers.stringEncryption = false;
+    report.layers.integrityCheck = false;
+  }
+
+  const finalCode = minify(wrapped);
+
+  report.stats.originalBytes = luaCode.length;
+  report.stats.obfuscatedBytes = finalCode.length;
+  report.stats.sizeRatio = finalCode.length / Math.max(1, luaCode.length);
+  report.stats.elapsedMs = Date.now() - startedAt;
+  report.stats.stringsEncrypted = strMeta.encrypted;
+  report.stats.stringsSkipped = strMeta.skipped;
+
+  safeEmit("session-complete", { report });
+  _currentManifest = null;
+  return { code: finalCode, report };
+}
+
 // Match v24's process guards so a stray promise rejection doesn't kill the server.
 process.on("uncaughtException", (err) => console.error("[obfuscator] Uncaught:", err.message));
 process.on("unhandledRejection", (r) => console.error("[obfuscator] Unhandled:", r));
 
-module.exports = { obfuscate, obfuscateWithReport };
+module.exports = { obfuscate, obfuscateWithReport, obfuscateWithStream };
