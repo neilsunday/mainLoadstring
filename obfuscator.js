@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.27-noregex - v25.26 + return-type walker (fixes obj:method() corruption)
+// AzureVM Obfuscator v25.28-compound - v25.27 + compound-assign walker (fixes greedy RHS)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -481,21 +481,70 @@ function preprocess(rawCode) {
   }
 
   // Compound assignments: LHS op= RHS  ->  LHS = LHS op (RHS)
+  // v25.28: proper RHS walker, NOT greedy regex. The old [^\n;]+ regex
+  // ate everything until end-of-line, including trailing `) end` from
+  // enclosing function bodies. On the 719KB Luau script, that produced
+  // `count = count + (e((...)) end)` -- invalid Lua that broke every
+  // downstream stage. The new walker stops at balanced-paren-depth 0 when
+  // it hits: semicolon, newline, "--" comment, or a Lua statement keyword.
   const IDENT = "[A-Za-z_][A-Za-z0-9_]*";
   const CHAIN = IDENT + "(?:\\s*[.:]\\s*" + IDENT + "|\\s*\\[[^\\]]+\\])*";
-  const compoundRe = new RegExp(
-    "(" + CHAIN + ")\\s*([+\\-*/%]|\\.\\.)=\\s*([^\\n;]+)", "g"
+  const compoundLHSRe = new RegExp(
+    "(" + CHAIN + ")\\s*([+\\-*/%]|\\.\\.)=", "g"
   );
-  work = work.replace(compoundRe, (_m, lhs, op, rhs) => {
-    // Strip trailing inline comment on RHS (fixes "x += 5 - note" swallowing paren)
-    let clean = rhs;
-    for (let k = 0; k < clean.length - 1; k++) {
-      if (clean[k] === "-" && clean[k + 1] === "-") { clean = clean.substring(0, k); break; }
+  const STOP_KEYWORDS = new Set([
+    "end","then","do","else","elseif","until","local","if","for","while",
+    "repeat","return","function","break","goto"
+  ]);
+  const _compoundOut = [];
+  let _ci = 0;
+  compoundLHSRe.lastIndex = 0;
+  let _cm;
+  while ((_cm = compoundLHSRe.exec(work)) !== null) {
+    const matchStart = _cm.index;
+    const matchEnd  = compoundLHSRe.lastIndex;
+    const lhs = _cm[1];
+    const op  = _cm[2];
+    // Emit everything before this match verbatim.
+    _compoundOut.push(work.substring(_ci, matchStart));
+    // Walk RHS starting at matchEnd.
+    let k = matchEnd;
+    // Skip whitespace at start of RHS
+    while (k < work.length && (work[k] === " " || work[k] === "\t")) k++;
+    const rhsStart = k;
+    let dp = 0, db = 0, dk = 0;
+    while (k < work.length) {
+      const c = work[k];
+      if (c === "(") { dp++; k++; continue; }
+      if (c === ")") { if (dp === 0) break; dp--; k++; continue; }
+      if (c === "{") { db++; k++; continue; }
+      if (c === "}") { if (db === 0) break; db--; k++; continue; }
+      if (c === "[") { dk++; k++; continue; }
+      if (c === "]") { if (dk === 0) break; dk--; k++; continue; }
+      if (dp === 0 && db === 0 && dk === 0) {
+        if (c === "\n" || c === ";") break;
+        if (c === "-" && work[k+1] === "-") break;
+        if (/[A-Za-z_]/.test(c)) {
+          let e = k;
+          while (e < work.length && /[A-Za-z0-9_]/.test(work[e])) e++;
+          const word = work.substring(k, e);
+          if (STOP_KEYWORDS.has(word)) break;
+          k = e;
+          continue;
+        }
+      }
+      k++;
     }
-    clean = clean.trim();
-    if (!clean) return lhs + " = " + lhs;
-    return lhs + " = " + lhs + " " + op + " (" + clean + ")";
-  });
+    let rhs = work.substring(rhsStart, k).trim();
+    if (!rhs) {
+      _compoundOut.push(lhs + " = " + lhs);
+    } else {
+      _compoundOut.push(lhs + " = " + lhs + " " + op + " (" + rhs + ")");
+    }
+    _ci = k;
+  }
+  _compoundOut.push(work.substring(_ci));
+  work = _compoundOut.join("");
 
   // Lower `continue` to goto __continue_N__
   work = lowerContinue(work);
