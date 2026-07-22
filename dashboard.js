@@ -227,6 +227,85 @@ function buildProtectedLoadstring(scriptId, key) {
 }
 
 // ============================================================================
+// Phase 2a: Per-layer overrides + hint updater
+// ============================================================================
+const OVERRIDE_LAYERS = ["antiDebugger", "antiDump", "antiTamper", "byteLevelXor", "vmWrap", "outerVM"];
+
+function readLayerOverrides() {
+  const out = {};
+  for (const key of OVERRIDE_LAYERS) {
+    const el = document.getElementById("ovr_" + key);
+    if (el && el.value && el.value !== "auto") out[key] = el.value;
+  }
+  return out;
+}
+
+function predictAutoDecision(layerKey, profile) {
+  const p = profile || {};
+  const hooks = !!p.hasHookfunction || !!p.hasHookmetamethod;
+  const refl  = !!p.hasRuntimeReflection;
+  switch (layerKey) {
+    case "antiDebugger":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (would false-positive)" }
+        : { enabled: true,  reason: "no hooks detected \u2014 safe to apply" };
+    case "antiDump":
+      return { enabled: true, reason: "pure global-existence probes \u2014 no collision risk" };
+    case "antiTamper":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (would false-positive)" }
+        : { enabled: true,  reason: "no hooks detected \u2014 safe to apply" };
+    case "byteLevelXor":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (bit32.bxor collision risk)" }
+        : { enabled: true,  reason: "no hooks detected \u2014 safe to apply" };
+    case "vmWrap":
+      return (hooks || refl)
+        ? { enabled: false, reason: (hooks ? "hooks" : "reflection") + " detected (would false-positive)" }
+        : { enabled: true,  reason: "eligible \u2014 will wrap qualifying print() calls" };
+    case "outerVM":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (decoder collision risk)" }
+        : { enabled: true,  reason: "safe \u2014 decoy or real path will emit" };
+    default:
+      return { enabled: true, reason: "" };
+  }
+}
+
+function updateOverrideHints(profile) {
+  for (const key of OVERRIDE_LAYERS) {
+    const hintEl = document.getElementById("ovrHint_" + key);
+    const selEl  = document.getElementById("ovr_" + key);
+    if (!hintEl || !selEl) continue;
+    if (selEl.value === "force") {
+      hintEl.textContent = "Force: bypass smart-skip (may false-positive at runtime)";
+      hintEl.className = "hint auto-off";
+      continue;
+    }
+    if (selEl.value === "skip") {
+      hintEl.textContent = "Skip: this layer will never be applied";
+      hintEl.className = "hint";
+      continue;
+    }
+    if (!profile) {
+      hintEl.textContent = "Auto: obfuscate once to preview what this would do";
+      hintEl.className = "hint";
+      continue;
+    }
+    const dec = predictAutoDecision(key, profile);
+    hintEl.textContent = "Auto: " + (dec.enabled ? "will be enabled" : "will be skipped") +
+                        (dec.reason ? " (" + dec.reason + ")" : "");
+    hintEl.className = "hint " + (dec.enabled ? "auto-on" : "auto-off");
+  }
+}
+
+for (const key of OVERRIDE_LAYERS) {
+  document.getElementById("ovr_" + key)?.addEventListener("change", () => {
+    updateOverrideHints(lastReport ? lastReport.profile : null);
+  });
+}
+
+// ============================================================================
 // v16: OBFUSCATION WITH REPORT
 // ============================================================================
 async function obfuscateCode(code, level, options) {
@@ -246,6 +325,8 @@ async function obfuscateCode(code, level, options) {
       userId: currentUser ? currentUser.id : null,
       // v24 NEW: pass the uploaded reference script as an extra manifest source
       referenceCode: referenceCode || null,
+      // Phase 2a: per-layer overrides
+      layerOverrides: readLayerOverrides(),
     }),
   });
   if (!response.ok) {
@@ -294,191 +375,6 @@ advOptionsToggle?.addEventListener("click", () => {
   advOptionsToggle.classList.toggle("open");
   advOptionsBody.classList.toggle("open");
 });
-
-
-// ============================================================================
-// Phase 1b: WARNINGS PANEL HELPERS
-// ============================================================================
-// The backend emits warnings as free-form strings like:
-//   "Anti-debugger skipped: script installs hooks (would false-positive)"
-//   "VM wrap threw: TypeError: cannot read x - skipped"
-//   "Wrapped output failed validation (unexpected token) - falling back to bare transformed source"
-//
-// classifyWarning() maps each message to a severity + owning layer using
-// keyword matching. The mapping is intentionally forgiving: if a message
-// does not match any layer keyword it lands in the "General" group.
-// ============================================================================
-
-const WARN_LAYER_KEYS = [
-  { key: "anti-debugger",  name: "Anti-debugger",         match: /\bAnti-debugger\b/i },
-  { key: "anti-dump",      name: "Anti-dump",             match: /\bAnti-dump\b/i },
-  { key: "anti-tamper",    name: "Anti-tamper",           match: /\bAnti-tamper\b/i },
-  { key: "vm-wrap",        name: "Inner VM wrap",         match: /\bVM wrap\b/i },
-  { key: "outer-vm",       name: "Multi-layer outer VM",  match: /\bOuter VM\b/i },
-  { key: "integrity",      name: "Integrity check",       match: /\bIntegrity\b/i },
-  { key: "string-enc",     name: "String encryption",     match: /\bString encryption\b/i },
-  { key: "numeric",        name: "Numeric obfuscation",   match: /\bnumeric\b/i },
-  { key: "constant-pool",  name: "Constant pool",         match: /\bConstant pool\b/i },
-  { key: "byte-xor",       name: "Byte-level XOR",        match: /\bByte[-\s]?XOR\b|\bxor\b/i },
-  { key: "pipeline",       name: "Pipeline",              match: /\bPipeline\b/i },
-  { key: "preprocess",     name: "Preprocess",            match: /\bPreprocess\b/i },
-  { key: "baseline",       name: "Baseline parse",        match: /\bBaseline\b/i },
-  { key: "final",          name: "Final validation",      match: /\bWrapped output failed\b|\bfinal check\b/i },
-];
-
-function classifyWarning(msg) {
-  const low = String(msg || "").toLowerCase();
-  // Severity
-  let severity = "info";
-  let severityLabel = "INFO";
-  if (/threw:|failed validation|error/i.test(msg) && !/would false-positive/i.test(msg)) {
-    severity = "error";
-    severityLabel = "ERROR";
-  } else if (/falling back|fallback/i.test(low)) {
-    severity = "fallback";
-    severityLabel = "FALLBACK";
-  } else if (/skipped/i.test(low)) {
-    severity = "skipped";
-    severityLabel = "SKIPPED";
-  }
-  // Layer
-  let layer = { key: "general", name: "General" };
-  for (const l of WARN_LAYER_KEYS) {
-    if (l.match.test(msg)) { layer = l; break; }
-  }
-  return { severity, severityLabel, layer };
-}
-
-// Best-effort human-readable explanation for a given warning message.
-// If nothing matches, we return null and the item just renders the raw msg.
-function explainWarning(msg, cls) {
-  const m = String(msg || "");
-  if (/installs hooks \(would false-positive\)/i.test(m)) {
-    return "Your script installs runtime hooks (hookfunction / hookmetamethod). The layer's own probes would collide with your hooks, so we skip it to avoid a false-positive kill. This is intentional and safe.";
-  }
-  if (/produced invalid Lua/i.test(m)) {
-    return "The layer's transform produced code that failed to parse as Lua. The obfuscator rolled back and skipped this layer so the final output stays runnable. No user impact beyond one fewer protection layer.";
-  }
-  if (/threw:/i.test(m) && cls.severity === "error") {
-    return "An internal exception happened while applying this layer. The obfuscator caught it and continued without this layer. If this repeats, share the script so we can investigate.";
-  }
-  if (/falling back to bare transformed source/i.test(m)) {
-    return "The full wrapped output failed final validation. We reverted to the bare transformed source (rename + basic transforms only). Script still runs, but several wrap-phase layers are off.";
-  }
-  if (/falling back to inner-only/i.test(m)) {
-    return "The outer-VM encoding step produced invalid Lua, so we shipped just the inner VM's plain form. Inner VM still active; only the outer XOR wrap was dropped.";
-  }
-  if (/Baseline parse failed/i.test(m)) {
-    return "The input script could not be parsed even after preprocessing. We fell back to a minified copy of your source. Check for Luau syntax the parser can't handle (unusual type annotations, custom syntax).";
-  }
-  if (/Preprocess threw/i.test(m)) {
-    return "The preprocessor (Luau-to-Lua rewrite) failed. Only relevant to Luau-source scripts; the raw source still went through the parser afterwards.";
-  }
-  if (/Unknown level/i.test(m)) {
-    return "The requested obfuscation level wasn't recognized, so we defaulted to \"medium\". Not a functional problem, just a hint.";
-  }
-  if (/Empty input/i.test(m)) {
-    return "The script body was empty. Nothing to obfuscate.";
-  }
-  return null;
-}
-
-function severityBadgeHtml(cls) {
-  const cssClass = cls.severity === "error"    ? "badge-danger"
-                 : cls.severity === "fallback" ? "badge-warning"
-                 : cls.severity === "skipped"  ? "badge-warning"
-                 :                                "badge-info";
-  return '<span class="badge ' + cssClass + '">' + cls.severityLabel + '</span>';
-}
-
-function renderWarnings(warnings) {
-  const wrap = document.getElementById("reportWarningsWrap");
-  const summary = document.getElementById("reportWarningsSummary");
-  const groupsEl = document.getElementById("reportWarningsGroups");
-
-  if (!warnings || warnings.length === 0) {
-    wrap.classList.add("hidden");
-    return;
-  }
-  wrap.classList.remove("hidden");
-
-  // Classify + group
-  const groups = new Map();       // layerKey -> { name, items:[{msg, cls, explain}] }
-  const sevCounts = { error: 0, skipped: 0, fallback: 0, info: 0 };
-  for (const w of warnings) {
-    const cls = classifyWarning(w);
-    sevCounts[cls.severity]++;
-    const explain = explainWarning(w, cls);
-    let g = groups.get(cls.layer.key);
-    if (!g) {
-      g = { name: cls.layer.name, items: [] };
-      groups.set(cls.layer.key, g);
-    }
-    g.items.push({ msg: w, cls, explain });
-  }
-
-  // Summary chips at top
-  const chips = [];
-  chips.push('<span>' + warnings.length + ' total</span>');
-  if (sevCounts.error > 0) {
-    chips.push('<span class="count-chip error"><span class="dot"></span>' + sevCounts.error + ' error' + (sevCounts.error === 1 ? "" : "s") + '</span>');
-  }
-  if (sevCounts.skipped > 0) {
-    chips.push('<span class="count-chip skipped"><span class="dot"></span>' + sevCounts.skipped + ' skipped</span>');
-  }
-  if (sevCounts.fallback > 0) {
-    chips.push('<span class="count-chip fallback"><span class="dot"></span>' + sevCounts.fallback + ' fallback</span>');
-  }
-  if (sevCounts.info > 0) {
-    chips.push('<span class="count-chip info"><span class="dot"></span>' + sevCounts.info + ' info</span>');
-  }
-  if (sevCounts.error === 0 && sevCounts.fallback === 0) {
-    chips.push('<span class="clean">Script still runs cleanly</span>');
-  }
-  summary.innerHTML = chips.join('');
-
-  // Groups (collapsible; open by default if there is only 1)
-  groupsEl.innerHTML = "";
-  const groupArr = [...groups.entries()];
-  const openByDefault = groupArr.length === 1;
-  for (const [key, g] of groupArr) {
-    const groupDiv = document.createElement("div");
-    groupDiv.className = "warn-group" + (openByDefault ? " open" : "");
-    const header = document.createElement("div");
-    header.className = "warn-group-header";
-    header.innerHTML =
-      '<span class="caret">\u203a</span>' +
-      '<span class="group-name">' + escapeHtml(g.name) + '</span>' +
-      '<span class="group-count">' + g.items.length + ' warning' + (g.items.length === 1 ? "" : "s") + '</span>';
-    header.addEventListener("click", () => groupDiv.classList.toggle("open"));
-    groupDiv.appendChild(header);
-
-    const body = document.createElement("div");
-    body.className = "warn-group-body";
-    for (const it of g.items) {
-      const item = document.createElement("div");
-      item.className = "warn-item";
-      const badge = severityBadgeHtml(it.cls);
-      let inner = badge + '<div class="msg-wrap"><span class="msg-text">' + escapeHtml(it.msg) + '</span>';
-      if (it.explain) {
-        inner += '<span class="msg-explain">' + escapeHtml(it.explain) + '</span>';
-      }
-      inner += '</div>';
-      item.innerHTML = inner;
-      body.appendChild(item);
-    }
-    groupDiv.appendChild(body);
-    groupsEl.appendChild(groupDiv);
-  }
-}
-
-function escapeHtml(s) {
-  return String(s == null ? "" : s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
 
 // ============================================================================
 // v16: REPORT RENDERING
@@ -590,8 +486,23 @@ function renderReport(report, generatedCode) {
   document.getElementById("statNumObf").textContent = s.numericConstsObfuscated != null ? s.numericConstsObfuscated : "-";
   document.getElementById("statVmStmt").textContent = s.vmCompiledStatements != null ? s.vmCompiledStatements : "0";
 
-  // Warnings (Phase 1b: severity + grouping + summary + tooltips)
-  renderWarnings(report.warnings || []);
+  // Warnings
+  const warningsWrap = document.getElementById("reportWarningsWrap");
+  const warningsList = document.getElementById("reportWarningsList");
+  if (report.warnings && report.warnings.length > 0) {
+    warningsWrap.classList.remove("hidden");
+    warningsList.innerHTML = "";
+    for (const w of report.warnings) {
+      const li = document.createElement("li");
+      li.textContent = w;
+      warningsList.appendChild(li);
+    }
+  } else {
+    warningsWrap.classList.add("hidden");
+  }
+
+  // Phase 2a: refresh override hints based on the new profile
+  updateOverrideHints(report.profile);
 
   // Generated code preview (Prism)
   if (generatedCode) {
