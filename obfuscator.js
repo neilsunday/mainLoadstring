@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.5 - + Byte-level XOR (4-byte mask, additive on string encryption)
+// AzureVM Obfuscator v25.6 - + Inner VM wrap (10 opcodes, print-only, loud errors)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -637,6 +637,112 @@ function makeStringDecoder(fnName, key, shift, mask) {
 
 function bytesToLuaTable(bytes) { return "{" + bytes.join(",") + "}"; }
 
+// ============================================================================
+// SECTION 6b - Inner VM wrap helpers (v25.6)
+// ============================================================================
+
+const _VM_OP = {
+  LOADN:  1, LOADS: 2, ADD: 3, SUB: 4, MUL: 5, DIV: 6,
+  MOD:    7, CONCAT: 8, PRINT: 9, HALT: 10,
+};
+const _VM_BINOP = {
+  "+": _VM_OP.ADD, "-": _VM_OP.SUB, "*": _VM_OP.MUL,
+  "/": _VM_OP.DIV, "%": _VM_OP.MOD, "..": _VM_OP.CONCAT,
+};
+
+function vmCanCompileExpression(node) {
+  if (!node || typeof node !== "object") return false;
+  if (node.__obf) return false;
+  if (node.type === "NumericLiteral" && typeof node.value === "number") return true;
+  if (node.type === "StringLiteral" && typeof node.value === "string") return true;
+  if (node.type === "BinaryExpression" && _VM_BINOP[node.operator]) {
+    return vmCanCompileExpression(node.left) && vmCanCompileExpression(node.right);
+  }
+  return false;
+}
+
+function vmCanCompileStatement(node) {
+  if (!node || node.type !== "CallStatement") return false;
+  const call = node.expression;
+  if (!call || call.type !== "CallExpression") return false;
+  if (!call.base || call.base.type !== "Identifier" || call.base.name !== "print") return false;
+  if (!Array.isArray(call.arguments) || call.arguments.length === 0) return false;
+  for (const arg of call.arguments) if (!vmCanCompileExpression(arg)) return false;
+  return true;
+}
+
+function vmCompileExpression(node, out) {
+  if (node.type === "NumericLiteral") { out.push([_VM_OP.LOADN, node.value]); return; }
+  if (node.type === "StringLiteral")  { out.push([_VM_OP.LOADS, node.value]); return; }
+  if (node.type === "BinaryExpression") {
+    vmCompileExpression(node.left, out);
+    vmCompileExpression(node.right, out);
+    out.push([_VM_BINOP[node.operator]]);
+    return;
+  }
+  throw new Error("vmCompileExpression: unreachable for " + node.type);
+}
+
+function vmCompileStatement(callStmt, out) {
+  const startPc = out.length + 1;   // 1-based, matches Lua indexing
+  const args = callStmt.expression.arguments;
+  for (const arg of args) vmCompileExpression(arg, out);
+  out.push([_VM_OP.PRINT, args.length]);
+  out.push([_VM_OP.HALT]);
+  return startPc;
+}
+
+function vmSerializeInstruction(inst) {
+  const parts = [String(inst[0])];
+  for (let i = 1; i < inst.length; i++) {
+    const v = inst[i];
+    if (typeof v === "number") parts.push(String(v));
+    else if (typeof v === "string") parts.push(JSON.stringify(v));
+    else throw new Error("vmSerializeInstruction: bad operand type " + typeof v);
+  }
+  return "{" + parts.join(",") + "}";
+}
+
+function vmGenerateBytecodeTable(bytecodeVar, instructions) {
+  return "local " + bytecodeVar + "={" +
+         instructions.map(vmSerializeInstruction).join(",") + "}";
+}
+
+// Dispatcher: pure switch, loud errors, no pcall wrapper, no loadstring.
+// Compatible with both Lua 5.1 (Roblox executors) and 5.3+ (Luau) via the
+// `table.unpack or unpack` idiom.
+function vmGenerateDispatcher(vmFnName, bytecodeVar) {
+  return [
+    "local function " + vmFnName + "(pc)",
+    " local stack={} local sp=0",
+    " local _unp=table.unpack or unpack",
+    " while true do",
+    "  local inst=" + bytecodeVar + "[pc]",
+    "  if not inst then error(\"[VM] pc out of bounds: \"..tostring(pc)) end",
+    "  local op=inst[1]",
+    "  if op==1 then sp=sp+1; stack[sp]=inst[2]",
+    "  elseif op==2 then sp=sp+1; stack[sp]=inst[2]",
+    "  elseif op==3 then local b=stack[sp]; sp=sp-1; stack[sp]=stack[sp]+b",
+    "  elseif op==4 then local b=stack[sp]; sp=sp-1; stack[sp]=stack[sp]-b",
+    "  elseif op==5 then local b=stack[sp]; sp=sp-1; stack[sp]=stack[sp]*b",
+    "  elseif op==6 then local b=stack[sp]; sp=sp-1; stack[sp]=stack[sp]/b",
+    "  elseif op==7 then local b=stack[sp]; sp=sp-1; stack[sp]=stack[sp]%b",
+    "  elseif op==8 then local b=stack[sp]; sp=sp-1; stack[sp]=tostring(stack[sp])..tostring(b)",
+    "  elseif op==9 then",
+    "    local n=inst[2]",
+    "    local args={}",
+    "    for i=n,1,-1 do args[i]=stack[sp-(n-i)] end",
+    "    sp=sp-n",
+    "    print(_unp(args,1,n))",
+    "  elseif op==10 then return",
+    "  else error(\"[VM] unknown opcode: \"..tostring(op)) end",
+    "  pc=pc+1",
+    " end",
+    "end",
+  ].join(" ");
+}
+
+
 // Decide whether a string is safe to encrypt.
 function _shouldEncrypt(value, manifest, strictMode) {
   if (typeof value !== "string") return false;
@@ -880,6 +986,7 @@ function serialize(node) {
   if (node.__obf) {
     if (node.__obf.type === "str") return "_D(" + bytesToLuaTable(node.__obf.bytes) + ")";
     if (node.__obf.type === "num") return node.__obf.expr;
+    if (node.__obf.type === "vm")  return node.__obf.expr;
   }
   switch (node.type) {
     case "Chunk": return serializeBlock(node.body);
@@ -1475,6 +1582,72 @@ function _pipeline(rawCode, level, options, report) {
     }
   }
 
+  // Stage: inner VM wrap (v25.6). Runs BEFORE string-encryption so we
+  // still see literal strings, not _D() calls. Maximum tier only; smart-skip
+  // on hook/reflection payloads to stay conservative.
+  let vmFnName = null;
+  let vmBcVar  = null;
+  let vmBytecode = [];
+  let vmStatementsWrapped = 0;
+  if (effectiveLevel === "maximum" &&
+      !profile.hasHookfunction && !profile.hasHookmetamethod &&
+      !profile.hasRuntimeReflection) {
+    try {
+      const localVmFn = randHexName(3);
+      const localBcVar = randHexName(3);
+      const localBc = [];
+      let wrappedCount = 0;
+
+      // Deep-clone the AST for the trial. If validate() fails after we
+      // patch it we discard the clone and keep goodAst untouched.
+      const trialAst = cloneAst(goodAst);
+      if (trialAst && Array.isArray(trialAst.body)) {
+        for (const stmt of trialAst.body) {
+          if (vmCanCompileStatement(stmt)) {
+            const startPc = vmCompileStatement(stmt, localBc);
+            // Replace the statement's expression with an __obf marker whose
+            // rendered form is a plain call to the VM dispatcher.
+            stmt.expression.__obf = {
+              type: "vm",
+              expr: localVmFn + "(" + startPc + ")",
+            };
+            wrappedCount++;
+          }
+        }
+      }
+
+      if (wrappedCount >= 1) {
+        // Serialize the trial AST WITH the dispatcher + bytecode prepended
+        // and confirm the whole thing still parses. If it does, commit.
+        const trialCode = serialize(trialAst);
+        const dispatcherSrc = vmGenerateDispatcher(localVmFn, localBcVar);
+        const bcTableSrc = vmGenerateBytecodeTable(localBcVar, localBc);
+        const trialFull = bcTableSrc + " " + dispatcherSrc + " " + trialCode;
+        const chk = validate(trialFull);
+        if (chk.ok) {
+          goodAst  = trialAst;
+          goodCode = trialCode;    // dispatcher+bytecode prepended in wrap phase
+          vmFnName = localVmFn;
+          vmBcVar  = localBcVar;
+          vmBytecode = localBc;
+          vmStatementsWrapped = wrappedCount;
+          report.layers.vmWrap = true;
+          report.stagesSucceeded.push("vm-wrap");
+          if (report.stats) {
+            report.stats.vmStatements = wrappedCount;
+          }
+        } else {
+          report.warn("VM wrap produced invalid Lua (" + chk.error + ") - skipped");
+          report.stagesSkipped.push("vm-wrap");
+        }
+      }
+      // wrappedCount === 0: nothing eligible, silent skip (not even a warn).
+    } catch (e) {
+      report.warn("VM wrap threw: " + e.message + " - skipped");
+      report.stagesSkipped.push("vm-wrap");
+    }
+  }
+
   // Stage: string encryption
   {
     const local = { encrypted: 0, skipped: 0 };
@@ -1508,7 +1681,14 @@ function _pipeline(rawCode, level, options, report) {
   // Wrap: decoder + optional poison pool.
   // v25.5: pass xorMask into makeStringDecoder. When mask is null the
   // decoder is byte-for-byte identical to the pre-v25.5 version.
+  // v25.6: if VM wrap ran, prepend dispatcher + bytecode table FIRST so
+  // integrity + anti-tamper + anti-dump + anti-debugger cover it too.
   let wrapped = goodCode;
+  if (report.layers.vmWrap && vmFnName && vmBcVar) {
+    const bcTableSrc = vmGenerateBytecodeTable(vmBcVar, vmBytecode);
+    const dispatcherSrc = vmGenerateDispatcher(vmFnName, vmBcVar);
+    wrapped = bcTableSrc + " " + dispatcherSrc + " " + wrapped;
+  }
   if (report.layers.stringEncryption) {
     const decoderCode = makeStringDecoder(decoderFn, encKey, encShift, xorMask);
     wrapped = decoderCode + " local _D=" + decoderFn + " " + wrapped;
@@ -1633,6 +1813,17 @@ function _pipeline(rawCode, level, options, report) {
     report.warn("Wrapped output failed validation (" + finalCheck.error +
                 ") - falling back to bare transformed source");
     wrapped = goodCode;
+    // If the VM stage ran, goodCode still has __obf 'vm' markers referring
+    // to vmFnName. Without the dispatcher those become undefined calls at
+    // runtime. Fall back to the pre-VM serialization instead: re-serialize
+    // the baseline AST (which has no __obf 'vm' markers).
+    if (report.layers.vmWrap) {
+      try {
+        wrapped = serialize(baselineAst);
+      } catch (_) { /* best-effort */ }
+      report.layers.vmWrap = false;
+      if (report.stats) report.stats.vmStatements = 0;
+    }
     report.layers.constantPool = false;
     report.layers.stringEncryption = false;
     report.layers.byteLevelXor = false;
