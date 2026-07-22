@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.28-compound - v25.27 + compound-assign walker (fixes greedy RHS)
+// AzureVM Obfuscator v25.29-diagnostic - Luau walkers DISABLED for bug isolation
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -560,7 +560,8 @@ function preprocess(rawCode) {
   // paren-balance walker (Option 2)." This IS that walker. Instead of a regex
   // that miscounts nested parens, we scan token-by-token, track paren depth,
   // and only strip `: Type` inside function parameter lists.
-  work = _stripLuauParamTypes(work);
+  // DIAGNOSTIC v25.29: param stripper disabled
+  // work = _stripLuauParamTypes(work);
   changesMarker: /* v25.19-comment-preserved-below */
   // (b-legacy) function params (name: Type, ...) -- ORIGINAL v25.19 removal note.
   // The old paren-walker regex mangled nested calls like fn((a or {})) by
@@ -577,7 +578,8 @@ function preprocess(rawCode) {
   // Luau test case (regex stripped ":method" because "local" followed).
   // The new implementation only strips return-type annotations that appear
   // immediately after a function's parameter-list closing paren.
-  work = _stripLuauReturnTypes(work);
+  // DIAGNOSTIC v25.29: return-type stripper disabled
+  // work = _stripLuauReturnTypes(work);
   // (d) type Foo = ...
   work = work.replace(/^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:<[^>]*>)?\s*=.*$/gm, "");
   // (e) export type ...
