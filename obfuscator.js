@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.9 - Per-layer smart-skip (unlock guards on reflection scripts)
+// AzureVM Obfuscator v25.9 - Per-layer smart-skip + Byte-XOR unlock
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1692,8 +1692,11 @@ function _pipeline(rawCode, level, options, report) {
   // enabling/disabling this layer is a pure superset -- never a break.
   let xorMask = null;
   if (effectiveLevel === "maximum" &&
-      !profile.hasHookfunction && !profile.hasHookmetamethod &&
-      !profile.hasRuntimeReflection) {
+      !profile.hasHookfunction && !profile.hasHookmetamethod) {
+    // v25.9: Byte-XOR is a pure encoding on encrypted string bytes -- it
+    // does not interact with any runtime script behavior. Only actual
+    // hook installation (which could replace bit32.bxor) is a real risk,
+    // so hasRuntimeReflection is no longer part of the skip trigger.
     const buf = crypto.randomBytes(4);
     xorMask = [buf[0], buf[1], buf[2], buf[3]];
   }
