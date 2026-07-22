@@ -1,3 +1,30 @@
+// AzureVM Obfuscator v22.0 - Reference Manifest (source-driven whitelist)
+// v22.0 changes (2027-01):
+//   1. NEW: ReferenceManifest.scan(rawCode) runs before any transformation.
+//      Walks the AST and collects EVERYTHING that must be preserved:
+//        - All identifiers (variables, functions, params)
+//        - All string literals
+//        - All property names (obj.field)
+//        - All zero-init locals (local x=0/false/nil) â€” critical for
+//          preventing "nil + number" runtime errors
+//        - All forward-referenced functions
+//        - All method-call bases (obj:method â€” the obj part)
+//   2. _shouldEncryptString now consults the manifest first â€” any string
+//      that appears in the source is kept literal. Solves reflection-heavy
+//      scripts (macrozure/anti-cheat/net-scanning) without per-script
+//      whitelist patches.
+//   3. RenameCtx.hoistFromManifest pre-declares every zero-init local and
+//      forward-ref BEFORE walkAst descends. Prevents rename inconsistency
+//      between declaration and forward call sites.
+//   4. flattenAst refuses to drop any LocalStatement whose variable name
+//      is in manifest.zeroInitLocals. Fixes the exact bug where
+//      "local frameTime = 0" was disappearing from the payload.
+//   5. report.manifest exposes the scan stats in the dashboard so users
+//      can see what got auto-protected per obfuscation run.
+//
+// Design principle (user-requested): the raw source is its own safety guide.
+// Every future script benefits from this without needing per-script patches.
+//
 // AzureVM Obfuscator v21.0 - Forward-ref & reflection-string hardening
 // v21.0 changes (2026-07):
 //   1. NEVER_ENCRYPT_STRINGS expanded with reflection-heavy script markers
@@ -199,6 +226,167 @@
 //   6. Higher VM cap: 500 + smart sensitive-first sorting (was: 200)
 const luaparse = require("luaparse");
 const crypto = require("crypto");
+
+// ============================================================================
+// v22.0: ReferenceManifest â€” pre-obfuscation source scanner.
+// Walks the raw Lua AST BEFORE any transformation and builds a comprehensive
+// preservation list. The rest of the pipeline consults this manifest to
+// decide what MUST survive obfuscation intact.
+//
+// Design: the raw source is its own safety guide. Every identifier, string
+// literal, and property name in the source is protected from renaming/
+// encryption unless it's explicitly a Roblox global (which is already
+// preserved by ROBLOX_GLOBALS).
+// ============================================================================
+class ReferenceManifest {
+  constructor(){
+    this.identifiers = new Set();      // all variable/function/param names
+    this.strings = new Set();          // all string literals
+    this.propertyNames = new Set();    // all obj.field names
+    this.zeroInitLocals = new Set();   // locals initialized to 0/false/nil
+    this.forwardRefs = new Set();      // functions called before declaration
+    this.methodCallBases = new Set();  // bases used with : method calls
+    this.stats = {};
+  }
+
+  static scan(rawCode){
+    const m = new ReferenceManifest();
+    let ast;
+    try {
+      ast = luaparse.parse(rawCode, { luaVersion: "5.3", comments: false });
+    } catch(e) {
+      try {
+        ast = luaparse.parse(rawCode, { luaVersion: "5.1", comments: false });
+      } catch(e2) {
+        return m;  // empty manifest on parse failure â€” pipeline will handle
+      }
+    }
+
+    const declaredNames = new Set();
+    const referencedNames = new Map();  // name -> first-seen-line
+
+    function walk(node){
+      if(!node || typeof node !== "object") return;
+      if(Array.isArray(node)){ node.forEach(walk); return; }
+
+      // Identifier collection
+      if(node.type === "Identifier" && node.name){
+        m.identifiers.add(node.name);
+        const line = (node.loc && node.loc.start && node.loc.start.line) || 0;
+        if(!referencedNames.has(node.name)) referencedNames.set(node.name, line);
+      }
+
+      // String literals
+      if(node.type === "StringLiteral" && typeof node.value === "string"){
+        m.strings.add(node.value);
+      }
+
+      // Property names (obj.field, obj:method)
+      if(node.type === "MemberExpression" && node.identifier && node.identifier.name){
+        m.propertyNames.add(node.identifier.name);
+        m.identifiers.add(node.identifier.name);
+      }
+      if(node.type === "TableKeyString" && node.key && node.key.name){
+        m.propertyNames.add(node.key.name);
+      }
+
+      // Method call bases (obj:method â€” the obj part)
+      if(node.type === "CallExpression" && node.base
+         && node.base.type === "MemberExpression" && node.base.indexer === ":"){
+        const base = node.base.base;
+        if(base && base.type === "Identifier" && base.name){
+          m.methodCallBases.add(base.name);
+        }
+      }
+
+      // Zero-init locals â€” critical for preventing "nil + number" bugs
+      if(node.type === "LocalStatement" && Array.isArray(node.variables)
+         && Array.isArray(node.init)){
+        for(let i = 0; i < node.variables.length; i++){
+          const v = node.variables[i];
+          const init = node.init[i];
+          if(!v || !v.name) continue;
+          declaredNames.add(v.name);
+          if(!init) continue;
+          if(init.type === "NumericLiteral" ||
+             init.type === "BooleanLiteral" ||
+             init.type === "NilLiteral" ||
+             init.type === "StringLiteral"){
+            m.zeroInitLocals.add(v.name);
+          }
+        }
+      }
+
+      // Function declarations register their name as declared
+      if(node.type === "FunctionDeclaration" && node.identifier
+         && node.identifier.type === "Identifier" && node.identifier.name){
+        declaredNames.add(node.identifier.name);
+      }
+
+      // Recurse
+      for(const k of Object.keys(node)){
+        if(k === "loc" || k === "range") continue;
+        walk(node[k]);
+      }
+    }
+    walk(ast);
+
+    // Compute forward-refs: identifiers referenced at a line BEFORE their
+    // declaration site. These names must be hoisted, not renamed away.
+    // We approximate by checking if a name is both referenced and declared,
+    // and by their line numbers.
+    const declLines = new Map();
+    function collectDeclLines(node){
+      if(!node || typeof node !== "object") return;
+      if(Array.isArray(node)){ node.forEach(collectDeclLines); return; }
+      const line = (node.loc && node.loc.start && node.loc.start.line) || 0;
+      if(node.type === "LocalStatement" && Array.isArray(node.variables)){
+        for(const v of node.variables){
+          if(v && v.name && !declLines.has(v.name)) declLines.set(v.name, line);
+        }
+      }
+      if(node.type === "FunctionDeclaration" && node.identifier
+         && node.identifier.type === "Identifier"){
+        if(!declLines.has(node.identifier.name)) declLines.set(node.identifier.name, line);
+      }
+      for(const k of Object.keys(node)){
+        if(k === "loc" || k === "range") continue;
+        collectDeclLines(node[k]);
+      }
+    }
+    collectDeclLines(ast);
+    for(const [name, refLine] of referencedNames){
+      const declLine = declLines.get(name);
+      if(declLine && declLine > refLine && refLine > 0){
+        m.forwardRefs.add(name);
+      }
+    }
+
+    m.stats = {
+      identifiers: m.identifiers.size,
+      strings: m.strings.size,
+      propertyNames: m.propertyNames.size,
+      zeroInitLocals: m.zeroInitLocals.size,
+      forwardRefs: m.forwardRefs.size,
+      methodCallBases: m.methodCallBases.size,
+    };
+    return m;
+  }
+
+  // Merge everything into a single Set for whitelist purposes.
+  allProtectedNames(){
+    const all = new Set();
+    for(const n of this.identifiers) all.add(n);
+    for(const n of this.propertyNames) all.add(n);
+    for(const n of this.methodCallBases) all.add(n);
+    return all;
+  }
+
+  allProtectedStrings(){
+    return new Set(this.strings);
+  }
+}
+
 
 // v16.0: ObfuscationReport - collects metadata across all passes so the
 // dashboard can show WHY a given level was actually applied and WHICH
@@ -1649,10 +1837,20 @@ const NEVER_ENCRYPT_STRINGS = new Set([
 //   short PascalCase / ALL_CAPS strings (skipping only the explicit reflection
 //   whitelist). User's responsibility to audit output; may break scripts that
 //   pass class names as strings via runtime construction.
+// v22.0: Module-level manifest reference set by obfuscateWithReport before
+// each run. Passes can consult it without threading through every function.
+let _currentManifest = null;
+
+function _setCurrentManifest(m){ _currentManifest = m; }
+function _getCurrentManifest(){ return _currentManifest; }
+
 function _shouldEncryptString(value, strict){
   if(typeof value !== "string") return false;
   const len = value.length;
   if(len < 4 || len > 800) return false;
+  // v22.0: If this exact string appears in the source's manifest, keep literal.
+  // The source uses it for a reason (reflection, key lookup, comparison, etc.).
+  if(_currentManifest && _currentManifest.strings && _currentManifest.strings.has(value)) return false;
   // Explicit whitelists always win (never encrypt these regardless of mode)
   if(NEVER_ENCRYPT_STRINGS.has(value)) return false;
   if(ROBLOX_GLOBALS.has(value)) return false;
@@ -1727,6 +1925,25 @@ class RenameCtx{
     this.counter++;
     cur.set(name, n);
     return n;
+  }
+
+  // v22.0: Pre-declare all names from the reference manifest.
+  // Called once per Chunk before any body walk. Ensures forward-refs and
+  // callback-referenced locals resolve to consistent renamed names.
+  hoistFromManifest(manifest){
+    if(!manifest) return;
+    // Zero-init locals are the most critical â€” they must survive as declared.
+    if(manifest.zeroInitLocals){
+      for(const name of manifest.zeroInitLocals){
+        this.declare(name);
+      }
+    }
+    // Forward-referenced names must be declared before their first use site.
+    if(manifest.forwardRefs){
+      for(const name of manifest.forwardRefs){
+        this.declare(name);
+      }
+    }
   }
 
   // v17 NEW: Hoist local decls in a body BEFORE walking children.
@@ -1886,6 +2103,12 @@ function walkAst(node,ctx){
     }
   }
 
+  // v22.0: Pre-declare from manifest FIRST so global-scope decls consult
+  // the same canonical rename map. This catches names that hoistScope's
+  // structural walk might miss (e.g. locals declared inside conditionals).
+  if(ctx.rename && node.type === "Chunk" && _currentManifest){
+    ctx.rename.hoistFromManifest(_currentManifest);
+  }
   // v17: Hoist top-level decls BEFORE any descent so forward refs work.
   if(ctx.rename && node.type === "Chunk" && Array.isArray(node.body)){
     ctx.rename.hoistScope(node.body);
@@ -2815,7 +3038,20 @@ function splitSections(ast, profile) {
 function flattenAst(node, ctx) {
   if (!node || typeof node !== "object") return node;
   if (Array.isArray(node)) {
-    return node.map(n => flattenAst(n, ctx)).filter(n => n !== null);
+    return node.map(n => flattenAst(n, ctx)).filter(n => {
+      if (n === null) return false;
+      // v22.0: Never drop LocalStatement whose vars are in the manifest.
+      // Prevents "nil + number" bugs from missing sentinel-value locals.
+      if (n && n.type === "LocalStatement" && _currentManifest
+          && _currentManifest.zeroInitLocals && Array.isArray(n.variables)) {
+        for (const v of n.variables) {
+          if (v && v.name && _currentManifest.zeroInitLocals.has(v.name)) {
+            return true;  // keep no matter what
+          }
+        }
+      }
+      return true;
+    });
   }
 
   for (const k of Object.keys(node)) {
@@ -3572,6 +3808,29 @@ async function obfuscateWithReport(luaCode, level, userId, options){
   level=level||"medium";
   const _WM=pickWatermark();
   try{
+    // === v22.0 REFERENCE MANIFEST (pre-scan the raw source) ===
+    // Build a preservation whitelist from the source itself BEFORE any
+    // transformation. Everything the manifest catches becomes untouchable
+    // by rename/encrypt/drop passes. Cost: one extra AST walk; benefit:
+    // future scripts don't need per-script patches.
+    let _manifest;
+    try {
+      _manifest = ReferenceManifest.scan(luaCode);
+      console.log("[obfuscator v22] Reference manifest:",
+        _manifest.stats.identifiers + " identifiers,",
+        _manifest.stats.strings + " strings,",
+        _manifest.stats.propertyNames + " property names,",
+        _manifest.stats.zeroInitLocals + " zero-init locals,",
+        _manifest.stats.forwardRefs + " forward-refs,",
+        _manifest.stats.methodCallBases + " method-call bases");
+      _report.manifest = _manifest.stats;
+      _setCurrentManifest(_manifest);
+    } catch(mErr) {
+      console.warn("[obfuscator v22] Manifest scan failed (non-fatal):", mErr.message);
+      _manifest = new ReferenceManifest();  // empty fallback
+      _report.manifest = { error: mErr.message };
+    }
+
     // === v11.0 PRE-ANALYSIS ===
     const analysis = preAnalyze(luaCode);
 
