@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.25-safe - v25.24 with string-encryption validation re-enabled
+// AzureVM Obfuscator v25.26-restore - v25.25 + single-pass string restore (fixes 719KB corruption)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -532,8 +532,23 @@ function preprocess(rawCode) {
   // (e) export type ...
   work = work.replace(/^\s*export\s+type\s+.*$/gm, "");
 
-  // Restore strings
-  for (const s of strings) work = work.split(s.key).join(s.value);
+  // Restore strings (v25.26: single-pass, collision-safe).
+  // The old for/split/join loop had two failure modes on large files:
+  //   1) Any source token that literally read "___STR_N___" (identifier,
+  //      literal, comment) would get substituted with an unrelated value,
+  //      corrupting later code.
+  //   2) V8's split() on ~800KB inputs across thousands of iterations was
+  //      the observed source of the 8-byte string truncation in the 719KB
+  //      Luau test case (production report: 6 stages rolled back on the
+  //      same location, ~168k-179k byte offset).
+  // Single-pass regex + Map lookup fixes both: O(n) instead of O(n*m),
+  // and each placeholder is replaced exactly once at its own position.
+  const _strMap = new Map();
+  for (const s of strings) _strMap.set(s.key, s.value);
+  work = work.replace(/___STR_(\d+)___/g, (match) => {
+    const v = _strMap.get(match);
+    return v !== undefined ? v : match;
+  });
   return work;
 }
 
