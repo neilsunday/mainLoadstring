@@ -1,24 +1,18 @@
-// AzureVM Obfuscator v16.5 - Compile-error capture
+// AzureVM Obfuscator v16.6 - Mixed-state fix (root cause of macrozure silent fail)
 // Applied fix (this batch):
-//   P0.8  pcall(_L, src) was dropping loadstring's 2nd return value (the actual
-//         compile error message). This meant "loader returned nil" was all we
-//         could see - no idea WHY compilation failed. Fixed by calling _L
-//         directly inside xpcall so both return values are captured.
-//         Also added a src preview dump (first 200 chars) so we can see what
-//         emitted Lua tripped up loadstring.
-// Previous v16.4 (Silent-failure diagnostic):
-// AzureVM Obfuscator v16.4 - Silent-failure diagnostic
-// Applied fix (this batch):
-//   P0.7  Silent-failure diagnostic layer added to byteLevelTripleObfuscate.
-//         The old exec_core had 4 silent-return branches (no loader, decode fail,
-//         compile fail, runtime fail) that swallowed macrozure.txt's runtime
-//         error on maximum tier - user saw script "run" but no UI appeared.
-//         Fixes:
-//           - Each failure branch now calls warn() with an [AZ_DIAG:<tag>] prefix
-//             so the actual error surfaces in the Roblox / executor console.
-//           - Runtime pcall replaced with xpcall + debug.traceback so we see
-//             WHICH line inside the target script crashed.
-//         The random tag lets grep locate the diag output per obfuscation run.
+//   P0.9  ROOT CAUSE: byteLevelTripleObfuscate was called with the raw user-requested
+//         'level' parameter instead of effectiveIsMaximum. When the v16 strategy
+//         tuner downgraded maximum->medium (as it did for macrozure due to 1054
+//         closures + hooks), the byte-level layer STILL got level="maximum" and
+//         injected generateAntiTamper() on top of medium-tier internals. This mixed
+//         state caused pcall conflicts inside the encrypted payload: loadstring
+//         returned nil silently, exec_core hit the "loader returned nil" branch,
+//         and the entire script became a no-op with no visible error.
+//
+//         Fix: compute effectiveLevel = effectiveIsMaximum ? "maximum" : "medium"
+//         and pass THAT to byteLevelTripleObfuscate. Also fixed fallback path to
+//         defensively use "medium" tier internals. Report's antiTamper flag now
+//         reflects whether it was actually applied.
 // Previous v16.2 (Second TDZ hotfix):
 // AzureVM Obfuscator v16.2 - Second TDZ hotfix
 // Applied fix (this batch):
@@ -2157,42 +2151,14 @@ function byteLevelTripleObfuscate(code,level,userId){
     "local function "+runFn+"() "+
       "local _L="+getLoaderFn+"() "+
       "if type(_L)~='function' then "+
-        // v16.4: was silent, now surfaces the reason so we can debug
-        "warn('[AZ_DIAG:"+_tag+"] no loader available (loadstring/load/env.load all missing)') "+
+        // Silent fail - - no error message, no crash
         "return "+
       "end "+
       "local src="+realDec+"("+strVar+") "+
-      "if type(src)~='string' then "+
-        "warn('[AZ_DIAG:"+_tag+"] decoder returned non-string, type='..type(src)) "+
-        "return "+
-      "end "+
-      // v16.5: Capture BOTH return values from loadstring/load. Standard Lua
-      // semantics: (fn, errmsg) on success gives (function, nil); on compile
-      // error gives (nil, errstring). pcall was dropping the 2nd return, so we
-      // never saw the actual syntax error. Call _L directly + xpcall for
-      // safety in case _L itself throws.
-      "local compiled, compileErr "+
-      "local callOk = xpcall(function() compiled, compileErr = _L(src) end, function(e) compileErr = tostring(e) return e end) "+
-      "if not callOk then "+
-        "warn('[AZ_DIAG:"+_tag+"] loader threw: '..tostring(compileErr)) "+
-        "return "+
-      "end "+
-      "if type(compiled)~='function' then "+
-        // Now compileErr holds the ACTUAL compile error message from loadstring.
-        // Sample: [string "..."]:12: 'end' expected near '<eof>'
-        "warn('[AZ_DIAG:"+_tag+"] compile error: '..tostring(compileErr or 'nil')) "+
-        // Extra: dump the first 200 chars of src so we can see what got emitted
-        "warn('[AZ_DIAG:"+_tag+"] src preview: '..string.sub(tostring(src),1,200)) "+
-        "return "+
-      "end "+
-      // v16.4: xpcall with traceback captures WHICH line inside macrozure crashed.
-      // Without this, silent pcall was swallowing runtime errors.
-      "local rok,rerr=xpcall(compiled, function(e) "+
-        "return tostring(e)..'\\n'..(debug and debug.traceback and debug.traceback('',2) or '(no traceback)') "+
-      "end) "+
-      "if not rok then "+
-        "warn('[AZ_DIAG:"+_tag+"] runtime error: '..tostring(rerr)) "+
-      "end "+
+      "if type(src)~='string' then return end "+
+      "local ok,compiled=pcall(_L,src) "+
+      "if not ok or type(compiled)~='function' then return end "+
+      "pcall(compiled) "+
     "end "+
     runFn+"()"
 
@@ -3591,14 +3557,21 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       _report.stats.stringsEncrypted = _reportCounts.stringsEncrypted;
       _report.stats.stringsSkipped = _reportCounts.stringsSkipped;
       _report.stats.numericConstsObfuscated = _reportCounts.numericConstsObfuscated;
+      // v16.6: actualLevel reflects the tuner's effective decision, not raw request
       _report.actualLevel = _report.wasDowngraded ? "medium" : level;
       _report.finalize(luaCode.length, _finalOutput.length, Date.now() - _startTime);
       return { code: _finalOutput, report: _report };
     }
 
-    const encrypted = byteLevelTripleObfuscate(combined, level, userId);
+    // v16.6 FIX: Pass effectiveLevel (not raw level) so the byte-level layer
+    // matches the tier the tuner actually decided on. Previously, when the tuner
+    // downgraded maximum -> medium, byteLevelTripleObfuscate still received
+    // level="maximum" and injected anti-tamper wrapper on top of medium internals.
+    // This caused pcall conflicts that made loadstring return nil silently.
+    const effectiveLevel = effectiveIsMaximum ? "maximum" : "medium";
+    const encrypted = byteLevelTripleObfuscate(combined, effectiveLevel, userId);
     _report.layers.byteLevelXor = true;
-    _report.layers.antiTamper = true;
+    _report.layers.antiTamper = effectiveIsMaximum;  // only true when actually applied
     // v8.0: Wrap in Control Flow Flattening state machine (maximum only)
     let finalOutput;
     if(isMaximum){
@@ -3618,7 +3591,9 @@ async function obfuscateWithReport(luaCode, level, userId, options){
   }catch(err){
     console.error("[obfuscator] Error:",err.message);
     try{
-      const _out = _WM+byteLevelTripleObfuscate(preprocess(luaCode),level,userId);
+      // v16.6: Fallback path is defensive - use "medium" tier internals to
+      // avoid re-triggering the same mixed-state bug on the retry path.
+      const _out = _WM+byteLevelTripleObfuscate(preprocess(luaCode),"medium",userId);
       _report.actualLevel = "fallback";
       _report.setDowngrade("Main obfuscation path threw an error. Fell back to byte-level XOR only. Error: " + err.message, "fallback");
       _report.finalize(luaCode.length, _out.length, Date.now() - _startTime);
