@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.26-restore - v25.25 + single-pass string restore (fixes 719KB corruption)
+// AzureVM Obfuscator v25.27-noregex - v25.26 + return-type walker (fixes obj:method() corruption)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -522,11 +522,13 @@ function preprocess(rawCode) {
   // game scripts; the far more common `local x: Type = ...` form is handled
   // by a separate, non-paren-based regex that has no such bug.
   // If we ever need this again, do a proper paren-balance walker (Option 2).
-  // (c) return type: function foo(...): Type
-  work = work.replace(
-    /(\))\s*:\s*[A-Za-z_][A-Za-z0-9_.<>?]*(?=\s*(?:\n|--|\bthen\b|\bdo\b|\breturn\b|\blocal\b|\bif\b|\bfor\b|\bwhile\b|\brepeat\b|\bend\b|;|$))/g,
-    "$1"
-  );
+  // (c) return type: function foo(...): Type -- v25.27 REWRITTEN.
+  // The old regex matched `):Type` followed by any Lua keyword, which
+  // catastrophically corrupted `obj:method() local x = ...` in the 719KB
+  // Luau test case (regex stripped ":method" because "local" followed).
+  // The new implementation only strips return-type annotations that appear
+  // immediately after a function's parameter-list closing paren.
+  work = _stripLuauReturnTypes(work);
   // (d) type Foo = ...
   work = work.replace(/^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:<[^>]*>)?\s*=.*$/gm, "");
   // (e) export type ...
@@ -702,6 +704,115 @@ function _stripTypesFromParams(paramList) {
   });
 
   return cleaned.join(",");
+}
+
+
+// ============================================================================
+// v25.27 - Luau return-type stripper (function-scoped walker)
+// ============================================================================
+// For every `function` keyword that opens a parameter list, walk to the
+// matching close paren, then look forward for an optional `: ReturnType`.
+// Only in THAT position do we strip. Method calls (`obj:method()`) are never
+// touched because we never process them -- we only enter this code path when
+// we've just walked a function's parameter list.
+// ============================================================================
+function _stripLuauReturnTypes(code) {
+  const n = code.length;
+  const out = [];
+  let i = 0;
+  while (i < n) {
+    const fnIdx = code.indexOf("function", i);
+    if (fnIdx < 0) { out.push(code.substring(i)); break; }
+    const prev = fnIdx > 0 ? code[fnIdx - 1] : " ";
+    if (/[A-Za-z0-9_]/.test(prev)) {
+      out.push(code.substring(i, fnIdx + 8));
+      i = fnIdx + 8;
+      continue;
+    }
+    out.push(code.substring(i, fnIdx + 8));
+    i = fnIdx + 8;
+
+    // Skip whitespace + optional name chain + optional generics -- same as
+    // _stripLuauParamTypes. We copy the chars through to `out` verbatim.
+    while (i < n && /\s/.test(code[i])) { out.push(code[i]); i++; }
+    while (i < n && /[A-Za-z_]/.test(code[i])) {
+      while (i < n && /[A-Za-z0-9_]/.test(code[i])) { out.push(code[i]); i++; }
+      while (i < n && /\s/.test(code[i])) { out.push(code[i]); i++; }
+      if (i < n && (code[i] === "." || code[i] === ":")) {
+        out.push(code[i]); i++;
+        while (i < n && /\s/.test(code[i])) { out.push(code[i]); i++; }
+      } else break;
+    }
+    if (i < n && code[i] === "<") {
+      let depth = 1;
+      out.push(code[i]); i++;
+      while (i < n && depth > 0) {
+        if (code[i] === "<") depth++;
+        else if (code[i] === ">") depth--;
+        out.push(code[i]); i++;
+      }
+      while (i < n && /\s/.test(code[i])) { out.push(code[i]); i++; }
+    }
+    if (i >= n || code[i] !== "(") continue;
+
+    // Walk the parameter list with paren balance -- pass through unchanged.
+    out.push("("); i++;
+    let paren = 1;
+    while (i < n && paren > 0) {
+      const c = code[i];
+      if (c === "(") paren++;
+      else if (c === ")") { paren--; if (paren === 0) break; }
+      out.push(c); i++;
+    }
+    out.push(")"); i++;
+
+    // Now we're just past the closing ')' of the param list. Look ahead for
+    // ": Type" -- if present, consume and drop it.
+    let j = i;
+    while (j < n && /\s/.test(code[j])) j++;
+    if (j < n && code[j] === ":") {
+      // Skip the ':' and the following type expression.
+      let k = j + 1;
+      while (k < n && /\s/.test(code[k])) k++;
+      // The type can be: Name, Name.Sub, Name<T>, (Name, Name), {Name}, Name?,
+      // Name | Name, ()->Name. Walk with brackets balanced until we hit a
+      // clear end-of-type: end of line, comment, or one of the block openers.
+      let dp = 0, db = 0, dk = 0, da = 0;
+      const stopChars = new Set([",", ";"]);
+      while (k < n) {
+        const c = code[k];
+        if (c === "(") { dp++; k++; continue; }
+        if (c === ")") { if (dp === 0) break; dp--; k++; continue; }
+        if (c === "{") { db++; k++; continue; }
+        if (c === "}") { if (db === 0) break; db--; k++; continue; }
+        if (c === "[") { dk++; k++; continue; }
+        if (c === "]") { if (dk === 0) break; dk--; k++; continue; }
+        if (c === "<") { da++; k++; continue; }
+        if (c === ">") { if (da === 0) break; da--; k++; continue; }
+        if (dp === 0 && db === 0 && dk === 0 && da === 0) {
+          if (c === "\n" || stopChars.has(c)) break;
+          if (c === "-" && code[k + 1] === "-") break;
+          // Word-boundary end at Lua keywords.
+          if (/[A-Za-z_]/.test(c)) {
+            let e = k;
+            while (e < n && /[A-Za-z0-9_]/.test(code[e])) e++;
+            const word = code.substring(k, e);
+            if (word === "end" || word === "then" || word === "do" ||
+                word === "return" || word === "local" || word === "if" ||
+                word === "for" || word === "while" || word === "repeat") {
+              break;
+            }
+            k = e;
+            continue;
+          }
+        }
+        k++;
+      }
+      // Advance i past the consumed `: Type` section.
+      i = k;
+    }
+  }
+  return out.join("");
 }
 
 function lowerContinue(code) {
