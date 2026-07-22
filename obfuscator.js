@@ -1,18 +1,15 @@
-// AzureVM Obfuscator v16.6 - Mixed-state fix (root cause of macrozure silent fail)
-// Applied fix (this batch):
-//   P0.9  ROOT CAUSE: byteLevelTripleObfuscate was called with the raw user-requested
-//         'level' parameter instead of effectiveIsMaximum. When the v16 strategy
-//         tuner downgraded maximum->medium (as it did for macrozure due to 1054
-//         closures + hooks), the byte-level layer STILL got level="maximum" and
-//         injected generateAntiTamper() on top of medium-tier internals. This mixed
-//         state caused pcall conflicts inside the encrypted payload: loadstring
-//         returned nil silently, exec_core hit the "loader returned nil" branch,
-//         and the entire script became a no-op with no visible error.
-//
-//         Fix: compute effectiveLevel = effectiveIsMaximum ? "maximum" : "medium"
-//         and pass THAT to byteLevelTripleObfuscate. Also fixed fallback path to
-//         defensively use "medium" tier internals. Report's antiTamper flag now
-//         reflects whether it was actually applied.
+// AzureVM Obfuscator v17.0 - Adaptive scope (ULTIMATE FIX)
+// Applied fixes (this batch):
+//   ROOT CAUSE for macrozure silent-fail on maximum:
+//     - RenameCtx.lookup() no longer auto-declares unknown names.
+//     - Added hoistScope() pre-pass. Before walking a scope body,
+//       pre-declare all locals so forward refs resolve to same hex name.
+//     - Wired into Chunk (top-level) and FunctionDeclaration bodies.
+//   Consolidated fixes (from v16.3+v16.6):
+//     - hasRuntimeReflection detection (skips anti-debug for reflection scripts)
+//     - effectiveLevel threaded through byteLevelTripleObfuscate
+//     - Fallback catch-block defensively uses medium tier
+//     - Anti-debug threshold raised 2->3, gc pool 50k->200k
 // Previous v16.2 (Second TDZ hotfix):
 // AzureVM Obfuscator v16.2 - Second TDZ hotfix
 // Applied fix (this batch):
@@ -1624,10 +1621,31 @@ class RenameCtx{
   declare(name){
     if(ROBLOX_GLOBALS.has(name)) return name;
     if(this.externals.has(name)) return name;
+    // v17: If already declared in current scope (via hoist), reuse it.
+    const cur = this.scopes[this.scopes.length - 1];
+    if(cur.has(name)) return cur.get(name);
     const n = randHexName(6) + "_" + this.counter.toString(16);
     this.counter++;
-    this.scopes[this.scopes.length - 1].set(name, n);
+    cur.set(name, n);
     return n;
+  }
+
+  // v17 NEW: Hoist local decls in a body BEFORE walking children.
+  // Fixes forward-reference bug where setActive is used before declaration.
+  hoistScope(body){
+    if(!Array.isArray(body)) return;
+    for(const stmt of body){
+      if(!stmt || typeof stmt !== "object") continue;
+      if(stmt.type === "LocalStatement" && Array.isArray(stmt.variables)){
+        for(const v of stmt.variables){
+          if(v && v.type === "Identifier" && v.name) this.declare(v.name);
+        }
+      }
+      else if(stmt.type === "FunctionDeclaration" && stmt.isLocal
+              && stmt.identifier && stmt.identifier.type === "Identifier"){
+        this.declare(stmt.identifier.name);
+      }
+    }
   }
 
   lookup(name){
@@ -1638,6 +1656,8 @@ class RenameCtx{
         return this.scopes[i].get(name);
       }
     }
+    // v17 CRITICAL: don't auto-declare unknown names. Let them resolve
+    // to real globals at Lua runtime.
     return name;
   }
 
@@ -1751,6 +1771,11 @@ function walkAst(node,ctx){
     }
   }
 
+  // v17: Hoist top-level decls BEFORE any descent so forward refs work.
+  if(ctx.rename && node.type === "Chunk" && Array.isArray(node.body)){
+    ctx.rename.hoistScope(node.body);
+  }
+
   // v15.0: Scope management for function/loop bodies
   const opensNewScope = ctx.rename && (
     node.type==="FunctionDeclaration" ||
@@ -1770,6 +1795,10 @@ function walkAst(node,ctx){
       node.parameters.forEach(p=>{
         if(p.type==="Identifier"&&p.name) p.name=ctx.rename.declare(p.name);
       });
+    }
+    // v17: Hoist locals inside this function body before walking children.
+    if(node.body && Array.isArray(node.body)){
+      ctx.rename.hoistScope(node.body);
     }
   }
 
@@ -2567,6 +2596,10 @@ function profileScript(ast, rawCode) {
   else if (profile.maxBlockDepth >= 25 || profile.complexityScore >= 80) profile.riskTier = "medium";
   else profile.riskTier = "low";
 
+  // v17: Detect runtime reflection to skip anti-debug (was silent-exiting them).
+  const reflectionRe = /\b(getgc|debug\.info|debug\.getupvalues|debug\.getupvalue|debug\.getconstants|debug\.getproto|debug\.getprotos|debug\.getlocals|debug\.getlocal|debug\.setupvalue|debug\.setconstant|getreg|getrenv|getgenv|getsenv|getconnections)\s*\(/;
+  profile.hasRuntimeReflection = reflectionRe.test(rawCode);
+
   return profile;
 }
 
@@ -2821,7 +2854,7 @@ function generateAntiDebugger(softMode) {
   // executor while another succeeds.
   const fnName = randHexName(6);
   const scoreVar = randHexName(4);
-  const threshold = 2;
+  const threshold = 3;  // v17: raised - less trigger-happy
 
   let checks = "";
   // Check 1: debug.sethook active (single-step debugger)
@@ -2832,7 +2865,7 @@ function generateAntiDebugger(softMode) {
   // Check 2: getgc returns suspiciously large pool (scanner active)
   checks += "if type(getgc)=='function' then " +
       "local ok2,gc=pcall(getgc,false) " +
-      "if ok2 and type(gc)=='table' and #gc>50000 then " +
+      "if ok2 and type(gc)=='table' and #gc>200000 then " +  // v17: raised from 50k
         scoreVar + "=" + scoreVar + "+1 " +
       "end " +
     "end ";
@@ -3302,7 +3335,8 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       hasHookfunction: !!profile.hasHookfunction,
       hasHookmetamethod: !!profile.hasHookmetamethod,
       frameworks: profile.frameworks ? [...profile.frameworks] : [],
-      hotspotCount: profile.hotspots ? profile.hotspots.length : 0
+      hotspotCount: profile.hotspots ? profile.hotspots.length : 0,
+      hasRuntimeReflection: !!profile.hasRuntimeReflection
     };
     console.log("[obfuscator v13] Profile:",
       "risk=" + profile.riskTier,
@@ -3514,10 +3548,13 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     // false-positive). If the script uses ONE hook type, use soft mode which
     // skips the corresponding check.
     const usesBothHooks = profile.hasHookfunction && profile.hasHookmetamethod;
+    // v17: NEVER enable anti-debug for reflection-heavy scripts.
     const canEnableAntiDebug =
-      (profile.riskTier === "low" || profile.riskTier === "medium") ||
-      (profile.riskTier === "high" && !usesBothHooks) ||
-      (profile.riskTier === "extreme" && !usesBothHooks);
+      !profile.hasRuntimeReflection && (
+        (profile.riskTier === "low" || profile.riskTier === "medium") ||
+        (profile.riskTier === "high" && !usesBothHooks) ||
+        (profile.riskTier === "extreme" && !usesBothHooks)
+      );
     if (canEnableAntiDebug) {
       const softMode = profile.hasHookfunction || profile.hasHookmetamethod;
       console.log("[obfuscator v14] Enabling anti-debugger + anti-tamper layer" +
@@ -3532,7 +3569,11 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       console.log("[obfuscator v14]   Added anti-debugger" +
         (softMode ? " (gethook + getgc scan only)" : " (gethook + getgc scan + hookfunction detection)"));
     } else {
-      console.log("[obfuscator v14] Skipping anti-debugger layer (script uses both hookfunction+hookmetamethod - too risky)");
+      const skipReason = profile.hasRuntimeReflection
+        ? "script uses runtime reflection (getgc/debug.info/etc) - anti-debugger would false-positive"
+        : "script uses both hookfunction+hookmetamethod - too risky";
+      console.log("[obfuscator v14] Skipping anti-debugger layer (" + skipReason + ")");
+      _report.warn("Anti-debugger disabled: " + skipReason);
     }
     ob = addContinueLabels(ob);  // v9.1: replace goto __continue__ with safe no-op
     const decName=randHexName(3);
@@ -3557,21 +3598,16 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       _report.stats.stringsEncrypted = _reportCounts.stringsEncrypted;
       _report.stats.stringsSkipped = _reportCounts.stringsSkipped;
       _report.stats.numericConstsObfuscated = _reportCounts.numericConstsObfuscated;
-      // v16.6: actualLevel reflects the tuner's effective decision, not raw request
       _report.actualLevel = _report.wasDowngraded ? "medium" : level;
       _report.finalize(luaCode.length, _finalOutput.length, Date.now() - _startTime);
       return { code: _finalOutput, report: _report };
     }
 
-    // v16.6 FIX: Pass effectiveLevel (not raw level) so the byte-level layer
-    // matches the tier the tuner actually decided on. Previously, when the tuner
-    // downgraded maximum -> medium, byteLevelTripleObfuscate still received
-    // level="maximum" and injected anti-tamper wrapper on top of medium internals.
-    // This caused pcall conflicts that made loadstring return nil silently.
+    // v17: Pass effectiveLevel so byte-level layer matches tuner's decision.
     const effectiveLevel = effectiveIsMaximum ? "maximum" : "medium";
     const encrypted = byteLevelTripleObfuscate(combined, effectiveLevel, userId);
     _report.layers.byteLevelXor = true;
-    _report.layers.antiTamper = effectiveIsMaximum;  // only true when actually applied
+    _report.layers.antiTamper = effectiveIsMaximum;
     // v8.0: Wrap in Control Flow Flattening state machine (maximum only)
     let finalOutput;
     if(isMaximum){
@@ -3591,8 +3627,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
   }catch(err){
     console.error("[obfuscator] Error:",err.message);
     try{
-      // v16.6: Fallback path is defensive - use "medium" tier internals to
-      // avoid re-triggering the same mixed-state bug on the retry path.
+      // v17: Fallback uses medium tier to avoid re-triggering mixed-state bug.
       const _out = _WM+byteLevelTripleObfuscate(preprocess(luaCode),"medium",userId);
       _report.actualLevel = "fallback";
       _report.setDowngrade("Main obfuscation path threw an error. Fell back to byte-level XOR only. Error: " + err.message, "fallback");
