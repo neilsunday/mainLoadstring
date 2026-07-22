@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.14 - + Manual layer overrides (Phase 2a)
+// AzureVM Obfuscator v25.15 - Removed size-based auto-downgrade (Fix 1)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1664,15 +1664,18 @@ function _pipeline(rawCode, level, options, report) {
     hasRuntimeReflection: profile.hasRuntimeReflection,
   };
 
-  // Auto-downgrade: extreme risk -> medium unless force flag set.
+  // v25.15 Fix 1: no more tier auto-downgrade. Attempt the requested level.
+  // Per-stage rollback (validate() + last-known-good pattern used since v25.6)
+  // catches any layer whose output fails to parse and skips only that layer.
+  // An advisory warning is emitted so the report still surfaces the risk tier.
   let effectiveLevel = level;
   if (level === "maximum" && profile.riskTier === "extreme" && !options.forceMaximum) {
-    effectiveLevel = "medium";
-    report.wasDowngraded = true;
-    report.downgradeReason =
-      "Script risk tier is EXTREME (block depth " + profile.maxBlockDepth +
-      ", complexity " + profile.complexityScore + "). Auto-downgraded to medium " +
-      "to avoid runtime failures. Enable 'Force maximum' to override.";
+    report.warn(
+      "Script profile risk=EXTREME (functions=" + profile.functionCount +
+      ", depth=" + profile.maxBlockDepth +
+      ", complexity=" + profile.complexityScore +
+      "); attempting maximum tier. Per-stage rollback will skip any single layer that fails to parse."
+    );
   }
   report.actualLevel = effectiveLevel;
 
@@ -2327,15 +2330,18 @@ async function obfuscateWithStream(luaCode, level, userId, options) {
     hasRuntimeReflection: profile.hasRuntimeReflection,
   };
 
-  // Auto-downgrade decision.
+  // v25.15 Fix 1: no more tier auto-downgrade. Attempt the requested level.
+  // Per-stage rollback (validate() + last-known-good pattern used since v25.6)
+  // catches any layer whose output fails to parse and skips only that layer.
+  // An advisory warning is emitted so the report still surfaces the risk tier.
   let effectiveLevel = level;
   if (level === "maximum" && profile.riskTier === "extreme" && !options.forceMaximum) {
-    effectiveLevel = "medium";
-    report.wasDowngraded = true;
-    report.downgradeReason =
-      "Script risk tier is EXTREME (block depth " + profile.maxBlockDepth +
-      ", complexity " + profile.complexityScore + "). Auto-downgraded to medium " +
-      "to avoid runtime failures. Enable 'Force maximum' to override.";
+    report.warn(
+      "Script profile risk=EXTREME (functions=" + profile.functionCount +
+      ", depth=" + profile.maxBlockDepth +
+      ", complexity=" + profile.complexityScore +
+      "); attempting maximum tier. Per-stage rollback will skip any single layer that fails to parse."
+    );
   }
   report.actualLevel = effectiveLevel;
 
