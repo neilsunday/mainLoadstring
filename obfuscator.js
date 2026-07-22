@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.9 - Per-layer smart-skip + Byte-XOR unlock
+// AzureVM Obfuscator v25.10 - Per-layer smart-skip + Byte-XOR + Outer-VM unlock
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1693,10 +1693,8 @@ function _pipeline(rawCode, level, options, report) {
   let xorMask = null;
   if (effectiveLevel === "maximum" &&
       !profile.hasHookfunction && !profile.hasHookmetamethod) {
-    // v25.9: Byte-XOR is a pure encoding on encrypted string bytes -- it
-    // does not interact with any runtime script behavior. Only actual
-    // hook installation (which could replace bit32.bxor) is a real risk,
-    // so hasRuntimeReflection is no longer part of the skip trigger.
+    // v25.9+: Byte-XOR is pure encoding on encrypted string bytes.
+    // No collision with any script behavior other than hooked bit32.bxor.
     const buf = crypto.randomBytes(4);
     xorMask = [buf[0], buf[1], buf[2], buf[3]];
   }
@@ -1823,8 +1821,7 @@ function _pipeline(rawCode, level, options, report) {
   let wrapped = goodCode;
   let outerVmActive = false;
   if (effectiveLevel === "maximum" &&
-      !profile.hasHookfunction && !profile.hasHookmetamethod &&
-      !profile.hasRuntimeReflection) {
+      !profile.hasHookfunction && !profile.hasHookmetamethod) {
     try {
       if (report.layers.vmWrap && vmFnName && vmBcVar && vmBytecode.length > 0) {
         // Real path: encode the inner bytecode, replace the inner table
@@ -1920,9 +1917,6 @@ function _pipeline(rawCode, level, options, report) {
   // Stage: anti-debugger (silent-exit guard).
   // Only maximum tier. Skip ONLY when the script itself installs hooks
   // (hookfunction / hookmetamethod) that would collide with our probes.
-  // Scripts that merely READ debug info on external closures do not
-  // collide with our checks (which target our own closure + runtime
-  // hook table), so we no longer skip on hasRuntimeReflection alone.
   if (effectiveLevel === "maximum") {
     if (profile.hasHookfunction || profile.hasHookmetamethod) {
       report.warn("Anti-debugger skipped: script installs hooks (would false-positive)");
@@ -1947,11 +1941,7 @@ function _pipeline(rawCode, level, options, report) {
   }
 
   // Stage: anti-dump (silent-exit guard against bytecode dumpers).
-  // Only maximum tier. No smart-skip based on script content -- our
-  // probes are pure global-existence checks via rawget(getfenv(0), ...)
-  // that cannot false-positive on ANY script pattern. Even
-  // reflection-heavy scripts (getgc, debug.info, getupvalues) don't
-  // interact with the outer environment tables we scan.
+  // Only maximum tier. No smart-skip based on script content.
   if (effectiveLevel === "maximum") {
     try {
       const withAX = generateAntiDump() + " " + wrapped;
@@ -1972,10 +1962,7 @@ function _pipeline(rawCode, level, options, report) {
 
   // Stage: anti-tamper wrapper (silent-exit on hooked load/loadstring or
   // debugger single-stepping).
-  // Only maximum tier. Skip ONLY when the script installs hooks
-  // (hookfunction / hookmetamethod) that could replace load/loadstring
-  // with Lua closures and trip our probe. Reflection-only scripts
-  // (getgc, debug.info on external closures) don't touch load identity.
+  // Only maximum tier. Skip ONLY when the script installs hooks.
   if (effectiveLevel === "maximum") {
     if (profile.hasHookfunction || profile.hasHookmetamethod) {
       report.warn("Anti-tamper skipped: script installs hooks (would false-positive)");
