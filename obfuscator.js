@@ -1,3 +1,12 @@
+// AzureVM Obfuscator v15.1 - Options B+C (string encryption coverage)
+// Applied fixes (this batch):
+//   B  Loosened PascalCase filter: encrypt PascalCase strings of length >= 8
+//      (e.g. "ZureMacro", "PremiumMacro" now encrypted; short class names still safe)
+//   C  Strict mode via ctx.strictStrings (default: on for maximum tier only):
+//      - Encrypts ALL PascalCase strings (any length not in reflection whitelist)
+//      - Encrypts ALL_CAPS strings >= 6 chars
+//      Medium tier keeps Option B behavior for safety.
+// Previous v15.0 (Phase 3C):
 // AzureVM Obfuscator v15.0 - Phase 3C added (Multi-layer VM)
 // Applied fixes (this batch):
 //   3C  Multi-layer VM: outer 6-opcode meta-VM reconstructs inner bc[] at runtime
@@ -1442,20 +1451,38 @@ const NEVER_ENCRYPT_STRINGS = new Set([
   "rbxassetid","rbxthumb","rbxasset","http","https",
 ]);
 
-// v13.0 (2B): Decide if a StringLiteral is safe to encrypt.
+// v13.0 (2B) + v15.1 (Option B+C): Decide if a StringLiteral is safe to encrypt.
 // Returns true = safe to encrypt, false = keep literal.
-function _shouldEncryptString(value){
+//
+// Option B (default): Loosened PascalCase filter â€” PascalCase strings of length >= 8
+//   that don't match known Roblox class/service names ARE encrypted. This lifts
+//   things like "ZureMacro", "AzureLogo", "LogoHit" out of skip and into encrypt.
+//
+// Option C (strict mode): When ctx.strictStrings === true, encrypt even
+//   short PascalCase / ALL_CAPS strings (skipping only the explicit reflection
+//   whitelist). User's responsibility to audit output; may break scripts that
+//   pass class names as strings via runtime construction.
+function _shouldEncryptString(value, strict){
   if(typeof value !== "string") return false;
   const len = value.length;
-  if(len < 4 || len > 800) return false;                // too short / too long
-  if(NEVER_ENCRYPT_STRINGS.has(value)) return false;    // known reflection name
-  if(ROBLOX_GLOBALS.has(value)) return false;           // Lua/Roblox global name
-  if(value.startsWith("__")) return false;              // metatable convention
-  if(/^[A-Z][A-Za-z0-9]*$/.test(value)) return false;   // PascalCase (likely class/enum)
-  if(/^[A-Z0-9_]+$/.test(value)) return false;          // ALL_CAPS (likely constant/enum)
-  if(/^rbxassetid:\/\//.test(value)) return false;      // asset URI - engine parses
+  if(len < 4 || len > 800) return false;
+  // Explicit whitelists always win (never encrypt these regardless of mode)
+  if(NEVER_ENCRYPT_STRINGS.has(value)) return false;
+  if(ROBLOX_GLOBALS.has(value)) return false;
+  if(value.startsWith("__")) return false;
+  // Roblox asset URIs must stay literal for the engine to resolve
+  if(/^rbxassetid:\/\//.test(value)) return false;
   if(/^rbxthumb:\/\//.test(value)) return false;
   if(/^rbxasset:\/\//.test(value)) return false;
+  // ALL_CAPS: strict mode encrypts if >= 6 chars, default keeps them literal
+  if(/^[A-Z0-9_]+$/.test(value)) {
+    return !!strict && len >= 6;
+  }
+  // PascalCase handling
+  if(/^[A-Z][A-Za-z0-9]*$/.test(value)) {
+    if(strict) return true;                  // Option C: encrypt all PascalCase
+    return len >= 8;                          // Option B: encrypt long PascalCase only
+  }
   return true;
 }
 
@@ -1556,7 +1583,7 @@ function walkAst(node,ctx){
   // AND passes the content filter.
   if(node.type==="StringLiteral" && typeof node.value === "string"
      && ctx && ctx.stringKey != null && !ctx._skipStr.has(node)){
-    if(_shouldEncryptString(node.value)){
+    if(_shouldEncryptString(node.value, ctx.strictStrings)){
       const bytes = encryptString(node.value, ctx.stringKey, ctx.stringShift);
       node.__obf = {type:"str", bytes};
     }
@@ -2125,7 +2152,7 @@ function preAnalyze(rawCode) {
 
   if (symbols.forwardRefs.length > 0) {
     report.warnings.push(
-      "Found " + symbols.forwardRefs.length + " forward function reference(s) -Â " +
+      "Found " + symbols.forwardRefs.length + " forward function reference(s) -Ã‚Â " +
       "these will pass through the VM (safe)."
     );
     const preview = symbols.forwardRefs.slice(0, 5).map(f =>
@@ -3093,7 +3120,7 @@ function generateDependencyReport(profile, closureGraph, uiPatterns) {
       uiPatterns.tweenServiceUsage + " tweens");
     const topTypes = Object.entries(uiPatterns.uiTypeCreations)
       .sort((a, b) => b[1] - a[1]).slice(0, 5);
-    lines.push("  Top UI types: " + topTypes.map(t => t[0] + "Ã—" + t[1]).join(", "));
+    lines.push("  Top UI types: " + topTypes.map(t => t[0] + "Ãƒâ€”" + t[1]).join(", "));
   }
 
   return lines.join("\n");
@@ -3112,7 +3139,7 @@ async function obfuscate(luaCode,level,userId){
       for (const err of analysis.errors) console.error("[obfuscator v11]   " + err);
 
       if (analysis.stage === "parse") {
-        console.warn("[obfuscator v11] Parse failed -Â downgrading to byte-level protection.");
+        console.warn("[obfuscator v11] Parse failed -Ã‚Â downgrading to byte-level protection.");
         console.warn("[obfuscator v11] Fix the parse error above to unlock full obfuscation.");
         let downCode;
         try { downCode = luauToLua(preprocess(luaCode)); }
@@ -3209,7 +3236,10 @@ async function obfuscate(luaCode,level,userId){
     const stringKey=randInt(30,230);
     const stringShift=randInt(0,10);
     // v11.3: Pass auto-detected external identifiers to RenameCtx so they aren't nil-renamed
-    const ctx={stringKey,stringShift,rename:effectiveIsMaximum?new RenameCtx(analysis.externals):null};
+    // v15.1: strictStrings=true encrypts PascalCase + long ALL_CAPS (Option C).
+    // Default: enabled for maximum only. Medium keeps Option B behavior (encrypt
+    // PascalCase >= 8 chars, keep short ALL_CAPS literal).
+    const ctx={stringKey,stringShift,strictStrings:effectiveIsMaximum,rename:effectiveIsMaximum?new RenameCtx(analysis.externals):null};
     // === v13.0 SCRIPT PROFILER ===
     const profile = profileScript(ast, luaCode);
     console.log("[obfuscator v13] Profile:",
@@ -3246,7 +3276,7 @@ async function obfuscate(luaCode,level,userId){
     const flattenStats = reduceNesting(ast, 8);
     const depthAfter = measureAstDepth(ast);
     console.log("[obfuscator v13] Nesting reduction:",
-      "depth " + depthBefore + "- â€™" + depthAfter,
+      "depth " + depthBefore + "- Ã¢â‚¬â„¢" + depthAfter,
       "| if-chains flattened:", flattenStats.flattens,
       "| do-blocks inlined:", flattenStats.doBlocksInlined,
       "| empty else removed:", flattenStats.emptyElsesRemoved);
@@ -3266,7 +3296,7 @@ async function obfuscate(luaCode,level,userId){
       console.warn("[obfuscator v13] Retrying with minimal transformations (rename disabled)");
       // Reset the AST from analysis and skip renaming
       const freshAst = analysis.ast;
-      const freshCtx = { stringKey, stringShift, rename: null };
+      const freshCtx = { stringKey, stringShift, strictStrings: false, rename: null };
       walkAst(freshAst, freshCtx);
       reduceNesting(freshAst, 8);
       ob = serialize(freshAst);
@@ -3275,10 +3305,10 @@ async function obfuscate(luaCode,level,userId){
         console.error("[obfuscator v13] -  Even minimal obfuscation failed - falling back to minified passthrough");
         return _WM + aggressiveMinify(code);
       } else {
-        console.log("[obfuscator v13] âœ“ Retry with minimal mode succeeded");
+        console.log("[obfuscator v13] Ã¢Å“â€œ Retry with minimal mode succeeded");
       }
     } else {
-      console.log("[obfuscator v13] âœ“ Generated code validated OK");
+      console.log("[obfuscator v13] Ã¢Å“â€œ Generated code validated OK");
     }
 
     // === v16.0 SEMANTIC PRESERVATION CHECK ===
@@ -3288,11 +3318,11 @@ async function obfuscate(luaCode,level,userId){
       console.warn("[obfuscator v16] -  Semantic pattern preservation issues:");
       for (const issue of semanticIssues) {
         console.warn("[obfuscator v16]   " + issue.pattern +
-          ": " + issue.before + " - â€™ " + issue.after +
+          ": " + issue.before + " - Ã¢â‚¬â„¢ " + issue.after +
           " (ratio: " + issue.preservationRatio + ")");
       }
     } else {
-      console.log("[obfuscator v16] âœ“ All semantic patterns preserved");
+      console.log("[obfuscator v16] Ã¢Å“â€œ All semantic patterns preserved");
     }
 
     // === v14.0 ANTI-DEBUGGER + ANTI-TAMPER LAYER (v14.0 3B: expanded coverage) ===
