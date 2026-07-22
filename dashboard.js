@@ -158,8 +158,8 @@ function updateUI() {
   if (previewBtn) previewBtn.disabled = !hasCode;
 }
 
-scriptCodeInput.addEventListener("input", updateUI);
-uploadBtn.addEventListener("click", () => fileUpload.click());
+scriptCodeInput?.addEventListener("input", updateUI);
+uploadBtn?.addEventListener("click", () => { if (fileUpload) fileUpload.click(); });
 
 // v24 NEW: Reference upload handlers
 referenceUploadBtn?.addEventListener("click", () => referenceUpload.click());
@@ -199,7 +199,7 @@ referenceClearBtn?.addEventListener("click", () => {
   showMessage("Reference cleared.", "info");
 });
 
-fileUpload.addEventListener("change", (e) => {
+fileUpload?.addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (!file) return;
   if (file.size > MAX_SCRIPT_SIZE) { showMessage("File too large. Max 10MB.", "error"); return; }
@@ -221,7 +221,7 @@ fileUpload.addEventListener("change", (e) => {
   reader.readAsText(file);
 });
 
-clearBtn.addEventListener("click", () => {
+clearBtn?.addEventListener("click", () => {
   if (!scriptCodeInput.value && !scriptNameInput.value) return;
   if (confirm("Clear the script editor?")) {
     scriptNameInput.value = "";
@@ -837,7 +837,7 @@ abCompareBtn?.addEventListener("click", async () => {
 // ============================================================================
 // PREVIEW HANDLER (v16: now populates report card too)
 // ============================================================================
-previewBtn.addEventListener("click", async () => {
+previewBtn?.addEventListener("click", async () => {
   const code = scriptCodeInput.value;
   const level = obfuscationLevelSelect.value;
   const wantForce = !!(forceMaximumCheckbox && forceMaximumCheckbox.checked);
@@ -901,11 +901,11 @@ previewBtn.addEventListener("click", async () => {
   }
 });
 
-closePreviewBtn.addEventListener("click", () => {
+closePreviewBtn?.addEventListener("click", () => {
   _clsAdd(previewCard, "hidden");
 });
 
-copyPreviewBtn.addEventListener("click", async () => {
+copyPreviewBtn?.addEventListener("click", async () => {
   if (!lastPreviewedCode) return;
   try {
     await navigator.clipboard.writeText(lastPreviewedCode);
@@ -920,7 +920,7 @@ copyPreviewBtn.addEventListener("click", async () => {
 // ============================================================================
 // SAVE HANDLER (v16: force max modal + report render)
 // ============================================================================
-saveBtn.addEventListener("click", async () => {
+saveBtn?.addEventListener("click", async () => {
   const name = scriptNameInput.value.trim();
   const code = scriptCodeInput.value;
   const level = obfuscationLevelSelect ? obfuscationLevelSelect.value : "none";
@@ -1006,7 +1006,7 @@ saveBtn.addEventListener("click", async () => {
   }
 });
 
-copyBtn.addEventListener("click", async () => {
+copyBtn?.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(loadstringOutput.textContent);
     const originalText = copyBtn.textContent;
