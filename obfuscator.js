@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.15 - Removed size-based auto-downgrade (Fix 1)
+// AzureVM Obfuscator v25.16 - CRLF normalization + no tier downgrade (Fix 1+2)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -356,6 +356,13 @@ let _currentManifest = null;
 // ============================================================================
 
 function preprocess(rawCode) {
+  // v25.16 Fix 2: normalize CRLF (\r\n) and lone CR (\r) to LF (\n) BEFORE
+  // any other transform runs. Windows-authored scripts (like azure.txt) ship
+  // with CRLF; downstream regex transforms assumed LF and were silently
+  // injecting mixed endings, which broke luaparse position tracking on
+  // large scripts (all AST-modifying stages failed around bytes 155k-166k).
+  rawCode = rawCode.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
   const strings = [];
   let work = "";
   let i = 0, idx = 0;
@@ -1664,10 +1671,8 @@ function _pipeline(rawCode, level, options, report) {
     hasRuntimeReflection: profile.hasRuntimeReflection,
   };
 
-  // v25.15 Fix 1: no more tier auto-downgrade. Attempt the requested level.
-  // Per-stage rollback (validate() + last-known-good pattern used since v25.6)
-  // catches any layer whose output fails to parse and skips only that layer.
-  // An advisory warning is emitted so the report still surfaces the risk tier.
+  // v25.15+ Fix 1: no more tier auto-downgrade. Attempt the requested level.
+  // Per-stage rollback catches any layer whose output fails to parse.
   let effectiveLevel = level;
   if (level === "maximum" && profile.riskTier === "extreme" && !options.forceMaximum) {
     report.warn(
@@ -2330,10 +2335,8 @@ async function obfuscateWithStream(luaCode, level, userId, options) {
     hasRuntimeReflection: profile.hasRuntimeReflection,
   };
 
-  // v25.15 Fix 1: no more tier auto-downgrade. Attempt the requested level.
-  // Per-stage rollback (validate() + last-known-good pattern used since v25.6)
-  // catches any layer whose output fails to parse and skips only that layer.
-  // An advisory warning is emitted so the report still surfaces the risk tier.
+  // v25.15+ Fix 1: no more tier auto-downgrade. Attempt the requested level.
+  // Per-stage rollback catches any layer whose output fails to parse.
   let effectiveLevel = level;
   if (level === "maximum" && profile.riskTier === "extreme" && !options.forceMaximum) {
     report.warn(
