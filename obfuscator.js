@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.3 - + Anti-dump (relaxed, silent-exit)
+// AzureVM Obfuscator v25.4 - + Anti-tamper wrapper (relaxed, 5s timing threshold)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1014,6 +1014,48 @@ function generatePoisonPool(varName, poolKey, poolShift) {
 // a crash.
 // ============================================================================
 
+function generateAntiTamper() {
+  // Silent-exit anti-tamper. Runs ONCE at load time. Three one-shot probes:
+  //   1. `load` is a hooked Lua closure (not the original C function)
+  //   2. `loadstring` is a hooked Lua closure
+  //   3. Timing sanity -- a trivial no-op loop takes > 5 seconds
+  //      (meaning we're being single-stepped)
+  // Every probe is pcall-wrapped. A pcall FAILURE is treated as "the
+  // environment blocks introspection" -> safe, no trigger. Only a
+  // positive-shape reading triggers the silent exit.
+  const fn = randHexName(3);
+  const okVar = randHexName(2);
+  const infoVar = randHexName(2);
+  const t0Var = randHexName(2);
+  const t1Var = randHexName(2);
+  const tmpVar = randHexName(2);
+  return "local function " + fn + "() " +
+    // Probe 1: load hooked. debug.getinfo(load,"S").what == "Lua" means it
+    // was replaced by a Lua-defined wrapper. Original is a C function.
+    "local " + okVar + "," + infoVar + "=pcall(function() " +
+    "return debug.getinfo(load,\"S\") end) " +
+    "if " + okVar + " and type(" + infoVar + ")==\"table\" and " +
+    infoVar + ".what==\"Lua\" then return true end " +
+    // Probe 2: loadstring hooked, same shape.
+    "local " + okVar + "2," + infoVar + "2=pcall(function() " +
+    "return debug.getinfo(loadstring,\"S\") end) " +
+    "if " + okVar + "2 and type(" + infoVar + "2)==\"table\" and " +
+    infoVar + "2.what==\"Lua\" then return true end " +
+    // Probe 3: one-shot timing. 100 iterations of a trivial op should be
+    // sub-millisecond on any real machine; > 5s means single-stepping.
+    "local " + okVar + "3," + tmpVar + "=pcall(function() " +
+    "local " + t0Var + "=tick() " +
+    "local t={} " +
+    "for i=1,100 do t[i]=i end " +
+    "local " + t1Var + "=tick() " +
+    "return (" + t1Var + "-" + t0Var + ")>5 end) " +
+    "if " + okVar + "3 and " + tmpVar + "==true then return true end " +
+    "return false " +
+    "end " +
+    // Silent exit.
+    "if " + fn + "() then return end";
+}
+
 function generateAntiDump() {
   // Silent-exit anti-dump. Runs ONCE at load time before the payload.
   // Detects:
@@ -1492,10 +1534,37 @@ function _pipeline(rawCode, level, options, report) {
     }
   }
 
+  // Stage: anti-tamper wrapper (silent-exit on hooked load/loadstring or
+  // debugger single-stepping).
+  // Only maximum tier, smart-skip on hook/reflection payloads.
+  if (effectiveLevel === "maximum") {
+    if (profile.hasHookfunction || profile.hasHookmetamethod ||
+        profile.hasRuntimeReflection) {
+      report.warn("Anti-tamper skipped: script uses hooks/reflection (would false-positive)");
+      report.stagesSkipped.push("anti-tamper");
+    } else {
+      try {
+        const withAT = generateAntiTamper() + " " + wrapped;
+        const chk = validate(withAT);
+        if (chk.ok) {
+          wrapped = withAT;
+          report.layers.antiTamper = true;
+          report.stagesSucceeded.push("anti-tamper");
+        } else {
+          report.warn("Anti-tamper produced invalid Lua (" + chk.error + ") - skipped");
+          report.stagesSkipped.push("anti-tamper");
+        }
+      } catch (e) {
+        report.warn("Anti-tamper threw: " + e.message + " - skipped");
+        report.stagesSkipped.push("anti-tamper");
+      }
+    }
+  }
+
   // Stage: integrity check (payload tamper detection).
-  // Prepended AFTER decoder + pool + anti-debugger + anti-dump so the
-  // checksum covers all wrapper code too. Wrapped in try/validate so a bad
-  // checksum output can't kill the run.
+  // Prepended AFTER decoder + pool + anti-debugger + anti-dump + anti-tamper
+  // so the checksum covers all wrapper code too. Wrapped in try/validate so
+  // a bad checksum output can't kill the run.
   try {
     const withIntegrity = generateIntegrityCheck(wrapped) + " " + wrapped;
     const chk = validate(withIntegrity);
@@ -1523,6 +1592,7 @@ function _pipeline(rawCode, level, options, report) {
     report.layers.stringEncryption = false;
     report.layers.antiDebugger = false;
     report.layers.antiDump = false;
+    report.layers.antiTamper = false;
     report.layers.integrityCheck = false;
   }
 
