@@ -248,10 +248,6 @@ async function obfuscateCodeAny(code, level, options) {
     } catch (e) {
       console.warn("Live obfuscation failed, falling back to one-shot:", e.message);
       closeLiveModal();
-      return await obfuscateCodeLive(code, level, options);
-    } catch (e) {
-      console.warn("Live obfuscation failed, falling back to one-shot:", e.message);
-      closeLiveModal();
       return await obfuscateCode(code, level, options);
     }
   }
