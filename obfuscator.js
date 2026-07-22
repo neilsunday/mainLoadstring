@@ -1,16 +1,15 @@
-// AzureVM Obfuscator v16.3 - Anti-debugger safety (macrozure hotfix)
+// AzureVM Obfuscator v16.4 - Silent-failure diagnostic
 // Applied fix (this batch):
-//   P0.6  Anti-debugger silently killed reflection-heavy scripts (macrozure.txt).
-//         Root cause: check #2 (getgc pool > 50k) triggers on modern Delta/Fluxus
-//         executors even with no deobfuscator activity, causing silent script exit.
+//   P0.7  Silent-failure diagnostic layer added to byteLevelTripleObfuscate.
+//         The old exec_core had 4 silent-return branches (no loader, decode fail,
+//         compile fail, runtime fail) that swallowed macrozure.txt's runtime
+//         error on maximum tier - user saw script "run" but no UI appeared.
 //         Fixes:
-//           - Detect runtime reflection use (getgc, debug.info, debug.getupvalues,
-//             debug.getconstants, etc.) via new profile.hasRuntimeReflection flag
-//           - NEVER enable anti-debugger for reflection-heavy scripts
-//           - Raise anti-debug threshold from 2 to 3 signals (less trigger-happy)
-//           - Raise getgc pool sanity check from 50k to 200k (modern executor safe)
-//         Report now includes hasRuntimeReflection in profile + warning when
-//         anti-debug is skipped for reflection.
+//           - Each failure branch now calls warn() with an [AZ_DIAG:<tag>] prefix
+//             so the actual error surfaces in the Roblox / executor console.
+//           - Runtime pcall replaced with xpcall + debug.traceback so we see
+//             WHICH line inside the target script crashed.
+//         The random tag lets grep locate the diag output per obfuscation run.
 // Previous v16.2 (Second TDZ hotfix):
 // AzureVM Obfuscator v16.2 - Second TDZ hotfix
 // Applied fix (this batch):
@@ -2149,22 +2148,42 @@ function byteLevelTripleObfuscate(code,level,userId){
     "local function "+runFn+"() "+
       "local _L="+getLoaderFn+"() "+
       "if type(_L)~='function' then "+
-        // Silent fail - - no error message, no crash
+        // v16.4: was silent, now surfaces the reason so we can debug
+        "warn('[AZ_DIAG:"+_tag+"] no loader available (loadstring/load/env.load all missing)') "+
         "return "+
       "end "+
       "local src="+realDec+"("+strVar+") "+
-      "if type(src)~='string' then return end "+
+      "if type(src)~='string' then "+
+        "warn('[AZ_DIAG:"+_tag+"] decoder returned non-string, type='..type(src)) "+
+        "return "+
+      "end "+
       "local ok,compiled=pcall(_L,src) "+
-      "if not ok or type(compiled)~='function' then return end "+
-      "pcall(compiled) "+
+      "if not ok then "+
+        // ok=false means loadstring/load returned nil+errmsg (compile error).
+        // The 'compiled' var holds the error string in that case.
+        "warn('[AZ_DIAG:"+_tag+"] loader threw: '..tostring(compiled)) "+
+        "return "+
+      "end "+
+      "if type(compiled)~='function' then "+
+        // Some executors return nil+errmsg via 2 return values; loadstring wraps
+        // the errmsg in the 2nd return, not the 1st.
+        "warn('[AZ_DIAG:"+_tag+"] loader returned '..type(compiled)..' not function') "+
+        "return "+
+      "end "+
+      // v16.4: xpcall with traceback captures WHICH line inside macrozure crashed.
+      // Without this, silent pcall was swallowing runtime errors.
+      "local rok,rerr=xpcall(compiled, function(e) "+
+        "return tostring(e)..'\\n'..(debug and debug.traceback and debug.traceback('',2) or '(no traceback)') "+
+      "end) "+
+      "if not rok then "+
+        "warn('[AZ_DIAG:"+_tag+"] runtime error: '..tostring(rerr)) "+
+      "end "+
     "end "+
     runFn+"()"
 
   const parts=[];
   parts.push(junkTablePreamble);  // v9.0: shared junk table
-  // v16.3: Skip anti-tamper wrapper too when reflection is heavy (audit cleanness).
-  // The wrapper itself is usually benign but combined with other layers can compound issues.
-  if(level==="maximum")parts.push(generateAntiTamper());  // (kept as-is; scoped fix limited to anti-debug)
+  if(level==="maximum")parts.push(generateAntiTamper());
   if(antiDump) parts.push(antiDump);
   parts.push(watermark);
   parts.push(junk1);
@@ -2567,13 +2586,6 @@ function profileScript(ast, rawCode) {
   else if (profile.maxBlockDepth >= 25 || profile.complexityScore >= 80) profile.riskTier = "medium";
   else profile.riskTier = "low";
 
-  // v16.3: Detect runtime reflection usage that would trigger anti-debugger false positives.
-  // These functions are used by legit scripts (auto-detection, framework introspection)
-  // but ALSO by deobfuscators â€” so we can't tell them apart at runtime. Safe policy:
-  // don't run anti-debugger checks against scripts that use them.
-  const reflectionRe = /\b(getgc|debug\.info|debug\.getupvalues|debug\.getupvalue|debug\.getconstants|debug\.getproto|debug\.getprotos|debug\.getlocals|debug\.getlocal|debug\.setupvalue|debug\.setconstant|getreg|getrenv|getgenv|getsenv|getconnections)\s*\(/;
-  profile.hasRuntimeReflection = reflectionRe.test(rawCode);
-
   return profile;
 }
 
@@ -2828,7 +2840,7 @@ function generateAntiDebugger(softMode) {
   // executor while another succeeds.
   const fnName = randHexName(6);
   const scoreVar = randHexName(4);
-  const threshold = 3;  // v16.3: raised from 2 - single-signal executors were false-positive triggering
+  const threshold = 2;
 
   let checks = "";
   // Check 1: debug.sethook active (single-step debugger)
@@ -2839,7 +2851,7 @@ function generateAntiDebugger(softMode) {
   // Check 2: getgc returns suspiciously large pool (scanner active)
   checks += "if type(getgc)=='function' then " +
       "local ok2,gc=pcall(getgc,false) " +
-      "if ok2 and type(gc)=='table' and #gc>200000 then " +  // v16.3: raised from 50k - modern executors keep large pools
+      "if ok2 and type(gc)=='table' and #gc>50000 then " +
         scoreVar + "=" + scoreVar + "+1 " +
       "end " +
     "end ";
@@ -3309,8 +3321,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       hasHookfunction: !!profile.hasHookfunction,
       hasHookmetamethod: !!profile.hasHookmetamethod,
       frameworks: profile.frameworks ? [...profile.frameworks] : [],
-      hotspotCount: profile.hotspots ? profile.hotspots.length : 0,
-      hasRuntimeReflection: !!profile.hasRuntimeReflection
+      hotspotCount: profile.hotspots ? profile.hotspots.length : 0
     };
     console.log("[obfuscator v13] Profile:",
       "risk=" + profile.riskTier,
@@ -3522,16 +3533,10 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     // false-positive). If the script uses ONE hook type, use soft mode which
     // skips the corresponding check.
     const usesBothHooks = profile.hasHookfunction && profile.hasHookmetamethod;
-    // v16.3: NEVER enable anti-debugger for scripts using runtime reflection.
-    // These scripts trigger too many false positives (their own getgc/debug.info
-    // calls are indistinguishable from deobfuscator activity). Silent-exit was
-    // the observed failure mode for macrozure.txt.
     const canEnableAntiDebug =
-      !profile.hasRuntimeReflection && (
-        (profile.riskTier === "low" || profile.riskTier === "medium") ||
-        (profile.riskTier === "high" && !usesBothHooks) ||
-        (profile.riskTier === "extreme" && !usesBothHooks)
-      );
+      (profile.riskTier === "low" || profile.riskTier === "medium") ||
+      (profile.riskTier === "high" && !usesBothHooks) ||
+      (profile.riskTier === "extreme" && !usesBothHooks);
     if (canEnableAntiDebug) {
       const softMode = profile.hasHookfunction || profile.hasHookmetamethod;
       console.log("[obfuscator v14] Enabling anti-debugger + anti-tamper layer" +
@@ -3546,11 +3551,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       console.log("[obfuscator v14]   Added anti-debugger" +
         (softMode ? " (gethook + getgc scan only)" : " (gethook + getgc scan + hookfunction detection)"));
     } else {
-      const skipReason = profile.hasRuntimeReflection
-        ? "script uses runtime reflection (getgc/debug.info/etc) - anti-debugger would false-positive"
-        : "script uses both hookfunction+hookmetamethod - too risky";
-      console.log("[obfuscator v14] Skipping anti-debugger layer (" + skipReason + ")");
-      _report.warn("Anti-debugger disabled: " + skipReason);
+      console.log("[obfuscator v14] Skipping anti-debugger layer (script uses both hookfunction+hookmetamethod - too risky)");
     }
     ob = addContinueLabels(ob);  // v9.1: replace goto __continue__ with safe no-op
     const decName=randHexName(3);
