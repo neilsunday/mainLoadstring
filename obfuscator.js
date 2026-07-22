@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.18 - Diagnostic warnings v2 (shows invalid-Lua snippet + column)
+// AzureVM Obfuscator v25.19 - Remove buggy paren-walker in preprocess (Option 1)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -475,14 +475,15 @@ function preprocess(rawCode) {
     new RegExp("(\\blocal\\s+" + IDENT + "(?:\\s*,\\s*" + IDENT + ")*)\\s*:\\s*[A-Za-z_][A-Za-z0-9_.<>?]*", "g"),
     "$1"
   );
-  // (b) function params (name: Type, ...)
-  work = work.replace(/\(([^()]*)\)/g, (_m, inside) => {
-    const cleaned = inside.replace(
-      new RegExp("(" + IDENT + ")\\s*:\\s*[A-Za-z_][A-Za-z0-9_.<>?]*", "g"),
-      "$1"
-    );
-    return "(" + cleaned + ")";
-  });
+  // (b) function params (name: Type, ...) --  REMOVED in v25.19.
+  // The old paren-walker regex mangled nested calls like fn((a or {})) by
+  // capturing the empty inner group first, then re-emitting "()" around the
+  // outer remainder â€” producing an extra ")". This broke every AST stage on
+  // azure.txt (identical error at every stage: "<name> expected near '('").
+  // Function-parameter Luau type annotations are rare in Roblox exploit /
+  // game scripts; the far more common `local x: Type = ...` form is handled
+  // by a separate, non-paren-based regex that has no such bug.
+  // If we ever need this again, do a proper paren-balance walker (Option 2).
   // (c) return type: function foo(...): Type
   work = work.replace(
     /(\))\s*:\s*[A-Za-z_][A-Za-z0-9_.<>?]*(?=\s*(?:\n|--|\bthen\b|\bdo\b|\breturn\b|\blocal\b|\bif\b|\bfor\b|\bwhile\b|\brepeat\b|\bend\b|;|$))/g,
