@@ -1,3 +1,14 @@
+// AzureVM Obfuscator v16.0 - Report API added
+// Applied fixes (this batch):
+//   v16  obfuscateWithReport() returns {code, report} with full metadata:
+//        - profile (riskTier, complexity, hooks, frameworks)
+//        - actualLevel + wasDowngraded + downgradeReason
+//        - layers (which passes fired: vmWrap, outerVM, antiDebugger, etc.)
+//        - stats (bytes, elapsed, stringsEncrypted, numericConstsObfuscated)
+//        - warnings[] for any concerns raised during obfuscation
+//        - Optional forceMaximum flag to skip auto-downgrade (unsafe)
+//   Backward compat: obfuscate() returns raw string like before.
+// Previous v15.1 (Options B+C):
 // AzureVM Obfuscator v15.1 - Options B+C (string encryption coverage)
 // Applied fixes (this batch):
 //   B  Loosened PascalCase filter: encrypt PascalCase strings of length >= 8
@@ -74,6 +85,61 @@
 //   6. Higher VM cap: 500 + smart sensitive-first sorting (was: 200)
 const luaparse = require("luaparse");
 const crypto = require("crypto");
+
+// v16.0: ObfuscationReport - collects metadata across all passes so the
+// dashboard can show WHY a given level was actually applied and WHICH
+// layers fired. Populated by obfuscateWithReport().
+class ObfuscationReport {
+  constructor(requestedLevel){
+    this.requestedLevel = requestedLevel;
+    this.actualLevel = requestedLevel;
+    this.wasDowngraded = false;
+    this.downgradeReason = null;
+    this.profile = null;
+    this.layers = {
+      vmWrap: false,
+      outerVM: false,
+      antiDebugger: false,
+      antiDebuggerMode: null,
+      integrityCheck: false,
+      stringEncryption: false,
+      stringEncryptionStrict: false,
+      constantPool: false,
+      constantObfuscation: false,
+      byteLevelXor: false,
+      antiTamper: false,
+      antiDump: false
+    };
+    this.stats = {
+      originalBytes: 0,
+      obfuscatedBytes: 0,
+      sizeRatio: 0,
+      stringsEncrypted: 0,
+      stringsSkipped: 0,
+      numericConstsObfuscated: 0,
+      vmCompiledStatements: 0,
+      vmBytecodeLength: 0,
+      elapsedMs: 0
+    };
+    this.warnings = [];
+    this.timestamp = new Date().toISOString();
+  }
+  warn(msg){ this.warnings.push(msg); }
+  setDowngrade(reason, newLevel){
+    this.wasDowngraded = true;
+    this.downgradeReason = reason;
+    this.actualLevel = newLevel;
+  }
+  finalize(originalBytes, obfuscatedBytes, elapsedMs){
+    this.stats.originalBytes = originalBytes;
+    this.stats.obfuscatedBytes = obfuscatedBytes;
+    this.stats.sizeRatio = originalBytes > 0
+      ? Number((obfuscatedBytes / originalBytes).toFixed(3))
+      : 0;
+    this.stats.elapsedMs = elapsedMs;
+  }
+}
+
 
 const ROBLOX_GLOBALS = new Set([
   "game","workspace","script","plugin","shared","_G","_ENV",
@@ -1575,6 +1641,7 @@ function walkAst(node,ctx){
 
   if(node.type==="NumericLiteral"&&typeof node.value==="number"){
     node.__obf={type:"num",expr:encodeNumber(node.value)};
+    if(ctx && ctx._reportCounts) ctx._reportCounts.numericConstsObfuscated++;
     return;
   }
 
@@ -1586,6 +1653,9 @@ function walkAst(node,ctx){
     if(_shouldEncryptString(node.value, ctx.strictStrings)){
       const bytes = encryptString(node.value, ctx.stringKey, ctx.stringShift);
       node.__obf = {type:"str", bytes};
+      if(ctx._reportCounts) ctx._reportCounts.stringsEncrypted++;
+    } else {
+      if(ctx._reportCounts) ctx._reportCounts.stringsSkipped++;
     }
     return; // don't descend into StringLiteral children (there are none)
   }
@@ -3127,7 +3197,11 @@ function generateDependencyReport(profile, closureGraph, uiPatterns) {
 }
 
 
-async function obfuscate(luaCode,level,userId){
+async function obfuscateWithReport(luaCode, level, userId, options){
+  options = options || {};
+  const _startTime = Date.now();
+  const _report = new ObfuscationReport(level || "medium");
+  const _forceMaximum = !!options.forceMaximum;
   level=level||"medium";
   const _WM=pickWatermark();
   try{
@@ -3144,13 +3218,24 @@ async function obfuscate(luaCode,level,userId){
         let downCode;
         try { downCode = luauToLua(preprocess(luaCode)); }
         catch(_) { downCode = preprocess(luaCode); }
-        try { return _WM + byteLevelTripleObfuscate(downCode, level, userId); }
+        try {
+          const _out = _WM + byteLevelTripleObfuscate(downCode, level, userId);
+          _report.setDowngrade("Parse failed at pre-analysis stage. Fell back to byte-level XOR encryption only.", "fallback");
+          _report.finalize(luaCode.length, _out.length, Date.now() - _startTime);
+          return { code: _out, report: _report };
+        }
         catch (bfe) {
           console.error("[obfuscator v11] Byte-level fallback also failed:", bfe.message);
-          return _WM + aggressiveMinify(downCode);
+          const _out = _WM + aggressiveMinify(downCode);
+          _report.setDowngrade("Parse failed AND byte-level encryption failed. Fell back to minification only.", "minified");
+          _report.finalize(luaCode.length, _out.length, Date.now() - _startTime);
+          return { code: _out, report: _report };
         }
       }
-      return _WM + aggressiveMinify(preprocess(luaCode));
+      const _out = _WM + aggressiveMinify(preprocess(luaCode));
+      _report.setDowngrade("Pre-analysis failed at non-parse stage. Fell back to minification only.", "minified");
+      _report.finalize(luaCode.length, _out.length, Date.now() - _startTime);
+      return { code: _out, report: _report };
     }
 
     console.log("[obfuscator v11.3] Pre-analysis OK.",
@@ -3205,8 +3290,18 @@ async function obfuscate(luaCode,level,userId){
     const code = analysis.convertedCode;
     const ast = analysis.ast;
 
-    if(level==="none")return _WM+code;
-    if(level==="basic")return _WM+aggressiveMinify(code);
+    if(level==="none"){
+      const _out = _WM+code;
+      _report.actualLevel = "none";
+      _report.finalize(luaCode.length, _out.length, Date.now() - _startTime);
+      return { code: _out, report: _report };
+    }
+    if(level==="basic"){
+      const _out = _WM+aggressiveMinify(code);
+      _report.actualLevel = "basic";
+      _report.finalize(luaCode.length, _out.length, Date.now() - _startTime);
+      return { code: _out, report: _report };
+    }
 
     const isMedium = level==="medium";
     const isMaximum = level==="maximum";
@@ -3214,8 +3309,20 @@ async function obfuscate(luaCode,level,userId){
 
     // Apply strategy overrides
     if (strategy.baseLevelOverride === "medium" && isMaximum) {
-      console.log("[obfuscator v16] Auto-tuning: maximum to medium (safer for this script)");
-      effectiveIsMaximum = false;
+      if (_forceMaximum) {
+        console.log("[obfuscator v16] Force-maximum override: ignoring strategy suggestion to downgrade");
+        _report.warn("Force-maximum override applied despite strategy recommending medium.");
+      } else {
+        console.log("[obfuscator v16] Auto-tuning: maximum to medium (safer for this script)");
+        if (!_report.wasDowngraded) {
+          _report.setDowngrade(
+            "Strategy analyzer flagged this script as safer at medium tier. " +
+            (strategy.reasons && strategy.reasons.length > 0 ? "Reasons: " + strategy.reasons.slice(0,3).join("; ") : ""),
+            "medium"
+          );
+        }
+        effectiveIsMaximum = false;
+      }
     }
 
     // Capture fingerprint of PRE-obfuscation code for post-check
@@ -3230,6 +3337,15 @@ async function obfuscate(luaCode,level,userId){
         vmOuterHarness = vmResult.vmHarness;
         ast.body = vmResult.passthrough;
         console.log("[obfuscator] VM-compiled", vmResult.compiledCount, "statements (outside encryption)");
+        _report.layers.vmWrap = true;
+        _report.stats.vmCompiledStatements = vmResult.compiledCount;
+        _report.stats.vmBytecodeLength = vmResult.bcLength || 0;
+        // Outer VM (3C) is auto-active when bc length >= 9 (see tryVmWrap)
+        if((vmResult.bcLength || 0) >= 9){
+          _report.layers.outerVM = true;
+        }
+      } else if(effectiveIsMaximum) {
+        _report.warn("VM wrap was attempted but zero statements were compilable. Common causes: script has too many user-defined symbols, forward-refs, or non-whitelisted globals.");
       }
     }
 
@@ -3239,9 +3355,24 @@ async function obfuscate(luaCode,level,userId){
     // v15.1: strictStrings=true encrypts PascalCase + long ALL_CAPS (Option C).
     // Default: enabled for maximum only. Medium keeps Option B behavior (encrypt
     // PascalCase >= 8 chars, keep short ALL_CAPS literal).
-    const ctx={stringKey,stringShift,strictStrings:effectiveIsMaximum,rename:effectiveIsMaximum?new RenameCtx(analysis.externals):null};
+    const _reportCounts = { stringsEncrypted: 0, stringsSkipped: 0, numericConstsObfuscated: 0 };
+    const ctx={stringKey,stringShift,strictStrings:effectiveIsMaximum,rename:effectiveIsMaximum?new RenameCtx(analysis.externals):null,_reportCounts};
+    _report.layers.stringEncryption = true;
+    _report.layers.stringEncryptionStrict = effectiveIsMaximum;
+    _report.layers.constantObfuscation = true;
     // === v13.0 SCRIPT PROFILER ===
     const profile = profileScript(ast, luaCode);
+    _report.profile = {
+      riskTier: profile.riskTier,
+      complexityScore: profile.complexityScore,
+      maxBlockDepth: profile.maxBlockDepth,
+      functionCount: profile.functionCount,
+      pcallCount: profile.pcallCount,
+      hasHookfunction: !!profile.hasHookfunction,
+      hasHookmetamethod: !!profile.hasHookmetamethod,
+      frameworks: profile.frameworks ? [...profile.frameworks] : [],
+      hotspotCount: profile.hotspots ? profile.hotspots.length : 0
+    };
     console.log("[obfuscator v13] Profile:",
       "risk=" + profile.riskTier,
       "| depth=" + profile.maxBlockDepth,
@@ -3264,8 +3395,22 @@ async function obfuscate(luaCode,level,userId){
     // Actual downgrade logic runs HERE (after profile is available).
     if (profile.riskTier === "extreme" && (profile.hasHookfunction || profile.hasHookmetamethod)) {
       if (isMaximum) {
-        console.log("[obfuscator v13] Auto-downgrading maximum to medium (extreme risk + hooks detected)");
-        effectiveIsMaximum = false;
+        if (_forceMaximum) {
+          console.log("[obfuscator v16] Force-maximum override: skipping auto-downgrade despite extreme risk + hooks");
+          _report.warn("Force-maximum override applied despite extreme risk + hooks. Script may break.");
+        } else {
+          console.log("[obfuscator v13] Auto-downgrading maximum to medium (extreme risk + hooks detected)");
+          _report.setDowngrade(
+            "Script has extreme complexity (risk=" + profile.riskTier +
+            ") AND uses executor hooks (" +
+            (profile.hasHookfunction ? "hookfunction" : "") +
+            (profile.hasHookfunction && profile.hasHookmetamethod ? " + " : "") +
+            (profile.hasHookmetamethod ? "hookmetamethod" : "") +
+            "). VM wrap would break your hooks, so obfuscation ran in medium tier for safety.",
+            "medium"
+          );
+          effectiveIsMaximum = false;
+        }
       }
     }
 
@@ -3303,7 +3448,10 @@ async function obfuscate(luaCode,level,userId){
       const revalidation = validateGeneratedCode(ob);
       if (!revalidation.ok) {
         console.error("[obfuscator v13] -  Even minimal obfuscation failed - falling back to minified passthrough");
-        return _WM + aggressiveMinify(code);
+        const _out = _WM + aggressiveMinify(code);
+        _report.setDowngrade("Post-obfuscation validator failed twice. Fell back to minification only.", "minified");
+        _report.finalize(luaCode.length, _out.length, Date.now() - _startTime);
+        return { code: _out, report: _report };
       } else {
         console.log("[obfuscator v13] Ã¢Å“â€œ Retry with minimal mode succeeded");
       }
@@ -3343,6 +3491,9 @@ async function obfuscate(luaCode,level,userId){
       const antiDebug = generateAntiDebugger(softMode);
       const integrityCheck = generateIntegrityCheck(ob);
       ob = antiDebug + "; " + integrityCheck + "; " + ob;
+      _report.layers.antiDebugger = true;
+      _report.layers.antiDebuggerMode = softMode ? "soft" : "hard";
+      _report.layers.integrityCheck = true;
       console.log("[obfuscator v14]   Added integrity check (checksum of first 200 bytes)");
       console.log("[obfuscator v14]   Added anti-debugger" +
         (softMode ? " (gethook + getgc scan only)" : " (gethook + getgc scan + hookfunction detection)"));
@@ -3362,13 +3513,24 @@ async function obfuscate(luaCode,level,userId){
       const poolFnName = "_cp" + randHexName(3);
       const poolVarName = "_CP" + randHexName(2);
       poolPreamble = generateConstantPool([], poolKey, poolShift, poolFnName, poolVarName) + "; ";
+      _report.layers.constantPool = true;
     }
 
     let combined=poolPreamble+decoder+"; "+ob;
 
-    if(isMedium)return _WM+combined;
+    if(isMedium){
+      const _finalOutput = _WM+combined;
+      _report.stats.stringsEncrypted = _reportCounts.stringsEncrypted;
+      _report.stats.stringsSkipped = _reportCounts.stringsSkipped;
+      _report.stats.numericConstsObfuscated = _reportCounts.numericConstsObfuscated;
+      _report.actualLevel = _report.wasDowngraded ? "medium" : level;
+      _report.finalize(luaCode.length, _finalOutput.length, Date.now() - _startTime);
+      return { code: _finalOutput, report: _report };
+    }
 
     const encrypted = byteLevelTripleObfuscate(combined, level, userId);
+    _report.layers.byteLevelXor = true;
+    _report.layers.antiTamper = true;
     // v8.0: Wrap in Control Flow Flattening state machine (maximum only)
     let finalOutput;
     if(isMaximum){
@@ -3378,11 +3540,21 @@ async function obfuscate(luaCode,level,userId){
     } else {
       finalOutput = vmOuterHarness ? (vmOuterHarness + "; " + encrypted) : encrypted;
     }
-    return _WM + finalOutput;
+    const _combinedFinal = _WM + finalOutput;
+    _report.stats.stringsEncrypted = _reportCounts.stringsEncrypted;
+    _report.stats.stringsSkipped = _reportCounts.stringsSkipped;
+    _report.stats.numericConstsObfuscated = _reportCounts.numericConstsObfuscated;
+    _report.actualLevel = effectiveIsMaximum ? "maximum" : "medium";
+    _report.finalize(luaCode.length, _combinedFinal.length, Date.now() - _startTime);
+    return { code: _combinedFinal, report: _report };
   }catch(err){
     console.error("[obfuscator] Error:",err.message);
     try{
-      return _WM+byteLevelTripleObfuscate(preprocess(luaCode),level,userId);
+      const _out = _WM+byteLevelTripleObfuscate(preprocess(luaCode),level,userId);
+      _report.actualLevel = "fallback";
+      _report.setDowngrade("Main obfuscation path threw an error. Fell back to byte-level XOR only. Error: " + err.message, "fallback");
+      _report.finalize(luaCode.length, _out.length, Date.now() - _startTime);
+      return { code: _out, report: _report };
     }catch(e){
       throw new Error("Failed to obfuscate: "+err.message);
     }
@@ -3392,4 +3564,10 @@ async function obfuscate(luaCode,level,userId){
 process.on("uncaughtException",(e)=>{console.error("[obfuscator] Uncaught:",e.message);});
 process.on("unhandledRejection",(r)=>{console.error("[obfuscator] Unhandled:",r);});
 
-module.exports={obfuscate};
+// v16.0: Backward-compat wrapper. Old callers get raw string, new callers
+// can use obfuscateWithReport() to get {code, report}.
+async function obfuscate(luaCode, level, userId){
+  const result = await obfuscateWithReport(luaCode, level, userId);
+  return typeof result === "string" ? result : result.code;
+}
+module.exports={obfuscate, obfuscateWithReport};
