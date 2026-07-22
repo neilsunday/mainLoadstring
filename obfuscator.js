@@ -1,3 +1,12 @@
+// AzureVM Obfuscator v16.5 - Compile-error capture
+// Applied fix (this batch):
+//   P0.8  pcall(_L, src) was dropping loadstring's 2nd return value (the actual
+//         compile error message). This meant "loader returned nil" was all we
+//         could see - no idea WHY compilation failed. Fixed by calling _L
+//         directly inside xpcall so both return values are captured.
+//         Also added a src preview dump (first 200 chars) so we can see what
+//         emitted Lua tripped up loadstring.
+// Previous v16.4 (Silent-failure diagnostic):
 // AzureVM Obfuscator v16.4 - Silent-failure diagnostic
 // Applied fix (this batch):
 //   P0.7  Silent-failure diagnostic layer added to byteLevelTripleObfuscate.
@@ -2157,17 +2166,23 @@ function byteLevelTripleObfuscate(code,level,userId){
         "warn('[AZ_DIAG:"+_tag+"] decoder returned non-string, type='..type(src)) "+
         "return "+
       "end "+
-      "local ok,compiled=pcall(_L,src) "+
-      "if not ok then "+
-        // ok=false means loadstring/load returned nil+errmsg (compile error).
-        // The 'compiled' var holds the error string in that case.
-        "warn('[AZ_DIAG:"+_tag+"] loader threw: '..tostring(compiled)) "+
+      // v16.5: Capture BOTH return values from loadstring/load. Standard Lua
+      // semantics: (fn, errmsg) on success gives (function, nil); on compile
+      // error gives (nil, errstring). pcall was dropping the 2nd return, so we
+      // never saw the actual syntax error. Call _L directly + xpcall for
+      // safety in case _L itself throws.
+      "local compiled, compileErr "+
+      "local callOk = xpcall(function() compiled, compileErr = _L(src) end, function(e) compileErr = tostring(e) return e end) "+
+      "if not callOk then "+
+        "warn('[AZ_DIAG:"+_tag+"] loader threw: '..tostring(compileErr)) "+
         "return "+
       "end "+
       "if type(compiled)~='function' then "+
-        // Some executors return nil+errmsg via 2 return values; loadstring wraps
-        // the errmsg in the 2nd return, not the 1st.
-        "warn('[AZ_DIAG:"+_tag+"] loader returned '..type(compiled)..' not function') "+
+        // Now compileErr holds the ACTUAL compile error message from loadstring.
+        // Sample: [string "..."]:12: 'end' expected near '<eof>'
+        "warn('[AZ_DIAG:"+_tag+"] compile error: '..tostring(compileErr or 'nil')) "+
+        // Extra: dump the first 200 chars of src so we can see what got emitted
+        "warn('[AZ_DIAG:"+_tag+"] src preview: '..string.sub(tostring(src),1,200)) "+
         "return "+
       "end "+
       // v16.4: xpcall with traceback captures WHICH line inside macrozure crashed.
