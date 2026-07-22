@@ -1,3 +1,29 @@
+// AzureVM Obfuscator v21.0 - Forward-ref & reflection-string hardening
+// v21.0 changes (2026-07):
+//   1. NEVER_ENCRYPT_STRINGS expanded with reflection-heavy script markers
+//      (TIME/PRY/SwordsController/sleitnick_net/etc) that were being encrypted
+//      by strict mode and breaking anti-cheat / net-scanning scripts.
+//   2. _shouldEncryptString gains pattern rules: package version keys
+//      (name@version), *Service/*Controller/*Handler/*Manager class-like
+//      names, and short ALL_CAPS hash keys are now literal.
+//   3. RenameCtx.hoistScope now also hoists non-local top-level function
+//      decls and top-level bare assignments. Fixes the setActive forward-ref
+//      bug where 'function setActive(on)' at line ~880 was called from
+//      inside local functions at lines ~130-140 and got renamed inconsistently.
+//   4. walkAst rewrites non-local FunctionDeclaration.identifier to match the
+//      hoisted name so declaration and all forward call sites agree.
+// Downstream: 'Applied' report card should now show more layers active on
+// reflection-heavy scripts, and the 'zero statements compilable' warning
+// remains truthful (VM wrap is separate from the fixes above; see notes below).
+//
+// KNOWN LIMITATION: VM wrap still requires bare-identifier CallStatements to
+// compile. Real Roblox scripts (property assigns, method calls, control flow)
+// naturally emit zero. The VM harness is a bonus layer; the byte-level XOR +
+// string encryption + numeric obfuscation chain remains the primary carrier.
+// Fixing VM coverage properly requires supporting AssignmentStatement and
+// method-call semantics in vmCompileStmt/vmCompileExpr, which is a much
+// larger change than this batch.
+//
 // AzureVM Obfuscator v20.0 - Staged obfuscation (adaptive per-feature)
 // Applied fix (this batch):
 //   NEW MODE: Maximum tier now runs each obfuscation feature ONE AT A TIME,
@@ -1603,12 +1629,19 @@ const NEVER_ENCRYPT_STRINGS = new Set([
   "Content-Type","application/json","text/plain","Accept","User-Agent","Authorization",
   // Rich text tokens
   "rbxassetid","rbxthumb","rbxasset","http","https",
+  // v21.0: Reflection-heavy script markers (macrozure/anti-cheat/net-scanning)
+  "TIME","PRY","RE/","SwordsController","PlayerController","GameController",
+  "MainController","UIController","InputController","CameraController",
+  "sleitnick_net","Knit","Signal","Trove","Janitor","Fusion","Roact","Rodux",
+  "Packages","_Index","Modules","Shared","Client","Server","Common",
+  // Common upvalue-scan / getgc hash keys
+  "hashA","hashB","netNum","parryRemote","timeKey","parryFlag",
 ]);
 
 // v13.0 (2B) + v15.1 (Option B+C): Decide if a StringLiteral is safe to encrypt.
 // Returns true = safe to encrypt, false = keep literal.
 //
-// Option B (default): Loosened PascalCase filter Ã¢â‚¬â€ PascalCase strings of length >= 8
+// Option B (default): Loosened PascalCase filter ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â PascalCase strings of length >= 8
 //   that don't match known Roblox class/service names ARE encrypted. This lifts
 //   things like "ZureMacro", "AzureLogo", "LogoHit" out of skip and into encrypt.
 //
@@ -1624,6 +1657,13 @@ function _shouldEncryptString(value, strict){
   if(NEVER_ENCRYPT_STRINGS.has(value)) return false;
   if(ROBLOX_GLOBALS.has(value)) return false;
   if(value.startsWith("__")) return false;
+  // v21.0: Package version keys (Wally/Rojo/Knit format: name@version)
+  if(/^[a-zA-Z_][a-zA-Z0-9_]*@[\d\.]+$/.test(value)) return false;
+  // v21.0: PascalCase +Service/+Controller/+Handler/+Manager class-like names
+  // These are commonly used as string keys in reflection/service lookups.
+  if(/^[A-Z][a-zA-Z0-9]*(Service|Controller|Handler|Manager|Module|Config)$/.test(value)) return false;
+  // v21.0: Short ALL_CAPS tokens used as hash-map keys in anti-cheat scripts
+  if(/^[A-Z]{2,6}$/.test(value)) return false;
   // Roblox asset URIs must stay literal for the engine to resolve
   if(/^rbxassetid:\/\//.test(value)) return false;
   if(/^rbxthumb:\/\//.test(value)) return false;
@@ -1703,6 +1743,22 @@ class RenameCtx{
       else if(stmt.type === "FunctionDeclaration" && stmt.isLocal
               && stmt.identifier && stmt.identifier.type === "Identifier"){
         this.declare(stmt.identifier.name);
+      }
+      // v21.0: Non-local top-level function decls (bare "function foo()"). In
+      // real Lua these become globals, but scripts often use them as if they
+      // were locals with forward-ref. Hoisting them here matches user intent
+      // and stops the rename pass from bleeding two different names for the
+      // same symbol (declaration vs. forward call site).
+      else if(stmt.type === "FunctionDeclaration" && !stmt.isLocal
+              && stmt.identifier && stmt.identifier.type === "Identifier"){
+        this.declare(stmt.identifier.name);
+      }
+      // v21.0: Bare assignments at top level ("foo = function() ... end" or
+      // "foo = 42"). Hoist the LHS so forward refs resolve consistently.
+      else if(stmt.type === "AssignmentStatement" && Array.isArray(stmt.variables)){
+        for(const v of stmt.variables){
+          if(v && v.type === "Identifier" && v.name) this.declare(v.name);
+        }
       }
     }
   }
@@ -1847,6 +1903,16 @@ function walkAst(node,ctx){
      && node.isLocal && node.identifier && node.identifier.type==="Identifier"){
     node.identifier.name = ctx.rename.declare(node.identifier.name);
   }
+  // v21.0: Non-local top-level function decls that were hoisted in hoistScope.
+  // Look up the hoisted name (declare() no-ops if already present) and rewrite
+  // the identifier so the emitted code matches all the renamed call sites.
+  else if(ctx.rename && node.type==="FunctionDeclaration"
+     && !node.isLocal && node.identifier && node.identifier.type==="Identifier"){
+    const hoistedName = ctx.rename.lookup(node.identifier.name);
+    if(hoistedName !== node.identifier.name){
+      node.identifier.name = hoistedName;
+    }
+  }
 
   if(opensNewScope){
     ctx.rename.pushScope();
@@ -1897,7 +1963,7 @@ function walkAst(node,ctx){
     // Players._0xhex which is not a valid Instance member).
     if(ctx.rename && node.type==="MemberExpression" && k==="identifier") continue;
     if(ctx.rename && node.type==="TableKeyString" && k==="key") continue;
-    // Global function declaration like `function obj.method()` â€” the identifier
+    // Global function declaration like `function obj.method()` Ã¢â‚¬â€ the identifier
     // chain is a member expression; the outer method name is a property.
     if(ctx.rename && node.type==="FunctionDeclaration" && k==="identifier"
        && !node.isLocal && node.identifier
@@ -2352,7 +2418,7 @@ function preAnalyze(rawCode) {
 
   if (symbols.forwardRefs.length > 0) {
     report.warnings.push(
-      "Found " + symbols.forwardRefs.length + " forward function reference(s) -Ãƒâ€šÃ‚Â " +
+      "Found " + symbols.forwardRefs.length + " forward function reference(s) -ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â " +
       "these will pass through the VM (safe)."
     );
     const preview = symbols.forwardRefs.slice(0, 5).map(f =>
@@ -3324,7 +3390,7 @@ function generateDependencyReport(profile, closureGraph, uiPatterns) {
       uiPatterns.tweenServiceUsage + " tweens");
     const topTypes = Object.entries(uiPatterns.uiTypeCreations)
       .sort((a, b) => b[1] - a[1]).slice(0, 5);
-    lines.push("  Top UI types: " + topTypes.map(t => t[0] + "ÃƒÆ’Ã¢â‚¬â€" + t[1]).join(", "));
+    lines.push("  Top UI types: " + topTypes.map(t => t[0] + "ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â" + t[1]).join(", "));
   }
 
   return lines.join("\n");
@@ -3436,7 +3502,7 @@ function stagedObfuscate(analysis, level, luaCode, options){
     reduceNesting(ast, 8);
   });
 
-  // Stage 6: final serialize is implicit â€” currentCode has it already.
+  // Stage 6: final serialize is implicit Ã¢â‚¬â€ currentCode has it already.
   stages.succeeded.push("serialize");
 
   // Stage 7: wrap with decoder + constant pool
@@ -3514,7 +3580,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       for (const err of analysis.errors) console.error("[obfuscator v11]   " + err);
 
       if (analysis.stage === "parse") {
-        console.warn("[obfuscator v11] Parse failed -Ãƒâ€šÃ‚Â downgrading to byte-level protection.");
+        console.warn("[obfuscator v11] Parse failed -ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â downgrading to byte-level protection.");
         console.warn("[obfuscator v11] Fix the parse error above to unlock full obfuscation.");
         let downCode;
         try { downCode = luauToLua(preprocess(luaCode)); }
@@ -3554,7 +3620,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     for (const w of analysis.warnings) console.log("[obfuscator v11]   " + w);
 
     // v16.1 P0 FIX: hoist `code` and `ast` HERE (before any code that uses them).
-    // v16.2 P0 FIX: also hoist `profile` Ã¢â‚¬â€ tuneStrategy(profile,...) inside the
+    // v16.2 P0 FIX: also hoist `profile` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â tuneStrategy(profile,...) inside the
     // v16 advanced intelligence block was throwing "Cannot access 'profile'
     // before initialization" because profileScript() was called much later.
     const code = analysis.convertedCode;
@@ -3741,7 +3807,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     const flattenStats = reduceNesting(ast, 8);
     const depthAfter = measureAstDepth(ast);
     console.log("[obfuscator v13] Nesting reduction:",
-      "depth " + depthBefore + "- ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢" + depthAfter,
+      "depth " + depthBefore + "- ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢" + depthAfter,
       "| if-chains flattened:", flattenStats.flattens,
       "| do-blocks inlined:", flattenStats.doBlocksInlined,
       "| empty else removed:", flattenStats.emptyElsesRemoved);
@@ -3773,10 +3839,10 @@ async function obfuscateWithReport(luaCode, level, userId, options){
         _report.finalize(luaCode.length, _out.length, Date.now() - _startTime);
         return { code: _out, report: _report };
       } else {
-        console.log("[obfuscator v13] ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Retry with minimal mode succeeded");
+        console.log("[obfuscator v13] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ Retry with minimal mode succeeded");
       }
     } else {
-      console.log("[obfuscator v13] ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Generated code validated OK");
+      console.log("[obfuscator v13] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ Generated code validated OK");
     }
 
     // === v16.0 SEMANTIC PRESERVATION CHECK ===
@@ -3786,11 +3852,11 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       console.warn("[obfuscator v16] -  Semantic pattern preservation issues:");
       for (const issue of semanticIssues) {
         console.warn("[obfuscator v16]   " + issue.pattern +
-          ": " + issue.before + " - ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ " + issue.after +
+          ": " + issue.before + " - ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ " + issue.after +
           " (ratio: " + issue.preservationRatio + ")");
       }
     } else {
-      console.log("[obfuscator v16] ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ All semantic patterns preserved");
+      console.log("[obfuscator v16] ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ All semantic patterns preserved");
     }
 
     // === v14.0 ANTI-DEBUGGER + ANTI-TAMPER LAYER (v14.0 3B: expanded coverage) ===
