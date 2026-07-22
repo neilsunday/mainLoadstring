@@ -31,6 +31,14 @@ const charCountEl = document.getElementById("charCount");
 const uploadBtn = document.getElementById("uploadBtn");
 const fileUpload = document.getElementById("fileUpload");
 const fileNameEl = document.getElementById("fileName");
+
+// v24 NEW: Reference script upload
+const referenceUpload = document.getElementById("referenceUpload");
+const referenceUploadBtn = document.getElementById("referenceUploadBtn");
+const referenceClearBtn = document.getElementById("referenceClearBtn");
+const referenceFileNameEl = document.getElementById("referenceFileName");
+let referenceCode = "";  // in-memory only â€” not persisted
+let referenceFileName = "";
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
 const previewBtn = document.getElementById("previewBtn");
@@ -111,6 +119,44 @@ function updateUI() {
 
 scriptCodeInput.addEventListener("input", updateUI);
 uploadBtn.addEventListener("click", () => fileUpload.click());
+
+// v24 NEW: Reference upload handlers
+referenceUploadBtn?.addEventListener("click", () => referenceUpload.click());
+
+referenceUpload?.addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > MAX_SCRIPT_SIZE) {
+    showMessage("Reference file too large. Max 10MB.", "error");
+    return;
+  }
+  const allowedTypes = [".lua", ".txt"];
+  const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
+  if (!allowedTypes.includes(ext)) {
+    showMessage("Only .lua or .txt reference files allowed.", "error");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    referenceCode = event.target.result;
+    referenceFileName = file.name;
+    referenceFileNameEl.textContent = "Reference: " + file.name + " (" +
+      referenceCode.length.toLocaleString() + " chars)";
+    referenceClearBtn.classList.remove("hidden");
+    showMessage("Reference file loaded. It will be used for the next obfuscation.", "success");
+  };
+  reader.onerror = () => showMessage("Failed to read reference file.", "error");
+  reader.readAsText(file);
+});
+
+referenceClearBtn?.addEventListener("click", () => {
+  referenceCode = "";
+  referenceFileName = "";
+  referenceUpload.value = "";
+  referenceFileNameEl.textContent = "";
+  referenceClearBtn.classList.add("hidden");
+  showMessage("Reference cleared.", "info");
+});
 
 fileUpload.addEventListener("change", (e) => {
   const file = e.target.files[0];
@@ -198,6 +244,8 @@ async function obfuscateCode(code, level, options) {
       code, level,
       forceMaximum: !!options.forceMaximum,
       userId: currentUser ? currentUser.id : null,
+      // v24 NEW: pass the uploaded reference script as an extra manifest source
+      referenceCode: referenceCode || null,
     }),
   });
   if (!response.ok) {
