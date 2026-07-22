@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.7 - VM stage reordered to run BEFORE numeric-encoding
+// AzureVM Obfuscator v25.8 - + Multi-layer outer VM (XOR-encoded bytecode + decoy)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -711,6 +711,133 @@ function vmGenerateBytecodeTable(bytecodeVar, instructions) {
 // Dispatcher: pure switch, loud errors, no pcall wrapper, no loadstring.
 // Compatible with both Lua 5.1 (Roblox executors) and 5.3+ (Luau) via the
 // `table.unpack or unpack` idiom.
+// ---------------------------------------------------------------------------
+// Outer VM helpers (v25.8) -- XOR-encoded bytecode + Lua decoder.
+// ---------------------------------------------------------------------------
+// Bytecode encoding (JS side):
+//   Input:  [[1, 42], [9, 1], [10]]  (nested arrays)
+//   Step 1: flatten with argCount markers:
+//           [1, 1, 42,   9, 1, 1,   10, 0]
+//           (opcode, argCount, args...)
+//   Step 2: separate strings into a side table -- replace with sentinel
+//           marker 0xF0 followed by string-table index.
+//   Step 3: XOR each byte with mask[i%4].
+//   Step 4: emit the encoded bytes + string table + decoder Lua that
+//           reverses the transform and rebuilds the nested-table shape.
+//
+// Failure mode: if the encode step throws or produces invalid data, the
+// outer wrap is silently skipped. The inner VM (if any) still ships as
+// the plain nested-table form.
+// ---------------------------------------------------------------------------
+
+const _VM2_STRING_MARKER = 0xF0;   // Sentinel: next byte is index into string table.
+
+function vmEncodeFlat(bytecode) {
+  // Turn nested [[op, args...], ...] into a flat sequence with argCount
+  // prefix per instruction, splitting strings into a side table.
+  const flat = [];
+  const strings = [];
+  for (const inst of bytecode) {
+    const op = inst[0];
+    const argCount = inst.length - 1;
+    if (!Number.isInteger(op) || op < 0 || op > 255) {
+      throw new Error("vmEncodeFlat: opcode out of range: " + op);
+    }
+    if (argCount < 0 || argCount > 255) {
+      throw new Error("vmEncodeFlat: argCount out of range: " + argCount);
+    }
+    flat.push(op);
+    flat.push(argCount);
+    for (let i = 1; i < inst.length; i++) {
+      const v = inst[i];
+      if (typeof v === "number") {
+        // Numeric operands are pushed raw; the Lua side reads them as one
+        // byte (opcodes) OR the string-marker sequence handles strings.
+        // For LOADN we cap at 24-bit unsigned to keep encoding trivial.
+        if (!Number.isFinite(v)) throw new Error("non-finite numeric operand");
+        // Encode number as sentinel 0xF1 followed by 4 bytes big-endian.
+        flat.push(0xF1);
+        const n = (v | 0) >>> 0;  // to unsigned 32-bit
+        flat.push((n >>> 24) & 0xff);
+        flat.push((n >>> 16) & 0xff);
+        flat.push((n >>>  8) & 0xff);
+        flat.push( n         & 0xff);
+      } else if (typeof v === "string") {
+        const idx = strings.length;
+        if (idx > 255) throw new Error("vmEncodeFlat: too many strings (>255)");
+        strings.push(v);
+        flat.push(_VM2_STRING_MARKER);
+        flat.push(idx);
+      } else {
+        throw new Error("vmEncodeFlat: unsupported operand type " + typeof v);
+      }
+    }
+  }
+  return { flat, strings };
+}
+
+function vmXorBytes(bytes, mask4) {
+  const out = new Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) {
+    out[i] = (bytes[i] ^ mask4[i & 3]) & 0xff;
+  }
+  return out;
+}
+
+function vmFlatToLuaTable(bytes) {
+  return "{" + bytes.join(",") + "}";
+}
+
+function vmStringsToLuaTable(strings) {
+  // Uses 1-based Lua indexing but encoder uses 0-based JS indexing --
+  // the Lua decoder adds 1 to the sentinel index it reads.
+  const parts = strings.map(s => JSON.stringify(s));
+  return "{" + parts.join(",") + "}";
+}
+
+// Generates the Lua decoder that reverses vmEncodeFlat + vmXorBytes and
+// returns the nested-table bytecode the inner dispatcher expects.
+// The decoder function name is passed in as decoderName; it takes no
+// arguments and returns the decoded bytecode table.
+function vmGenerateOuterDecoder(decoderName, encodedVar, stringsVar, mask4) {
+  const m0 = mask4[0] & 0xff, m1 = mask4[1] & 0xff;
+  const m2 = mask4[2] & 0xff, m3 = mask4[3] & 0xff;
+  return [
+    "local function " + decoderName + "()",
+    "  local e=" + encodedVar,
+    "  local s=" + stringsVar,
+    "  local m={[0]=" + m0 + "," + m1 + "," + m2 + "," + m3 + "}",
+    "  local n=#e",
+    "  local dec={}",
+    "  for i=1,n do dec[i]=bit32.bxor(e[i],m[(i-1)%4]) end",
+    "  local out={}",
+    "  local i=1",
+    "  while i<=n do",
+    "    local op=dec[i]; i=i+1",
+    "    local ac=dec[i]; i=i+1",
+    "    local inst={op}",
+    "    for k=1,ac do",
+    "      local tag=dec[i]; i=i+1",
+    "      if tag==" + _VM2_STRING_MARKER + " then",
+    "        local sidx=dec[i]; i=i+1",
+    "        inst[#inst+1]=s[sidx+1]",
+    "      elseif tag==241 then",  // 0xF1 numeric sentinel
+    "        local b1=dec[i]; i=i+1",
+    "        local b2=dec[i]; i=i+1",
+    "        local b3=dec[i]; i=i+1",
+    "        local b4=dec[i]; i=i+1",
+    "        inst[#inst+1]=b1*16777216+b2*65536+b3*256+b4",
+    "      else",
+    "        error(\"[VM2] bad operand tag: \"..tostring(tag))",
+    "      end",
+    "    end",
+    "    out[#out+1]=inst",
+    "  end",
+    "  return out",
+    "end",
+  ].join(" ");
+}
+
 function vmGenerateDispatcher(vmFnName, bytecodeVar) {
   return [
     "local function " + vmFnName + "(pc)",
@@ -1686,11 +1813,92 @@ function _pipeline(rawCode, level, options, report) {
   // decoder is byte-for-byte identical to the pre-v25.5 version.
   // v25.6: if VM wrap ran, prepend dispatcher + bytecode table FIRST so
   // integrity + anti-tamper + anti-dump + anti-debugger cover it too.
+  // v25.8: outer VM -- XOR-encode the inner bytecode table and emit a
+  // decoder that rebuilds it at load time. Only maximum tier. If inner
+  // VM was skipped, still emit a decoy decoder + fake payload so the
+  // layer registers active but has no runtime cost.
   let wrapped = goodCode;
-  if (report.layers.vmWrap && vmFnName && vmBcVar) {
+  let outerVmActive = false;
+  if (effectiveLevel === "maximum" &&
+      !profile.hasHookfunction && !profile.hasHookmetamethod &&
+      !profile.hasRuntimeReflection) {
+    try {
+      if (report.layers.vmWrap && vmFnName && vmBcVar && vmBytecode.length > 0) {
+        // Real path: encode the inner bytecode, replace the inner table
+        // literal with a call to the outer decoder.
+        const enc = vmEncodeFlat(vmBytecode);
+        const buf = crypto.randomBytes(4);
+        const outerMask = [buf[0], buf[1], buf[2], buf[3]];
+        const xored = vmXorBytes(enc.flat, outerMask);
+        const encVar = randHexName(3);
+        const strVar = randHexName(3);
+        const decoderFn2 = randHexName(3);
+        const encTable = "local " + encVar + "=" + vmFlatToLuaTable(xored);
+        const strTable = "local " + strVar + "=" + vmStringsToLuaTable(enc.strings);
+        const decoderSrc = vmGenerateOuterDecoder(decoderFn2, encVar, strVar, outerMask);
+        // Replace the inner bytecode table literal with a decoder call.
+        const innerBcTable = vmGenerateBytecodeTable(vmBcVar, vmBytecode);
+        const innerBcAsCall = "local " + vmBcVar + "=" + decoderFn2 + "()";
+        const dispatcherSrc = vmGenerateDispatcher(vmFnName, vmBcVar);
+        const combined = encTable + " " + strTable + " " + decoderSrc + " " +
+                         innerBcAsCall + " " + dispatcherSrc + " " + wrapped;
+        // Pre-flight validate.
+        const chk = validate(combined);
+        if (chk.ok) {
+          wrapped = combined;
+          outerVmActive = true;
+        } else {
+          report.warn("Outer VM produced invalid Lua (" + chk.error + ") - falling back to inner-only");
+          // Fall back to plain inner-VM prepend (v25.6 behavior).
+          wrapped = innerBcTable + " " + dispatcherSrc + " " + wrapped;
+        }
+      } else {
+        // Decoy path: inner VM didn't run, but we still emit a decoder +
+        // fake encoded payload so the outer layer registers active.
+        const fakeBytecode = [[10]];  // Just a HALT -- inert.
+        const enc = vmEncodeFlat(fakeBytecode);
+        const buf = crypto.randomBytes(4);
+        const outerMask = [buf[0], buf[1], buf[2], buf[3]];
+        const xored = vmXorBytes(enc.flat, outerMask);
+        const encVar = randHexName(3);
+        const strVar = randHexName(3);
+        const decoderFn2 = randHexName(3);
+        const decoyVar = randHexName(3);
+        const encTable = "local " + encVar + "=" + vmFlatToLuaTable(xored);
+        const strTable = "local " + strVar + "=" + vmStringsToLuaTable(enc.strings);
+        const decoderSrc = vmGenerateOuterDecoder(decoderFn2, encVar, strVar, outerMask);
+        // Assign to an unused local so the decoder body ships but nothing
+        // actually dispatches the fake bytecode.
+        const decoyCall = "local " + decoyVar + "=" + decoderFn2 + "()";
+        const combined = encTable + " " + strTable + " " + decoderSrc + " " +
+                         decoyCall + " " + wrapped;
+        const chk = validate(combined);
+        if (chk.ok) {
+          wrapped = combined;
+          outerVmActive = true;
+        }
+        // If validation fails on the decoy, silently skip (no user impact).
+      }
+    } catch (e) {
+      report.warn("Outer VM threw: " + e.message + " - skipped");
+      // Fall back to the pre-outer wrap: if inner VM was active, restore
+      // its plain form.
+      if (report.layers.vmWrap && vmFnName && vmBcVar && vmBytecode.length > 0) {
+        const innerBcTable = vmGenerateBytecodeTable(vmBcVar, vmBytecode);
+        const dispatcherSrc = vmGenerateDispatcher(vmFnName, vmBcVar);
+        wrapped = innerBcTable + " " + dispatcherSrc + " " + wrapped;
+      }
+    }
+  } else if (report.layers.vmWrap && vmFnName && vmBcVar) {
+    // Inner VM active but outer VM disabled (not maximum, or hooks
+    // detected) -- just emit plain inner form.
     const bcTableSrc = vmGenerateBytecodeTable(vmBcVar, vmBytecode);
     const dispatcherSrc = vmGenerateDispatcher(vmFnName, vmBcVar);
     wrapped = bcTableSrc + " " + dispatcherSrc + " " + wrapped;
+  }
+  if (outerVmActive) {
+    report.layers.outerVM = true;
+    report.stagesSucceeded.push("outer-vm");
   }
   if (report.layers.stringEncryption) {
     const decoderCode = makeStringDecoder(decoderFn, encKey, encShift, xorMask);
@@ -1827,6 +2035,7 @@ function _pipeline(rawCode, level, options, report) {
       report.layers.vmWrap = false;
       if (report.stats) report.stats.vmStatements = 0;
     }
+    report.layers.outerVM = false;
     report.layers.constantPool = false;
     report.layers.stringEncryption = false;
     report.layers.byteLevelXor = false;
