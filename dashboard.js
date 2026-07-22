@@ -272,12 +272,13 @@ function buildProtectedLoadstring(scriptId, key) {
 // ============================================================================
 // v25: dispatcher -- live streaming for medium/maximum, one-shot for others.
 async function obfuscateCodeAny(code, level, options) {
+  console.log("[live] dispatcher level=", level);
   options = options || {};
   if (level === "medium" || level === "maximum") {
     try {
       return await obfuscateCodeLive(code, level, options);
     } catch (e) {
-      console.warn("Live obfuscation failed, falling back to one-shot:", e.message);
+      console.warn("[live] Live obfuscation failed, falling back to one-shot:", e.message, e.stack);
       closeLiveModal();
       return await obfuscateCode(code, level, options);
     }
@@ -354,6 +355,7 @@ function openForceMaxModal() {
 // fall back to the classic one-shot /obfuscate endpoint.
 //
 async function obfuscateCodeLive(code, level, options) {
+  console.log("[live] obfuscateCodeLive start level=", level);
   options = options || {};
   if (level === "none") {
     return {
@@ -363,6 +365,7 @@ async function obfuscateCodeLive(code, level, options) {
   }
 
   // Step 1: reserve session.
+  console.log("[live] POST /obfuscate/stream/start");
   const startRes = await fetch("/obfuscate/stream/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -379,7 +382,7 @@ async function obfuscateCodeLive(code, level, options) {
     throw new Error(errMsg);
   }
   const { sessionId } = await startRes.json();
-
+  console.log("[live] session started:", sessionId);
   openLiveModal();
   setLiveStatus("Connecting...");
 
@@ -498,11 +501,13 @@ async function sendLiveDecision(stage, skip) {
 }
 
 function openLiveModal() {
+  console.log("[live] openLiveModal called; liveModal=", !!liveModal);
   if (liveStagesEl) liveStagesEl.innerHTML = "";
-  liveProgressFill.style.width = "0%";
+  if (liveProgressFill) liveProgressFill.style.width = "0%";
   _clsRemove(liveCancelBtn, "hidden");
   _clsAdd(liveCloseBtn, "hidden");
   _clsAdd(liveModal, "open");
+  if (!liveModal) console.error("[live] liveModal is null -- modal will not appear!");
 }
 
 function closeLiveModal() {
@@ -553,6 +558,7 @@ function renderLiveStages(stages) {
 }
 
 function updateLiveStage(stageName, status, label, detail) {
+  if (!liveStagesEl) return;
   const el = liveStagesEl.querySelector('[data-stage="' + stageName + '"]');
   if (!el) return;
   _clsRemove(el, "pending", "running", "awaiting", "success", "skipped", "failed");
@@ -570,13 +576,14 @@ function updateLiveStage(stageName, status, label, detail) {
 }
 
 function updateProgressBar() {
+  if (!liveStagesEl) return;
   const nodes = liveStagesEl.querySelectorAll(".live-stage");
   if (!nodes.length) return;
   let done = 0;
   nodes.forEach(n => {
     if (n.classList.contains("success") || n.classList.contains("skipped") || n.classList.contains("failed")) done++;
   });
-  liveProgressFill.style.width = ((done / nodes.length) * 100).toFixed(1) + "%";
+  if (liveProgressFill) liveProgressFill.style.width = ((done / nodes.length) * 100).toFixed(1) + "%";
 }
 
 function _stageIconSvg(status) {
