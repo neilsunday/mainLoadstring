@@ -537,6 +537,23 @@ function renderReport(report, generatedCode) {
       consoleLines.push("=== STAGES SKIPPED ===");
       for (const s of report.stagesSkipped) consoleLines.push("  âœ— " + s);
     }
+    // v25.30 forensic: wide snippets from failed stages
+    if (report.stageDebug && report.stageDebug.length > 0) {
+      consoleLines.push("");
+      consoleLines.push("=== STAGE FORENSIC (v25.30) ===");
+      for (const d of report.stageDebug) {
+        consoleLines.push("--- Stage: " + d.stage + " ---");
+        consoleLines.push("Caret byte offset: " + d.caretByteOffset + " / " + d.outputTotalLen);
+        consoleLines.push("Char at caret: [" + (d.wideSnippet.atChar || "") + "]");
+        consoleLines.push("");
+        consoleLines.push("BEFORE (last 200 chars):");
+        consoleLines.push(d.wideSnippet.before);
+        consoleLines.push("");
+        consoleLines.push("AFTER (next 200 chars):");
+        consoleLines.push(d.wideSnippet.after);
+        consoleLines.push("");
+      }
+    }
     consoleLines.push("");
     consoleLines.push("=== WARNINGS (" + report.warnings.length + ") ===");
     report.warnings.forEach((w, i) => {
