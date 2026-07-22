@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.1 - Clean rewrite + Anti-debugger (silent-exit)
+// AzureVM Obfuscator v25.2 - Anti-debugger wired into _pipeline (server path)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1405,9 +1405,38 @@ function _pipeline(rawCode, level, options, report) {
     report.layers.constantPool = true;
   }
 
+  // Stage: anti-debugger (silent-exit guard).
+  // Only maximum tier, and only when the payload does NOT itself use
+  // hookfunction / hookmetamethod / runtime reflection -- our probes would
+  // false-positive on the payload's own hooks otherwise.
+  if (effectiveLevel === "maximum") {
+    if (profile.hasHookfunction || profile.hasHookmetamethod ||
+        profile.hasRuntimeReflection) {
+      report.warn("Anti-debugger skipped: script uses hooks/reflection (would false-positive)");
+      report.stagesSkipped.push("anti-debugger");
+    } else {
+      try {
+        const withAD = generateAntiDebugger() + " " + wrapped;
+        const chk = validate(withAD);
+        if (chk.ok) {
+          wrapped = withAD;
+          report.layers.antiDebugger = true;
+          report.stagesSucceeded.push("anti-debugger");
+        } else {
+          report.warn("Anti-debugger produced invalid Lua (" + chk.error + ") - skipped");
+          report.stagesSkipped.push("anti-debugger");
+        }
+      } catch (e) {
+        report.warn("Anti-debugger threw: " + e.message + " - skipped");
+        report.stagesSkipped.push("anti-debugger");
+      }
+    }
+  }
+
   // Stage: integrity check (payload tamper detection).
-  // Prepended AFTER decoder + pool so the checksum covers the wrapper too.
-  // Wrapped in try/validate so a bad checksum output can't kill the run.
+  // Prepended AFTER decoder + pool + anti-debugger so the checksum covers
+  // all wrapper code too. Wrapped in try/validate so a bad checksum output
+  // can't kill the run.
   try {
     const withIntegrity = generateIntegrityCheck(wrapped) + " " + wrapped;
     const chk = validate(withIntegrity);
@@ -1433,6 +1462,8 @@ function _pipeline(rawCode, level, options, report) {
     wrapped = goodCode;
     report.layers.constantPool = false;
     report.layers.stringEncryption = false;
+    report.layers.antiDebugger = false;
+    report.layers.integrityCheck = false;
   }
 
   const finalCode = minify(wrapped);
