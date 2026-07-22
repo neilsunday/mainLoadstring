@@ -1,3 +1,17 @@
+// AzureVM Obfuscator v16.3 - Anti-debugger safety (macrozure hotfix)
+// Applied fix (this batch):
+//   P0.6  Anti-debugger silently killed reflection-heavy scripts (macrozure.txt).
+//         Root cause: check #2 (getgc pool > 50k) triggers on modern Delta/Fluxus
+//         executors even with no deobfuscator activity, causing silent script exit.
+//         Fixes:
+//           - Detect runtime reflection use (getgc, debug.info, debug.getupvalues,
+//             debug.getconstants, etc.) via new profile.hasRuntimeReflection flag
+//           - NEVER enable anti-debugger for reflection-heavy scripts
+//           - Raise anti-debug threshold from 2 to 3 signals (less trigger-happy)
+//           - Raise getgc pool sanity check from 50k to 200k (modern executor safe)
+//         Report now includes hasRuntimeReflection in profile + warning when
+//         anti-debug is skipped for reflection.
+// Previous v16.2 (Second TDZ hotfix):
 // AzureVM Obfuscator v16.2 - Second TDZ hotfix
 // Applied fix (this batch):
 //   P0.5  Fixed second TDZ ReferenceError: 'Cannot access \'profile\' before initialization'
@@ -1536,7 +1550,7 @@ const NEVER_ENCRYPT_STRINGS = new Set([
 // v13.0 (2B) + v15.1 (Option B+C): Decide if a StringLiteral is safe to encrypt.
 // Returns true = safe to encrypt, false = keep literal.
 //
-// Option B (default): Loosened PascalCase filter â€” PascalCase strings of length >= 8
+// Option B (default): Loosened PascalCase filter Ã¢â‚¬â€ PascalCase strings of length >= 8
 //   that don't match known Roblox class/service names ARE encrypted. This lifts
 //   things like "ZureMacro", "AzureLogo", "LogoHit" out of skip and into encrypt.
 //
@@ -2148,7 +2162,9 @@ function byteLevelTripleObfuscate(code,level,userId){
 
   const parts=[];
   parts.push(junkTablePreamble);  // v9.0: shared junk table
-  if(level==="maximum")parts.push(generateAntiTamper());
+  // v16.3: Skip anti-tamper wrapper too when reflection is heavy (audit cleanness).
+  // The wrapper itself is usually benign but combined with other layers can compound issues.
+  if(level==="maximum")parts.push(generateAntiTamper());  // (kept as-is; scoped fix limited to anti-debug)
   if(antiDump) parts.push(antiDump);
   parts.push(watermark);
   parts.push(junk1);
@@ -2238,7 +2254,7 @@ function preAnalyze(rawCode) {
 
   if (symbols.forwardRefs.length > 0) {
     report.warnings.push(
-      "Found " + symbols.forwardRefs.length + " forward function reference(s) -Ã‚Â " +
+      "Found " + symbols.forwardRefs.length + " forward function reference(s) -Ãƒâ€šÃ‚Â " +
       "these will pass through the VM (safe)."
     );
     const preview = symbols.forwardRefs.slice(0, 5).map(f =>
@@ -2551,6 +2567,13 @@ function profileScript(ast, rawCode) {
   else if (profile.maxBlockDepth >= 25 || profile.complexityScore >= 80) profile.riskTier = "medium";
   else profile.riskTier = "low";
 
+  // v16.3: Detect runtime reflection usage that would trigger anti-debugger false positives.
+  // These functions are used by legit scripts (auto-detection, framework introspection)
+  // but ALSO by deobfuscators â€” so we can't tell them apart at runtime. Safe policy:
+  // don't run anti-debugger checks against scripts that use them.
+  const reflectionRe = /\b(getgc|debug\.info|debug\.getupvalues|debug\.getupvalue|debug\.getconstants|debug\.getproto|debug\.getprotos|debug\.getlocals|debug\.getlocal|debug\.setupvalue|debug\.setconstant|getreg|getrenv|getgenv|getsenv|getconnections)\s*\(/;
+  profile.hasRuntimeReflection = reflectionRe.test(rawCode);
+
   return profile;
 }
 
@@ -2805,7 +2828,7 @@ function generateAntiDebugger(softMode) {
   // executor while another succeeds.
   const fnName = randHexName(6);
   const scoreVar = randHexName(4);
-  const threshold = 2;
+  const threshold = 3;  // v16.3: raised from 2 - single-signal executors were false-positive triggering
 
   let checks = "";
   // Check 1: debug.sethook active (single-step debugger)
@@ -2816,7 +2839,7 @@ function generateAntiDebugger(softMode) {
   // Check 2: getgc returns suspiciously large pool (scanner active)
   checks += "if type(getgc)=='function' then " +
       "local ok2,gc=pcall(getgc,false) " +
-      "if ok2 and type(gc)=='table' and #gc>50000 then " +
+      "if ok2 and type(gc)=='table' and #gc>200000 then " +  // v16.3: raised from 50k - modern executors keep large pools
         scoreVar + "=" + scoreVar + "+1 " +
       "end " +
     "end ";
@@ -3206,7 +3229,7 @@ function generateDependencyReport(profile, closureGraph, uiPatterns) {
       uiPatterns.tweenServiceUsage + " tweens");
     const topTypes = Object.entries(uiPatterns.uiTypeCreations)
       .sort((a, b) => b[1] - a[1]).slice(0, 5);
-    lines.push("  Top UI types: " + topTypes.map(t => t[0] + "Ãƒâ€”" + t[1]).join(", "));
+    lines.push("  Top UI types: " + topTypes.map(t => t[0] + "ÃƒÆ’Ã¢â‚¬â€" + t[1]).join(", "));
   }
 
   return lines.join("\n");
@@ -3229,7 +3252,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       for (const err of analysis.errors) console.error("[obfuscator v11]   " + err);
 
       if (analysis.stage === "parse") {
-        console.warn("[obfuscator v11] Parse failed -Ã‚Â downgrading to byte-level protection.");
+        console.warn("[obfuscator v11] Parse failed -Ãƒâ€šÃ‚Â downgrading to byte-level protection.");
         console.warn("[obfuscator v11] Fix the parse error above to unlock full obfuscation.");
         let downCode;
         try { downCode = luauToLua(preprocess(luaCode)); }
@@ -3269,7 +3292,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     for (const w of analysis.warnings) console.log("[obfuscator v11]   " + w);
 
     // v16.1 P0 FIX: hoist `code` and `ast` HERE (before any code that uses them).
-    // v16.2 P0 FIX: also hoist `profile` â€” tuneStrategy(profile,...) inside the
+    // v16.2 P0 FIX: also hoist `profile` Ã¢â‚¬â€ tuneStrategy(profile,...) inside the
     // v16 advanced intelligence block was throwing "Cannot access 'profile'
     // before initialization" because profileScript() was called much later.
     const code = analysis.convertedCode;
@@ -3286,7 +3309,8 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       hasHookfunction: !!profile.hasHookfunction,
       hasHookmetamethod: !!profile.hasHookmetamethod,
       frameworks: profile.frameworks ? [...profile.frameworks] : [],
-      hotspotCount: profile.hotspots ? profile.hotspots.length : 0
+      hotspotCount: profile.hotspots ? profile.hotspots.length : 0,
+      hasRuntimeReflection: !!profile.hasRuntimeReflection
     };
     console.log("[obfuscator v13] Profile:",
       "risk=" + profile.riskTier,
@@ -3439,7 +3463,7 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     const flattenStats = reduceNesting(ast, 8);
     const depthAfter = measureAstDepth(ast);
     console.log("[obfuscator v13] Nesting reduction:",
-      "depth " + depthBefore + "- Ã¢â‚¬â„¢" + depthAfter,
+      "depth " + depthBefore + "- ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢" + depthAfter,
       "| if-chains flattened:", flattenStats.flattens,
       "| do-blocks inlined:", flattenStats.doBlocksInlined,
       "| empty else removed:", flattenStats.emptyElsesRemoved);
@@ -3471,10 +3495,10 @@ async function obfuscateWithReport(luaCode, level, userId, options){
         _report.finalize(luaCode.length, _out.length, Date.now() - _startTime);
         return { code: _out, report: _report };
       } else {
-        console.log("[obfuscator v13] Ã¢Å“â€œ Retry with minimal mode succeeded");
+        console.log("[obfuscator v13] ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Retry with minimal mode succeeded");
       }
     } else {
-      console.log("[obfuscator v13] Ã¢Å“â€œ Generated code validated OK");
+      console.log("[obfuscator v13] ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Generated code validated OK");
     }
 
     // === v16.0 SEMANTIC PRESERVATION CHECK ===
@@ -3484,11 +3508,11 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       console.warn("[obfuscator v16] -  Semantic pattern preservation issues:");
       for (const issue of semanticIssues) {
         console.warn("[obfuscator v16]   " + issue.pattern +
-          ": " + issue.before + " - Ã¢â‚¬â„¢ " + issue.after +
+          ": " + issue.before + " - ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ " + issue.after +
           " (ratio: " + issue.preservationRatio + ")");
       }
     } else {
-      console.log("[obfuscator v16] Ã¢Å“â€œ All semantic patterns preserved");
+      console.log("[obfuscator v16] ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ All semantic patterns preserved");
     }
 
     // === v14.0 ANTI-DEBUGGER + ANTI-TAMPER LAYER (v14.0 3B: expanded coverage) ===
@@ -3498,10 +3522,16 @@ async function obfuscateWithReport(luaCode, level, userId, options){
     // false-positive). If the script uses ONE hook type, use soft mode which
     // skips the corresponding check.
     const usesBothHooks = profile.hasHookfunction && profile.hasHookmetamethod;
+    // v16.3: NEVER enable anti-debugger for scripts using runtime reflection.
+    // These scripts trigger too many false positives (their own getgc/debug.info
+    // calls are indistinguishable from deobfuscator activity). Silent-exit was
+    // the observed failure mode for macrozure.txt.
     const canEnableAntiDebug =
-      (profile.riskTier === "low" || profile.riskTier === "medium") ||
-      (profile.riskTier === "high" && !usesBothHooks) ||
-      (profile.riskTier === "extreme" && !usesBothHooks);
+      !profile.hasRuntimeReflection && (
+        (profile.riskTier === "low" || profile.riskTier === "medium") ||
+        (profile.riskTier === "high" && !usesBothHooks) ||
+        (profile.riskTier === "extreme" && !usesBothHooks)
+      );
     if (canEnableAntiDebug) {
       const softMode = profile.hasHookfunction || profile.hasHookmetamethod;
       console.log("[obfuscator v14] Enabling anti-debugger + anti-tamper layer" +
@@ -3516,7 +3546,11 @@ async function obfuscateWithReport(luaCode, level, userId, options){
       console.log("[obfuscator v14]   Added anti-debugger" +
         (softMode ? " (gethook + getgc scan only)" : " (gethook + getgc scan + hookfunction detection)"));
     } else {
-      console.log("[obfuscator v14] Skipping anti-debugger layer (script uses both hookfunction+hookmetamethod - too risky)");
+      const skipReason = profile.hasRuntimeReflection
+        ? "script uses runtime reflection (getgc/debug.info/etc) - anti-debugger would false-positive"
+        : "script uses both hookfunction+hookmetamethod - too risky";
+      console.log("[obfuscator v14] Skipping anti-debugger layer (" + skipReason + ")");
+      _report.warn("Anti-debugger disabled: " + skipReason);
     }
     ob = addContinueLabels(ob);  // v9.1: replace goto __continue__ with safe no-op
     const decName=randHexName(3);
