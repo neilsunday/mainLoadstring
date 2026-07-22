@@ -395,6 +395,22 @@
           <button type="button" id="clearBtn" class="secondary small">Clear</button>
           <span id="fileName"></span>
         </div>
+
+        <!-- v24 NEW: Reference Script upload -->
+        <hr class="card-divider" />
+        <div class="field">
+          <label for="referenceUpload">
+            <span>Reference Script <span class="badge badge-info" style="margin-left: 6px;">OPTIONAL</span></span>
+            <span class="hint">Extra safety guide for the obfuscator</span>
+          </label>
+          <small>Upload a working Lua file (e.g. a previously obfuscated script that ran successfully). Every identifier, string, and property name in it will be added to the auto-preserve whitelist for THIS obfuscation only. Nothing is saved server-side.</small>
+          <div class="upload-row" style="margin-top: 10px">
+            <input type="file" id="referenceUpload" accept=".lua,.txt" style="display: none" />
+            <button type="button" id="referenceUploadBtn" class="secondary small">Choose Reference File</button>
+            <button type="button" id="referenceClearBtn" class="secondary small hidden">Clear Reference</button>
+            <span id="referenceFileName" style="font-size: 12px; color: rgba(255, 255, 255, 0.55)"></span>
+          </div>
+        </div>
       </div>
 
       <!-- ============ CARD: PROTECTION SETTINGS ============ -->
