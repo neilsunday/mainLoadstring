@@ -2,8 +2,9 @@ const express = require("express");
 const path = require("path");
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
-// v24.0: obfuscateWithReport now accepts options.referenceCode for the manifest.
-const { obfuscate, obfuscateWithReport } = require("./obfuscator");
+// v25.0: obfuscateWithStream added for live per-stage skip/continue UI.
+const { obfuscate, obfuscateWithReport, obfuscateWithStream } = require("./obfuscator");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -29,7 +30,7 @@ app.use(express.json({ limit: "24mb" }));
 app.use(express.static(path.join(__dirname), { extensions: ["html"] }));
 
 // ==========================================
-// /obfuscate â€” v24.0
+// /obfuscate - v24.0 (unchanged, one-shot obfuscation)
 // Body: { code, level, forceMaximum?, userId?, referenceCode? }
 // Response: { success, level, original_size, obfuscated_size, elapsed_ms, code, report }
 // ==========================================
@@ -44,7 +45,6 @@ app.post("/obfuscate", async (req, res) => {
       res.status(413).json({ error: "Code too large (max 10MB)" });
       return;
     }
-    // v24.0: reference is optional; validate size but allow missing
     if (referenceCode != null && typeof referenceCode !== "string") {
       res.status(400).json({ error: "Invalid 'referenceCode' field type" });
       return;
@@ -112,7 +112,225 @@ app.post("/obfuscate", async (req, res) => {
 });
 
 // ==========================================
-// /s/:id â€” unchanged from v1 (loadstring loader endpoint)
+// v25.0 STREAMING API
+// ==========================================
+// Two-endpoint dance:
+//
+//   1. Client POSTs to /obfuscate/stream/start with {code, level, ...}.
+//      Server holds the run in memory keyed by a fresh sessionId and returns
+//      { sessionId } without doing any work yet.
+//
+//   2. Client opens an EventSource on /obfuscate/stream/:sessionId.
+//      Server starts the pipeline and pushes SSE events for every stage.
+//      When a stage requests a decision, the run awaits inside a Promise.
+//
+//   3. Client POSTs to /obfuscate/stream/:sessionId/decision with
+//      { stage, skip } to resolve the pending Promise. The pipeline continues.
+//
+//   4. On session-complete, server sends a final event with the code + report
+//      and closes the SSE stream. Client can then save/preview normally.
+//
+// Sessions self-expire after 5 minutes of inactivity so a rage-quit browser
+// tab does not leak memory on the server.
+// ==========================================
+
+const streamSessions = new Map(); // sessionId -> session state
+const SESSION_TTL_MS = 5 * 60 * 1000;
+
+function _newSessionId() {
+  return crypto.randomBytes(12).toString("hex");
+}
+
+function _touchSession(session) {
+  session.lastActivity = Date.now();
+}
+
+function _sweepSessions() {
+  const now = Date.now();
+  for (const [id, s] of streamSessions.entries()) {
+    if (now - s.lastActivity > SESSION_TTL_MS) {
+      try { s.abort && s.abort(); } catch (_) {}
+      streamSessions.delete(id);
+    }
+  }
+}
+setInterval(_sweepSessions, 60 * 1000).unref();
+
+// Step 1: reserve a session and validate the payload.
+app.post("/obfuscate/stream/start", (req, res) => {
+  try {
+    const { code, level, forceMaximum, userId, referenceCode } = req.body || {};
+    if (!code || typeof code !== "string") {
+      res.status(400).json({ error: "Missing or invalid 'code' field" });
+      return;
+    }
+    if (code.length > 10 * 1024 * 1024) {
+      res.status(413).json({ error: "Code too large (max 10MB)" });
+      return;
+    }
+    if (referenceCode != null && typeof referenceCode !== "string") {
+      res.status(400).json({ error: "Invalid 'referenceCode' field type" });
+      return;
+    }
+    if (referenceCode && referenceCode.length > 10 * 1024 * 1024) {
+      res.status(413).json({ error: "Reference file too large (max 10MB)" });
+      return;
+    }
+    const validLevels = ["none", "basic", "medium", "maximum"];
+    const obfLevel = validLevels.includes(level) ? level : "medium";
+    const sessionId = _newSessionId();
+    streamSessions.set(sessionId, {
+      id: sessionId,
+      createdAt: Date.now(),
+      lastActivity: Date.now(),
+      payload: {
+        code, level: obfLevel,
+        forceMaximum: !!forceMaximum,
+        referenceCode: referenceCode || null,
+        userId: userId || null,
+      },
+      // SSE state -- populated when the client connects.
+      res: null,
+      eventQueue: [],       // events emitted before the SSE connects
+      pendingDecision: null,// { stage, resolve } while a stage awaits
+      finished: false,
+    });
+    res.json({ sessionId });
+  } catch (err) {
+    console.error("stream/start error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Step 2: SSE stream. Starts the pipeline on connect and pushes stage events.
+app.get("/obfuscate/stream/:sessionId", (req, res) => {
+  const session = streamSessions.get(req.params.sessionId);
+  if (!session) {
+    res.status(404).json({ error: "Unknown session" });
+    return;
+  }
+  if (session.res) {
+    res.status(409).json({ error: "Session already has an open stream" });
+    return;
+  }
+  _touchSession(session);
+
+  res.set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-store",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no", // disable nginx buffering if in front
+  });
+  res.flushHeaders && res.flushHeaders();
+
+  session.res = res;
+  const sendSSE = (evt, data) => {
+    try {
+      res.write("event: " + evt + "\n");
+      res.write("data: " + JSON.stringify(data || {}) + "\n\n");
+    } catch (_) { /* client hung up */ }
+  };
+
+  // Flush any events queued before the stream opened.
+  for (const q of session.eventQueue) sendSSE(q.event, q.data);
+  session.eventQueue = [];
+
+  req.on("close", () => {
+    if (session.pendingDecision) {
+      // Resolve as skip so the pipeline unwinds cleanly.
+      try { session.pendingDecision.resolve({ skip: true }); } catch (_) {}
+      session.pendingDecision = null;
+    }
+    session.res = null;
+  });
+
+  // Heartbeat every 15s so proxies don't drop idle connections.
+  const heartbeat = setInterval(() => {
+    try { res.write(": ping\n\n"); } catch (_) {}
+  }, 15000);
+  heartbeat.unref();
+  req.on("close", () => clearInterval(heartbeat));
+
+  // Fire the pipeline.
+  const emit = (evt, data) => {
+    _touchSession(session);
+    if (session.res) sendSSE(evt, data);
+    else session.eventQueue.push({ event: evt, data });
+  };
+  const awaitDecision = (stage) => new Promise((resolve) => {
+    _touchSession(session);
+    session.pendingDecision = { stage, resolve };
+  });
+
+  const { code, level, forceMaximum, referenceCode, userId } = session.payload;
+
+  obfuscateWithStream(code, level, userId, {
+    forceMaximum, referenceCode,
+    emit, awaitDecision,
+  }).then((result) => {
+    session.finished = true;
+    emit("session-complete", {
+      code: result.code,
+      report: result.report,
+      original_size: code.length,
+      obfuscated_size: (result.code || "").length,
+    });
+    // Log to Supabase (best effort, same shape as /obfuscate).
+    if (userId && supabase && result.report) {
+      supabase.from("obfuscation_history").insert({
+        user_id: userId,
+        requested_level: result.report.requestedLevel,
+        actual_level: result.report.actualLevel,
+        was_downgraded: result.report.wasDowngraded,
+        downgrade_reason: result.report.downgradeReason,
+        original_size: result.report.stats.originalBytes,
+        obfuscated_size: result.report.stats.obfuscatedBytes,
+        size_ratio: result.report.stats.sizeRatio,
+        elapsed_ms: result.report.stats.elapsedMs,
+        profile_json: result.report.profile,
+        layers_json: result.report.layers,
+        stats_json: result.report.stats,
+        warnings_json: result.report.warnings,
+        force_maximum_used: !!forceMaximum,
+        reference_used: !!referenceCode,
+      }).then(() => {}, (e) => console.error("history insert:", e.message));
+    }
+    try { session.res && session.res.end(); } catch (_) {}
+    // Keep session for 30s so the client can retrieve if it reconnects.
+    setTimeout(() => streamSessions.delete(session.id), 30 * 1000);
+  }).catch((err) => {
+    console.error("stream pipeline error:", err.message);
+    emit("session-error", { error: err.message });
+    try { session.res && session.res.end(); } catch (_) {}
+    streamSessions.delete(session.id);
+  });
+});
+
+// Step 3: decision callback. Resolves the awaiting stage.
+app.post("/obfuscate/stream/:sessionId/decision", (req, res) => {
+  const session = streamSessions.get(req.params.sessionId);
+  if (!session) {
+    res.status(404).json({ error: "Unknown session" });
+    return;
+  }
+  _touchSession(session);
+  const { stage, skip } = req.body || {};
+  if (!session.pendingDecision) {
+    res.status(409).json({ error: "No stage awaiting decision" });
+    return;
+  }
+  if (stage && session.pendingDecision.stage !== stage) {
+    res.status(409).json({ error: "Decision stage mismatch (expected " + session.pendingDecision.stage + ")" });
+    return;
+  }
+  const resolve = session.pendingDecision.resolve;
+  session.pendingDecision = null;
+  try { resolve({ skip: !!skip }); } catch (_) {}
+  res.json({ ok: true });
+});
+
+// ==========================================
+// /s/:id - unchanged from v1 (loadstring loader endpoint)
 // ==========================================
 app.get("/s/:id", async (req, res) => {
   const scriptId = req.params.id;
