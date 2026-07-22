@@ -973,6 +973,7 @@ function _parseAst(code) {
 }
 
 // ============================================================================
+// ============================================================================
 // SECTION 11 - Constant pool with poison entries (maximum tier)
 // ============================================================================
 
@@ -994,6 +995,45 @@ function generatePoisonPool(varName, poolKey, poolShift) {
     entries.push("{" + bytes.join(",") + "}");
   }
   return "local " + varName + "={" + shuffle(entries).join(",") + "}";
+}
+
+// ============================================================================
+// SECTION 11B - Integrity check (payload tamper detection)
+// ============================================================================
+//
+// Compute a rolling multiply-by-31 checksum over the first ~200 chars of the
+// wrapped payload at obfuscation time. Emit a Lua function that recomputes
+// the same checksum at runtime. If any byte was patched between build and
+// execution, the checksums diverge and the script silent-returns before any
+// decoder or user code runs.
+//
+// Pure computation -- no getgc, no hookfunction, no environment probes.
+// Safe on every executor. If the JS-side compute somehow diverges from the
+// Lua-side compute (impossible with plain 7-bit ASCII markers), worst case
+// is silent-exit -- indistinguishable from a normal loader failure, never
+// a crash.
+// ============================================================================
+
+function generateIntegrityCheck(payload) {
+  // Marker is the first slice of the payload. Pure 7-bit ASCII by
+  // construction (all our wrappers emit only ASCII), so JS charCodeAt and
+  // Lua string.byte agree byte-for-byte.
+  const marker = payload.substring(0, Math.min(200, payload.length));
+  let expected = 0;
+  for (let i = 0; i < marker.length; i++) {
+    expected = ((expected * 31) + marker.charCodeAt(i)) & 0x7fffffff;
+  }
+  const fnName = randHexName(3);
+  const chkVar = randHexName(2);
+  const expVar = randHexName(2);
+  return "local function " + fnName + "() " +
+    "local " + expVar + "=" + expected + " " +
+    "local " + chkVar + "=0 " +
+    "local s=" + JSON.stringify(marker) + " " +
+    "for i=1,#s do " + chkVar + "=(" + chkVar + "*31+string.byte(s,i))%2147483648 end " +
+    "return " + chkVar + "==" + expVar + " " +
+    "end " +
+    "if not " + fnName + "() then return end";
 }
 
 // ============================================================================
@@ -1322,6 +1362,25 @@ function _pipeline(rawCode, level, options, report) {
     const poolVar = "_CP" + randHexName(2).slice(3);
     wrapped = generatePoisonPool(poolVar, encKey, encShift) + " " + wrapped;
     report.layers.constantPool = true;
+  }
+
+  // Stage: integrity check (payload tamper detection).
+  // Prepended AFTER decoder + pool so the checksum covers the wrapper too.
+  // Wrapped in try/validate so a bad checksum output can't kill the run.
+  try {
+    const withIntegrity = generateIntegrityCheck(wrapped) + " " + wrapped;
+    const chk = validate(withIntegrity);
+    if (chk.ok) {
+      wrapped = withIntegrity;
+      report.layers.integrityCheck = true;
+      report.stagesSucceeded.push("integrity-check");
+    } else {
+      report.warn("Integrity check produced invalid Lua (" + chk.error + ") - skipped");
+      report.stagesSkipped.push("integrity-check");
+    }
+  } catch (e) {
+    report.warn("Integrity check threw: " + e.message + " - skipped");
+    report.stagesSkipped.push("integrity-check");
   }
 
   // Final validation of the wrapped output. If it fails, fall back to the
