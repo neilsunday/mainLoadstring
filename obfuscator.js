@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.24-luau - v25.23 perf + Luau param type stripper (paren walker)
+// AzureVM Obfuscator v25.25-safe - v25.24 with string-encryption validation re-enabled
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -1860,7 +1860,11 @@ function _fastClone(node) {
 // cannot produce invalid Lua because the serializer treats __obf as a black
 // box and never lets it corrupt structure. For these stages we skip cloneAst
 // AND validate(), saving ~15-25 seconds per stage on a 500KB script.
-const _SAFE_STAGES = new Set(["numeric-encoding", "string-encryption"]);
+// v25.25: string-encryption removed from safe stages. Observed in production
+// (719KB Luau script) that some encrypted strings produce output that only
+// downstream stages surface as invalid. Keeping validate() as a safety net
+// for string-encryption catches this at the right stage.
+const _SAFE_STAGES = new Set(["numeric-encoding"]);
 
 function runStage(name, ast, ctx, fn, report) {
   const _t0 = Date.now();
