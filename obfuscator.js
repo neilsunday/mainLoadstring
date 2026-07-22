@@ -1,4 +1,4 @@
-// AzureVM Obfuscator v25.20 - Diagnostic baseline parse warning (Option A)
+// AzureVM Obfuscator v25.21 - Paren-balance Luau param-type stripper (Option 2)
 // ============================================================================
 // This file replaces the v24 obfuscator with a minimal, guaranteed-executable
 // pipeline. Public API is byte-compatible with server.js:
@@ -355,6 +355,107 @@ let _currentManifest = null;
 // goto __continue_N__, strip Luau type annotations, restore string literals.
 // ============================================================================
 
+// v25.21: Luau function-parameter type stripper â€” proper paren-balance walker.
+// Reads the code once, character by character, tracking paren depth. Inside
+// every `(...)` group we look for `identifier : TypeName` sequences and
+// remove the `: TypeName` portion. We NEVER emit new parens (that was the
+// v25.18 bug â€” its regex re-emitted `(cleaned)` around every innermost group
+// and produced an extra `)` on nested calls). We only DELETE characters, so
+// the paren balance of the input is preserved exactly.
+//
+// Handled forms inside parens:
+//   name: Type                    -> name
+//   name: Type.Sub                -> name
+//   name: Type<A, B>              -> name
+//   name: Type?                   -> name
+//   name: {[string]: number}      -> name
+//   name: (A) -> B                -> name
+// Boundary detection stops the type at the first `,` or `)` at the SAME
+// paren depth as the annotated identifier (or `=` for default-value forms).
+function stripLuauParamTypes(code) {
+  const out = [];
+  const n = code.length;
+  let i = 0;
+  let parenDepth = 0;
+
+  // We need to skip content inside our own string-hole placeholders
+  // (___STR_N___) â€” those are opaque and must not be scanned for `:`.
+  function scanStrHole(pos) {
+    // returns end index (exclusive) if pos starts a hole, else -1
+    if (code.substring(pos, pos + 7) !== '___STR_') return -1;
+    const end = code.indexOf('___', pos + 7);
+    if (end < 0) return -1;
+    return end + 3;
+  }
+
+  // Skip a Luau type expression starting at index `start` (the ':' char).
+  // Returns the index just AFTER the type. Boundaries: `,` or `)` or `=`
+  // or `\n` at depth == startDepth. Nested `(...)`, `{...}`, `<...>` are
+  // absorbed. Bails after 500 chars to avoid runaway scans.
+  function skipType(start, startDepth) {
+    let j = start; // pointing at ':'
+    if (code[j] !== ':') return j;
+    j++; // past ':'
+    // Skip optional whitespace
+    while (j < n && (code[j] === ' ' || code[j] === '\t')) j++;
+    const budget = Math.min(n, start + 500);
+    let localParen = 0, localBrace = 0, localAngle = 0;
+    while (j < budget) {
+      const ch = code[j];
+      // string-hole placeholder â€” skip whole
+      const holeEnd = scanStrHole(j);
+      if (holeEnd > 0) { j = holeEnd; continue; }
+      if (ch === '(') { localParen++; j++; continue; }
+      if (ch === ')') {
+        if (localParen > 0) { localParen--; j++; continue; }
+        return j; // boundary â€” outer ')' closes the enclosing param list
+      }
+      if (ch === '{') { localBrace++; j++; continue; }
+      if (ch === '}') { if (localBrace > 0) localBrace--; j++; continue; }
+      if (ch === '<') { localAngle++; j++; continue; }
+      if (ch === '>') { if (localAngle > 0) localAngle--; j++; continue; }
+      if (localParen === 0 && localBrace === 0 && localAngle === 0) {
+        if (ch === ',' || ch === '=' || ch === '\n' || ch === ';') return j;
+      }
+      j++;
+    }
+    return j;
+  }
+
+  while (i < n) {
+    // skip string-hole placeholder
+    const holeEnd = scanStrHole(i);
+    if (holeEnd > 0) { out.push(code.substring(i, holeEnd)); i = holeEnd; continue; }
+
+    const c = code[i];
+    if (c === '(') { parenDepth++; out.push(c); i++; continue; }
+    if (c === ')') { if (parenDepth > 0) parenDepth--; out.push(c); i++; continue; }
+
+    if (parenDepth === 0 || c !== ':') { out.push(c); i++; continue; }
+
+    // Inside parens and we see ':'. Only strip if the char BEFORE the ':'
+    // (skipping whitespace) is part of an identifier â€” meaning `name :` and
+    // not `Vector3::` or `t[':']` or `x + :` (impossible in Lua, safety).
+    let prev = i - 1;
+    while (prev >= 0 && (code[prev] === ' ' || code[prev] === '\t')) prev--;
+    const prevCh = prev >= 0 ? code[prev] : '';
+    const isIdent = /[A-Za-z0-9_]/.test(prevCh);
+    if (!isIdent) { out.push(c); i++; continue; }
+
+    // Also require the NEXT non-space char after ':' to be a valid type-
+    // starter (letter, underscore, `(`, `{`) â€” not `=` (that would be `:=`
+    // which Lua doesn't have) or another `:` (namecall).
+    let nx = i + 1;
+    while (nx < n && (code[nx] === ' ' || code[nx] === '\t')) nx++;
+    const nxCh = nx < n ? code[nx] : '';
+    if (!/[A-Za-z_({]/.test(nxCh)) { out.push(c); i++; continue; }
+
+    // Skip the type. Do NOT emit anything for it.
+    i = skipType(i, parenDepth);
+  }
+  return out.join('');
+}
+
 function preprocess(rawCode) {
   // v25.16 Fix 2: normalize CRLF (\r\n) and lone CR (\r) to LF (\n) BEFORE
   // any other transform runs. Windows-authored scripts (like azure.txt) ship
@@ -484,6 +585,7 @@ function preprocess(rawCode) {
   // game scripts; the far more common `local x: Type = ...` form is handled
   // by a separate, non-paren-based regex that has no such bug.
   // If we ever need this again, do a proper paren-balance walker (Option 2).
+  work = stripLuauParamTypes(work);
   // (c) return type: function foo(...): Type
   work = work.replace(
     /(\))\s*:\s*[A-Za-z_][A-Za-z0-9_.<>?]*(?=\s*(?:\n|--|\bthen\b|\bdo\b|\breturn\b|\blocal\b|\bif\b|\bfor\b|\bwhile\b|\brepeat\b|\bend\b|;|$))/g,
