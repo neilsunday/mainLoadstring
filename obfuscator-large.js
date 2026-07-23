@@ -807,17 +807,18 @@ function stageDecoderInjection(code, ctx) {
 }
 
 function stageJunkInjection(code, ctx) {
-  // Layer 7: sprinkle always-false dead branches to add decompiler noise.
+  // Layer 7 (v2): depth-aware injection. Only injects at line boundaries
+  // where paren/brace/bracket depth is EXACTLY zero â€” i.e., true top-level
+  // statement boundaries. The previous version relied on line-ending chars
+  // alone and got fooled by table constructors and function argument lists
+  // that stayed open across many "safe-looking" lines.
   //
-  // Design: split into lines, walk them, and at every ~10th safe line
-  // boundary insert an "if false then <junk> end" wrapped in an expression
-  // Lua can't fold away. The junk statements pick from a small pool of
-  // harmless idempotent operations (table.remove on empty temp, tostring
-  // of a literal, etc.).
-  //
-  // Safety: only inject at LINE boundaries where the previous line ended
-  // with a clean terminator (end, ), ], ", ', ;). This avoids splitting
-  // expressions across the injection.
+  // How depth is tracked:
+  //   * Full byte-scan through the code (same shape as our other stages).
+  //   * String literals and comments are skipped (never counted).
+  //   * At each newline, we record the current depth. If depth === 0 at
+  //     that boundary AND the previous non-whitespace line ended cleanly
+  //     ('end', ')', ']', '}', ';'), it's a valid injection point.
 
   const seedBytes = [];
   for (let i = 0; i < ctx.rngKey.length; i += 2) {
@@ -830,8 +831,6 @@ function stageJunkInjection(code, ctx) {
     return v || 42;
   }
 
-  // Pool of always-false expressions. Written so Lua can't easily constant-
-  // fold them (references a runtime table lookup).
   const FALSE_EXPRS = [
     "({} and false)",
     "(#\"\">2)",
@@ -840,8 +839,6 @@ function stageJunkInjection(code, ctx) {
     "((1/1)==0)",
     "(1<-1)",
   ];
-
-  // Pool of junk statements â€” all no-op-safe (never touch globals or crash).
   const JUNK_STMTS = [
     "local _j=1+1",
     "local _q={} _q[1]=2",
@@ -852,28 +849,139 @@ function stageJunkInjection(code, ctx) {
     "for _i=1,0 do end",
   ];
 
+  // Byte-scan the code, tracking depth. Record the depth at every newline.
+  const n = code.length;
+  const depthAt = new Array(code.length + 1).fill(0);  // depthAt[i] = depth just BEFORE code[i]
+  let d_paren = 0, d_brace = 0, d_bracket = 0;
+  let i = 0;
+
+  while (i < n) {
+    depthAt[i] = d_paren + d_brace + d_bracket;
+    const c = code[i];
+    const c2 = code[i + 1];
+
+    // Long-bracket string [[..]] / [=[..]=] â€” skip contents
+    if (c === "[") {
+      let j = i + 1;
+      let level = 0;
+      while (j < n && code[j] === "=") { level++; j++; }
+      if (j < n && code[j] === "[") {
+        const closer = "]" + "=".repeat(level) + "]";
+        const endIdx = code.indexOf(closer, j + 1);
+        if (endIdx > 0) {
+          // Fill depthAt entries through the whole string with current depth
+          for (let k = i; k < endIdx + closer.length; k++) {
+            depthAt[k] = d_paren + d_brace + d_bracket;
+          }
+          i = endIdx + closer.length;
+          continue;
+        }
+      }
+    }
+
+    // Line comment
+    if (c === "-" && c2 === "-") {
+      // Check for block comment first
+      let j = i + 2;
+      if (j < n && code[j] === "[") {
+        let level = 0;
+        let k = j + 1;
+        while (k < n && code[k] === "=") { level++; k++; }
+        if (k < n && code[k] === "[") {
+          const closer = "]" + "=".repeat(level) + "]";
+          const endIdx = code.indexOf(closer, k + 1);
+          if (endIdx > 0) {
+            for (let x = i; x < endIdx + closer.length; x++) {
+              depthAt[x] = d_paren + d_brace + d_bracket;
+            }
+            i = endIdx + closer.length;
+            continue;
+          }
+        }
+      }
+      // Line comment â€” skip to newline
+      const nl = code.indexOf("\n", i);
+      const end = nl < 0 ? n : nl;
+      for (let x = i; x < end; x++) depthAt[x] = d_paren + d_brace + d_bracket;
+      i = end;
+      continue;
+    }
+
+    // Quoted strings â€” skip contents (never count brackets inside)
+    if (c === '"' || c === "'") {
+      const quote = c;
+      const start = i;
+      i++;
+      while (i < n) {
+        const ch = code[i];
+        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
+        if (ch === quote) { i++; break; }
+        if (ch === "\n") break;
+        i++;
+      }
+      for (let x = start; x < i; x++) depthAt[x] = d_paren + d_brace + d_bracket;
+      continue;
+    }
+
+    // Backtick string (Luau) â€” skip contents
+    if (c === "`") {
+      const start = i;
+      i++;
+      let bd = 0;
+      while (i < n) {
+        const ch = code[i];
+        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
+        if (ch === "{") bd++;
+        else if (ch === "}") bd--;
+        else if (ch === "`" && bd === 0) { i++; break; }
+        i++;
+      }
+      for (let x = start; x < i; x++) depthAt[x] = d_paren + d_brace + d_bracket;
+      continue;
+    }
+
+    // Regular characters â€” update depth
+    if (c === "(") d_paren++;
+    else if (c === ")") { if (d_paren > 0) d_paren--; }
+    else if (c === "{") d_brace++;
+    else if (c === "}") { if (d_brace > 0) d_brace--; }
+    else if (c === "[") d_bracket++;
+    else if (c === "]") { if (d_bracket > 0) d_bracket--; }
+
+    i++;
+  }
+  depthAt[n] = d_paren + d_brace + d_bracket;
+
+  // Now walk lines, and for each line-ending position compute depth AT the
+  // newline. We split code by \n and reconstruct with injections.
   const lines = code.split("\n");
   const out = [];
   let injected = 0;
   let gap = 0;
-  const targetGap = 9;  // roughly every 9 lines
+  const targetGap = 9;
+  let charOffset = 0;
 
   for (let li = 0; li < lines.length; li++) {
-    out.push(lines[li]);
-    const trimmed = lines[li].trimEnd();
+    const line = lines[li];
+    out.push(line);
+    // charOffset points to the newline character that follows this line
+    const nlPos = charOffset + line.length;
+    charOffset = nlPos + 1;  // advance past newline for next iteration
 
-    // Only inject after "safe" line boundaries: ends with 'end', ')', ']',
-    // '}', ';', or a closing quote. Skip empty lines and comment lines.
+    const trimmed = line.trimEnd();
     if (trimmed.length === 0) continue;
+    if (trimmed.startsWith("--")) continue;
+
+    // Depth check: what's the bracket depth AT the newline position?
+    const depthHere = (nlPos < depthAt.length) ? depthAt[nlPos] : 0;
+    if (depthHere !== 0) continue;  // still inside a table/call â€” skip
+
     const last = trimmed[trimmed.length - 1];
     const isSafe =
       trimmed.endsWith("end") ||
       last === ")" || last === "]" || last === "}" ||
       last === ";" || last === '"' || last === "'";
     if (!isSafe) continue;
-
-    // Never inject inside a long-bracket block (heuristic: skip if line looks like table content)
-    if (trimmed.startsWith("--")) continue;
 
     gap++;
     if (gap >= targetGap) {
@@ -890,7 +998,7 @@ function stageJunkInjection(code, ctx) {
     ok: true,
     meta: {
       junkStatementsInjected: injected,
-      junkBytesAdded: injected * 60,  // rough estimate
+      junkBytesAdded: injected * 60,
     },
   };
 }
