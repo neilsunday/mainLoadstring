@@ -1,5 +1,12 @@
 // ============================================================================
-// obfuscator-large.js â€” Bytecode-oriented pipeline for large Lua/Luau scripts
+// obfuscator-large PATCH v2 â€” Layer 2 (stageStringEncryption) hardening
+// Fixes: executor-global strings, long-PascalCase Roblox services,
+//        path-like reflection strings, Stats/Network table keys.
+// Drop-in replacement â€” rename this file to obfuscator-large.js when using.
+// ============================================================================
+
+// ============================================================================
+// obfuscator-large.js Ã¢â‚¬â€ Bytecode-oriented pipeline for large Lua/Luau scripts
 // ============================================================================
 // Completely separate from obfuscator.js. This file NEVER shares code or
 // imports with the AST-based obfuscator. Every transform in this pipeline is
@@ -14,7 +21,7 @@
 //   Where:
 //     level = "basic" | "medium" | "conservative-max"
 //     options = {
-//       // reserved for future use â€” no options in step 1
+//       // reserved for future use Ã¢â‚¬â€ no options in step 1
 //     }
 //     report = {
 //       requestedLevel: string,
@@ -34,15 +41,15 @@
 //     }
 //
 // Pipeline levels (from user-facing dropdown in dashboard):
-//   basic             â€” minify only (safest, near-zero overhead)
-//   medium            â€” minify + string encryption + numeric encoding
-//   conservative-max  â€” everything + anti-tamper checksum wrapper
+//   basic             Ã¢â‚¬â€ minify only (safest, near-zero overhead)
+//   medium            Ã¢â‚¬â€ minify + string encryption + numeric encoding
+//   conservative-max  Ã¢â‚¬â€ everything + anti-tamper checksum wrapper
 //                       (+ optional bytecode VM wrap for eligible hot functions)
 //
 // Design invariants:
 //   1. No AST parse. Ever. Text-level byte scans only.
-//   2. Every stage is stateless â€” it takes a string, returns a string.
-//   3. Every stage is skippable â€” failures degrade gracefully, never crash.
+//   2. Every stage is stateless Ã¢â‚¬â€ it takes a string, returns a string.
+//   3. Every stage is skippable Ã¢â‚¬â€ failures degrade gracefully, never crash.
 //   4. Runtime decoder helpers are embedded inline (no external deps).
 //   5. Output is a single self-contained Lua string ready for loadstring().
 // ============================================================================
@@ -50,7 +57,7 @@
 const crypto = require("crypto");
 
 // ============================================================================
-// SECTION 1 â€” Level definitions
+// SECTION 1 Ã¢â‚¬â€ Level definitions
 // ============================================================================
 
 const LEVEL_BASIC = "basic";
@@ -61,15 +68,15 @@ const VALID_LEVELS = new Set([LEVEL_BASIC, LEVEL_MEDIUM, LEVEL_CONSERVATIVE_MAX]
 
 const LEVEL_PROFILES = {
   [LEVEL_BASIC]: {
-    label: "Basic â€” minify only",
+    label: "Basic Ã¢â‚¬â€ minify only",
     stages: ["minify"],
   },
   [LEVEL_MEDIUM]: {
-    label: "Medium â€” string + numeric encryption",
+    label: "Medium Ã¢â‚¬â€ string + numeric encryption",
     stages: ["minify", "stringEncryption", "numericEncoding", "decoderInjection"],
   },
   [LEVEL_CONSERVATIVE_MAX]: {
-    label: "Conservative Max â€” full protection with junk + env guards",
+    label: "Conservative Max Ã¢â‚¬â€ full protection with junk + env guards",
     stages: [
       "minify",
       "stringEncryption",
@@ -84,7 +91,7 @@ const LEVEL_PROFILES = {
 };
 
 // ============================================================================
-// SECTION 2 â€” Report builder
+// SECTION 2 Ã¢â‚¬â€ Report builder
 // ============================================================================
 
 function makeReport(level) {
@@ -121,12 +128,12 @@ function warn(report, msg) {
 }
 
 // ============================================================================
-// SECTION 3 â€” Stage stubs (to be implemented in later steps)
+// SECTION 3 Ã¢â‚¬â€ Stage stubs (to be implemented in later steps)
 // ============================================================================
 // Every stage takes (code, ctx) and returns { code, ok, meta }.
-//   code â€” transformed source (or original if skipped)
-//   ok   â€” true if stage succeeded, false if skipped
-//   meta â€” stage-specific data merged into the report
+//   code Ã¢â‚¬â€ transformed source (or original if skipped)
+//   ok   Ã¢â‚¬â€ true if stage succeeded, false if skipped
+//   meta Ã¢â‚¬â€ stage-specific data merged into the report
 
 function stageMinify(code, ctx) {
   // Step 2: real minify.
@@ -144,7 +151,7 @@ function stageMinify(code, ctx) {
   //      - drop block comments (--[[ ... ]], --[=[ ... ]=], etc.)
   //   3. Collapse 3+ blank lines to 1, trim trailing whitespace per line
   //
-  // Character state machine â€” no regex, no parse.
+  // Character state machine Ã¢â‚¬â€ no regex, no parse.
   const raw = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const n = raw.length;
   const out = [];
@@ -175,7 +182,7 @@ function stageMinify(code, ctx) {
           stringsPreserved++;
           continue;
         }
-        // Unterminated long-bracket â€” treat as regular '[' character
+        // Unterminated long-bracket Ã¢â‚¬â€ treat as regular '[' character
       }
       // Not a long-bracket string, fall through to emit '['
     }
@@ -199,7 +206,7 @@ function stageMinify(code, ctx) {
             commentsStripped++;
             continue;
           }
-          // Unterminated block comment â€” drop rest of file (matches Lua)
+          // Unterminated block comment Ã¢â‚¬â€ drop rest of file (matches Lua)
           i = n;
           commentsStripped++;
           continue;
@@ -292,9 +299,9 @@ function stageStringEncryption(code, ctx) {
   // Step 3: byte-scan string literals, encrypt each with XOR+shift, emit
   // as _D({byte-table}) call. Decoder function is injected in step 5.
   //
-  // Whitelist strategy â€” conservative. We skip:
-  //   * Short strings (< 4 chars) â€” decoder call is longer than the string
-  //   * Roblox service/method names â€” reflection breaks if renamed
+  // Whitelist strategy Ã¢â‚¬â€ conservative. We skip:
+  //   * Short strings (< 4 chars) Ã¢â‚¬â€ decoder call is longer than the string
+  //   * Roblox service/method names Ã¢â‚¬â€ reflection breaks if renamed
   //   * URI patterns (rbxassetid://, http://, https://)
   //   * Short PascalCase (likely class names)
   //   * Long-bracket [[..]] and backtick `..` strings (complex, skipped)
@@ -348,6 +355,66 @@ function stageStringEncryption(code, ctx) {
     "PlayerGui","PlayerScripts","Camera","Terrain","Animator",
     // Type names
     "boolean","number","string","table","function","userdata","thread","nil",
+    // Executor globals (passed as strings to getExecutorGlobal / getgenv())
+    "hookfunction","hookfunc","hookmetamethod","newcclosure","checkcaller",
+    "islclosure","iscclosure","getgenv","getrenv","getfenv","setfenv",
+    "getgc","getreg","getconstants","getupvalues","getprotos",
+    "getrawmetatable","setrawmetatable","getnamecallmethod","setnamecallmethod",
+    "mousemoverel","mousemoveabs","mouse1click","mouse1press","mouse1release",
+    "mouse2click","mouse2press","mouse2release","mousescroll",
+    "keypress","keyrelease","iskeydown",
+    "writefile","readfile","isfile","isfolder","delfile","delfolder",
+    "makefolder","listfiles","appendfile","loadfile",
+    "loadstring","getcustomasset","getobjects","gethui","gethiddenui",
+    "fireclickdetector","fireproximityprompt","firetouchinterest",
+    "isrbxactive","isgameactive","queue_on_teleport",
+    "request","http_request","http","syn","crypt","Drawing","WebSocket",
+    "identifyexecutor","getexecutorname","getthreadidentity","setthreadidentity",
+    "getcallingscript","getscripts","getloadedmodules","getconnections",
+    "getsenv","protect_gui","gethiddenproperty","sethiddenproperty",
+    "compareinstances","cloneref","fireserver","fireallclients",
+    // Common Roblox classes referenced as string type-checks (IsA / ClassName)
+    "Instance","BasePart","Part","MeshPart","UnionOperation","Model",
+    "Folder","Configuration","ObjectValue","StringValue","IntValue","NumberValue",
+    "BoolValue","Vector3Value","CFrameValue","Color3Value","BrickColorValue","RayValue",
+    "ScreenGui","Frame","TextLabel","TextButton","TextBox","ImageLabel","ImageButton",
+    "ScrollingFrame","UIListLayout","UIGridLayout","UIPageLayout","UITableLayout",
+    "UICorner","UIStroke","UIPadding","UIScale","UIAspectRatioConstraint",
+    "UISizeConstraint","UITextSizeConstraint","UIGradient",
+    "GuiObject","GuiButton","GuiBase","LayerCollector","BillboardGui","SurfaceGui",
+    "ViewportFrame","VideoFrame","CanvasGroup",
+    "Sound","SoundGroup","SoundEffect",
+    "Animation","AnimationTrack","Animator","AnimationController","Keyframe","KeyframeSequence",
+    "Tool","HopperBin","Hat","Accessory","Accoutrement","Shirt","Pants","BodyColors",
+    "Weld","WeldConstraint","Motor6D","Snap","JointInstance",
+    "Attachment","AlignPosition","AlignOrientation","LinearVelocity","AngularVelocity",
+    "BodyVelocity","BodyPosition","BodyGyro","BodyForce","BodyThrust","BodyAngularVelocity",
+    "ParticleEmitter","Trail","Beam","Fire","Smoke","Sparkles","Explosion",
+    "PointLight","SpotLight","SurfaceLight",
+    "RemoteEvent","RemoteFunction","BindableEvent","BindableFunction",
+    "UnreliableRemoteEvent",
+    "ModuleScript","LocalScript","Script","CoreScript",
+    "DataModelMesh","SpecialMesh","BlockMesh","CylinderMesh","FileMesh",
+    "Humanoid","HumanoidDescription","HumanoidRigType","HumanoidStateType",
+    "Player","PlayerScripts","PlayerGui","Backpack","StarterGear",
+    "Team","TeamColor","BrickColor","Color3","Vector2","Vector3","CFrame","Region3",
+    "Ray","Rect","UDim","UDim2","Enum","EnumItem","TweenInfo","NumberRange","NumberSequence",
+    "ColorSequence","PhysicalProperties","Faces","Axes","Random","OverlapParams","RaycastParams",
+    "PathfindingLink","PathfindingModifier",
+    // Common LuaU / stdlib names referenced as strings
+    "task","math","string","table","coroutine","os","io","bit32","utf8","debug",
+    "pcall","xpcall","error","assert","select","unpack","rawget","rawset","rawequal","rawlen",
+    "next","pairs","ipairs","typeof","tonumber","tostring","print","warn","spawn","delay",
+    "wait","tick","time","elapsedTime","printidentity","collectgarbage","require",
+    "setmetatable","getmetatable",
+    // Roblox Stats/Network table keys (accessed via bracket notation as strings)
+    "Data Ping","Data Send","Data Receive","Data Ping (KB/s)",
+    "Data Send (KB/s)","Data Receive (KB/s)",
+    "Physics Send","Physics Receive","Physics Step Time",
+    "Instance Count","Moving Primitives Count","Contacts Count",
+    "Heartbeat Time (ms)","RunService.Heartbeat","RunService.RenderStepped",
+    "RunService.Stepped","RunService.PreRender","RunService.PreSimulation",
+    "RunService.PostSimulation",
   ]);
 
   function shouldEncrypt(value) {
@@ -360,10 +427,22 @@ function stageStringEncryption(code, ctx) {
     if (/^rbxthumb/i.test(value)) return false;
     // HTTP URLs
     if (/^https?:\/\//.test(value)) return false;
+    // File URIs / discord webhook / other URL schemes
+    if (/^(ftp|ws|wss|file|discord):\/\//i.test(value)) return false;
     // Metamethods (__index, __newindex, etc.)
     if (/^__[a-z]/.test(value) && value.length <= 20) return false;
-    // Short PascalCase (class names)
+    // Short PascalCase (class names) â€” small ones
     if (/^[A-Z][a-z]/.test(value) && value.length < 8) return false;
+    // Roblox-service / Roblox-class prefixes â€” skip regardless of length.
+    // Covers things like "ReplicatedStorage", "MarketplaceService",
+    // "NotificationService", "CollectionService" etc. that fail the < 8 rule
+    // above and would otherwise get encrypted and break reflection.
+    if (/^(Replicated|Server|Starter|Marketplace|Localization|Collection|Notification|Physics|Pathfinding|Teleport|Policy|Analytics|Badge|GamePass|Group|Friends|Social|Asset|Insert|Content|Text|Voice|Log|Virtual|Haptic|Tween|Run|UserInput|Core|Gui|Context|Sound|Debris|Chat|Team|Player|Light|Workspace|Http|Data|Messaging|Memory|Rbx|Ad|VR)[A-Z][a-z]/.test(value)) return false;
+    // Path-like strings: "Word.Word" starting with a capital letter â€” these
+    // are almost always instance paths (e.g. "Skin.LastEquippedSword",
+    // "ReplicatedInstances.GetInstance") or reflection prefixes that get
+    // concatenated at runtime. Encrypting them breaks the concat / dot-index.
+    if (/^[A-Z][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+\s*\.?\s*$/.test(value)) return false;
     // Short ALL_CAPS (enums)
     if (/^[A-Z0-9_]+$/.test(value) && value.length < 8) return false;
     // Package versioning like "sleitnick_net@0.1.0"
@@ -431,7 +510,7 @@ function stageStringEncryption(code, ctx) {
             continue;
           }
         }
-        // Unknown escape â€” keep as-is
+        // Unknown escape Ã¢â‚¬â€ keep as-is
         result += c + next;
         i += 2;
         continue;
@@ -455,7 +534,7 @@ function stageStringEncryption(code, ctx) {
     const c = raw[i];
     const c2 = raw[i + 1];
 
-    // Long-bracket string [[..]] or [=[..]=] â€” skip encryption, emit verbatim
+    // Long-bracket string [[..]] or [=[..]=] Ã¢â‚¬â€ skip encryption, emit verbatim
     if (c === "[") {
       let j = i + 1;
       let level = 0;
@@ -490,7 +569,7 @@ function stageStringEncryption(code, ctx) {
       continue;
     }
 
-    // Quoted string "..." or '...' â€” CANDIDATE FOR ENCRYPTION
+    // Quoted string "..." or '...' Ã¢â‚¬â€ CANDIDATE FOR ENCRYPTION
     if (c === '"' || c === "'") {
       const quote = c;
       const start = i;
@@ -515,7 +594,7 @@ function stageStringEncryption(code, ctx) {
       continue;
     }
 
-    // Backtick string â€” skip encryption (interpolation is complex)
+    // Backtick string Ã¢â‚¬â€ skip encryption (interpolation is complex)
     if (c === "`") {
       const start = i;
       i++;
@@ -551,14 +630,14 @@ function stageNumericEncoding(code, ctx) {
   // Step 4: byte-scan numeric literals, replace with equivalent arithmetic.
   //
   // Design:
-  //   * Only encode PLAIN integer literals (0-9)+ â€” skip floats, hex, scientific.
+  //   * Only encode PLAIN integer literals (0-9)+ Ã¢â‚¬â€ skip floats, hex, scientific.
   //   * Skip when the number appears inside a _D({...}) byte table (step 3
-  //     output) â€” we detect this by tracking depth of _D( braces.
-  //   * Skip small numbers (< 2 chars) â€” not worth the overhead.
+  //     output) Ã¢â‚¬â€ we detect this by tracking depth of _D( braces.
+  //   * Skip small numbers (< 2 chars) Ã¢â‚¬â€ not worth the overhead.
   //   * Randomize which strategy per number: add, sub, xor, mul.
   //   * Never touch numbers inside string literals or backticks.
   //
-  // Character state machine â€” same shape as step 2/3.
+  // Character state machine Ã¢â‚¬â€ same shape as step 2/3.
 
   const seedBytes = [];
   for (let i = 0; i < ctx.rngKey.length; i += 2) {
@@ -679,7 +758,7 @@ function stageNumericEncoding(code, ctx) {
       continue;
     }
 
-    // Skip _D({...}) byte tables â€” the numbers inside are our own encrypted
+    // Skip _D({...}) byte tables Ã¢â‚¬â€ the numbers inside are our own encrypted
     // bytes and must not be re-encoded. Detect the pattern "_D({" and skip
     // to the matching "})".
     if (c === "_" && raw.substring(i, i + 4) === "_D({") {
@@ -696,7 +775,7 @@ function stageNumericEncoding(code, ctx) {
       const prev = i > 0 ? raw[i - 1] : " ";
       const isIdentPrefix = /[A-Za-z_0-9]/.test(prev);
       if (isIdentPrefix) {
-        // e.g. `_0xabc123` or `var123` â€” this digit is part of an identifier,
+        // e.g. `_0xabc123` or `var123` Ã¢â‚¬â€ this digit is part of an identifier,
         // not a numeric literal. Emit as-is.
         out.push(c);
         i++;
@@ -704,7 +783,7 @@ function stageNumericEncoding(code, ctx) {
       }
       // Scan the full numeric literal
       let j = i;
-      // Handle hex prefix: 0x... or 0X... â€” skip these (leave as-is)
+      // Handle hex prefix: 0x... or 0X... Ã¢â‚¬â€ skip these (leave as-is)
       if (raw[j] === "0" && (raw[j + 1] === "x" || raw[j + 1] === "X")) {
         while (j < n && /[0-9a-fA-F]/.test(raw[j + 2] ? raw[j] : raw[j])) {
           if (j < i + 2) { j++; continue; }
@@ -721,7 +800,7 @@ function stageNumericEncoding(code, ctx) {
       }
       // Scan integer digits
       while (j < n && raw[j] >= "0" && raw[j] <= "9") j++;
-      // Check for decimal point or scientific notation â€” skip if present
+      // Check for decimal point or scientific notation Ã¢â‚¬â€ skip if present
       if (j < n && (raw[j] === "." || raw[j] === "e" || raw[j] === "E")) {
         // Consume the whole float/scientific
         while (j < n && /[0-9.eE+\-]/.test(raw[j])) {
@@ -774,7 +853,7 @@ function stageDecoderInjection(code, ctx) {
   // Detection: presence of ctx.stringEncKeys.
 
   if (!ctx.stringEncKeys) {
-    // No string encryption happened â€” no need for a decoder.
+    // No string encryption happened Ã¢â‚¬â€ no need for a decoder.
     return { code, ok: true, meta: { decoderInjected: false } };
   }
 
@@ -808,7 +887,7 @@ function stageDecoderInjection(code, ctx) {
 
 function stageJunkInjection(code, ctx) {
   // Layer 7 (v2): depth-aware injection. Only injects at line boundaries
-  // where paren/brace/bracket depth is EXACTLY zero â€” i.e., true top-level
+  // where paren/brace/bracket depth is EXACTLY zero Ã¢â‚¬â€ i.e., true top-level
   // statement boundaries. The previous version relied on line-ending chars
   // alone and got fooled by table constructors and function argument lists
   // that stayed open across many "safe-looking" lines.
@@ -860,7 +939,7 @@ function stageJunkInjection(code, ctx) {
     const c = code[i];
     const c2 = code[i + 1];
 
-    // Long-bracket string [[..]] / [=[..]=] â€” skip contents
+    // Long-bracket string [[..]] / [=[..]=] Ã¢â‚¬â€ skip contents
     if (c === "[") {
       let j = i + 1;
       let level = 0;
@@ -899,7 +978,7 @@ function stageJunkInjection(code, ctx) {
           }
         }
       }
-      // Line comment â€” skip to newline
+      // Line comment Ã¢â‚¬â€ skip to newline
       const nl = code.indexOf("\n", i);
       const end = nl < 0 ? n : nl;
       for (let x = i; x < end; x++) depthAt[x] = d_paren + d_brace + d_bracket;
@@ -907,7 +986,7 @@ function stageJunkInjection(code, ctx) {
       continue;
     }
 
-    // Quoted strings â€” skip contents (never count brackets inside)
+    // Quoted strings Ã¢â‚¬â€ skip contents (never count brackets inside)
     if (c === '"' || c === "'") {
       const quote = c;
       const start = i;
@@ -923,7 +1002,7 @@ function stageJunkInjection(code, ctx) {
       continue;
     }
 
-    // Backtick string (Luau) â€” skip contents
+    // Backtick string (Luau) Ã¢â‚¬â€ skip contents
     if (c === "`") {
       const start = i;
       i++;
@@ -940,7 +1019,7 @@ function stageJunkInjection(code, ctx) {
       continue;
     }
 
-    // Regular characters â€” update depth
+    // Regular characters Ã¢â‚¬â€ update depth
     if (c === "(") d_paren++;
     else if (c === ")") { if (d_paren > 0) d_paren--; }
     else if (c === "{") d_brace++;
@@ -974,7 +1053,7 @@ function stageJunkInjection(code, ctx) {
 
     // Depth check: what's the bracket depth AT the newline position?
     const depthHere = (nlPos < depthAt.length) ? depthAt[nlPos] : 0;
-    if (depthHere !== 0) continue;  // still inside a table/call â€” skip
+    if (depthHere !== 0) continue;  // still inside a table/call Ã¢â‚¬â€ skip
 
     // Terminal-statement guard (Layer 6 v3): `return`, `break`, and
     // `goto label` MUST be the last statement in their block in Lua.
@@ -1021,7 +1100,7 @@ function stageJunkInjection(code, ctx) {
 // ============================================================================
 
 function stageEnvGuardWrap(code, ctx) {
-  // The guard is prepended INSIDE the anti-tamper payload â€” so tampering
+  // The guard is prepended INSIDE the anti-tamper payload Ã¢â‚¬â€ so tampering
   // with the guard itself also fails the Fletcher checksum.
   const guard =
     "do " +
@@ -1061,7 +1140,7 @@ function stageAntiTamperWrap(code, ctx) {
   //
   // Escaping: we use decimal escapes for control characters and quotes
   // so the payload string is safe regardless of what bytes it contains.
-  // This is bulletproof â€” no chance of quote/backslash confusion.
+  // This is bulletproof Ã¢â‚¬â€ no chance of quote/backslash confusion.
 
   // Compute Fletcher-16 checksum of the payload bytes.
   function fletcher16(str) {
@@ -1084,7 +1163,7 @@ function stageAntiTamperWrap(code, ctx) {
       if (c >= 0x20 && c <= 0x7E && c !== 0x22 && c !== 0x5C) {
         out.push(String.fromCharCode(c));
       } else {
-        // Decimal escape â€” always 3 digits when the next char is a digit,
+        // Decimal escape Ã¢â‚¬â€ always 3 digits when the next char is a digit,
         // otherwise minimal digits. Safest: always 3 digits.
         out.push("\\" + c.toString().padStart(3, "0"));
       }
@@ -1129,20 +1208,20 @@ function stageAntiTamperWrap(code, ctx) {
 }
 
 // ============================================================================
-// SECTION 4 (Step 9) â€” Bytecode-level VM wrap for eligible call statements
+// SECTION 4 (Step 9) Ã¢â‚¬â€ Bytecode-level VM wrap for eligible call statements
 // ============================================================================
 // Detects simple call patterns `ident(literal, literal, ...)` at line
 // boundaries and rewrites them into VM bytecode dispatches. The VM interpreter
-// is embedded at the top of the output. This is Option A scope â€” literal
+// is embedded at the top of the output. This is Option A scope Ã¢â‚¬â€ literal
 // arguments only, no variables. Coverage is intentionally small (~1-5% of
 // statements) so we never risk syntax breakage on complex expressions.
 //
 // Opcodes (1 byte each):
-//   1  LOADK <num>     â€” push literal number (uint16 next 2 bytes)
-//   2  LOADS <idx>     â€” push string from pool (uint8 next byte)
-//   3  GETG  <idx>     â€” push global by name (from string pool)
-//   4  CALL  <nargs>   â€” call top-of-stack fn with N args, discard result
-//  10  HALT            â€” end of program for this dispatch
+//   1  LOADK <num>     Ã¢â‚¬â€ push literal number (uint16 next 2 bytes)
+//   2  LOADS <idx>     Ã¢â‚¬â€ push string from pool (uint8 next byte)
+//   3  GETG  <idx>     Ã¢â‚¬â€ push global by name (from string pool)
+//   4  CALL  <nargs>   Ã¢â‚¬â€ call top-of-stack fn with N args, discard result
+//  10  HALT            Ã¢â‚¬â€ end of program for this dispatch
 // ============================================================================
 
 function stageBytecodeVMWrap(code, ctx) {
@@ -1154,7 +1233,7 @@ function stageBytecodeVMWrap(code, ctx) {
   function poolIndex(s) {
     if (stringPoolMap.has(s)) return stringPoolMap.get(s);
     const idx = stringPool.length;
-    if (idx > 255) return -1;  // pool overflow â€” skip this wrap
+    if (idx > 255) return -1;  // pool overflow Ã¢â‚¬â€ skip this wrap
     stringPool.push(s);
     stringPoolMap.set(s, idx);
     return idx;
@@ -1169,7 +1248,7 @@ function stageBytecodeVMWrap(code, ctx) {
   }
 
   // Regex to find simple call statements: ident(literal-args-only) at line
-  // boundaries. This is deliberately narrow â€” only literal numbers and
+  // boundaries. This is deliberately narrow Ã¢â‚¬â€ only literal numbers and
   // simple double-quoted strings, single-line only.
   //
   // Example matches:
@@ -1178,10 +1257,10 @@ function stageBytecodeVMWrap(code, ctx) {
   //   print(1, 2, 3)
   //
   // NOT matched (safely skipped):
-  //   x = print("hi")            â€” assignment
-  //   print(x)                   â€” variable arg
-  //   obj.method("x")            â€” member access
-  //   print("multi\nline")       â€” hard escapes (skip for simplicity)
+  //   x = print("hi")            Ã¢â‚¬â€ assignment
+  //   print(x)                   Ã¢â‚¬â€ variable arg
+  //   obj.method("x")            Ã¢â‚¬â€ member access
+  //   print("multi\nline")       Ã¢â‚¬â€ hard escapes (skip for simplicity)
 
   const IDENT = "[A-Za-z_][A-Za-z0-9_]*";
   const LITERAL = '(?:"[^"\n\\]{0,120}"|\d+)';
@@ -1281,7 +1360,7 @@ function stageBytecodeVMWrap(code, ctx) {
   });
   const poolTable = "{" + escapedPool.join(",") + "}";
 
-  // The VM interpreter â€” 10 opcodes as designed
+  // The VM interpreter Ã¢â‚¬â€ 10 opcodes as designed
   const vm =
     "local _BC=" + bcTable + ";\n" +
     "local _SP=" + poolTable + ";\n" +
@@ -1340,7 +1419,7 @@ const STAGE_FUNCTIONS = {
 };
 
 // ============================================================================
-// SECTION 4 â€” Pipeline orchestrator
+// SECTION 4 Ã¢â‚¬â€ Pipeline orchestrator
 // ============================================================================
 
 function runPipeline(rawCode, level, options, report) {
@@ -1367,7 +1446,7 @@ function runPipeline(rawCode, level, options, report) {
   for (const stageName of profile.stages) {
     const fn = STAGE_FUNCTIONS[stageName];
     if (!fn) {
-      warn(report, "Stage \"" + stageName + "\" is not implemented yet â€” skipped");
+      warn(report, "Stage \"" + stageName + "\" is not implemented yet Ã¢â‚¬â€ skipped");
       report.stagesSkipped.push(stageName);
       continue;
     }
@@ -1415,11 +1494,11 @@ function runPipeline(rawCode, level, options, report) {
           }
         }
       } else {
-        warn(report, "Stage \"" + stageName + "\" returned not-ok â€” skipped");
+        warn(report, "Stage \"" + stageName + "\" returned not-ok Ã¢â‚¬â€ skipped");
         report.stagesSkipped.push(stageName);
       }
     } catch (e) {
-      warn(report, "Stage \"" + stageName + "\" threw: " + e.message + " â€” skipped");
+      warn(report, "Stage \"" + stageName + "\" threw: " + e.message + " Ã¢â‚¬â€ skipped");
       report.stagesSkipped.push(stageName);
     }
   }
@@ -1431,7 +1510,7 @@ function runPipeline(rawCode, level, options, report) {
 }
 
 // ============================================================================
-// SECTION 5 â€” Public API
+// SECTION 5 Ã¢â‚¬â€ Public API
 // ============================================================================
 
 async function obfuscateLarge(luaCode, level, userId, options) {
@@ -1453,7 +1532,7 @@ async function obfuscateLarge(luaCode, level, userId, options) {
   try {
     return runPipeline(luaCode, chosenLevel, options, report);
   } catch (e) {
-    warn(report, "Pipeline threw: " + e.message + " â€” returning source unchanged");
+    warn(report, "Pipeline threw: " + e.message + " Ã¢â‚¬â€ returning source unchanged");
     report.actualLevel = "none";
     report.stats.obfuscatedBytes = luaCode.length;
     report.stats.sizeRatio = 1;
