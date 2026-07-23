@@ -976,6 +976,11 @@ function stageJunkInjection(code, ctx) {
     const depthHere = (nlPos < depthAt.length) ? depthAt[nlPos] : 0;
     if (depthHere !== 0) continue;  // still inside a table/call â€” skip
 
+    // Terminal-statement guard (Layer 6 v3): `return`, `break`, and
+    // `goto label` MUST be the last statement in their block in Lua.
+    // Injecting after them produces "'end' expected, got 'if'" at parse.
+    if (/^\s*(return\b|break\b|goto\s+[A-Za-z_])/.test(trimmed)) continue;
+
     const last = trimmed[trimmed.length - 1];
     const isSafe =
       trimmed.endsWith("end") ||
