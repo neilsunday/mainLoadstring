@@ -1,31 +1,34 @@
 // ============================================================================
-// obfuscator-large PATCH v7 â€” Layer 3 + Layer 7 hardening (drop-in for v6)
+// obfuscator-large PATCH v7.1 â€” Layer 3 scope fix + Layer 7 hardening
 //
-// FIX IN v7 (Layer 3 â€” stageNumericEncoding):
-//   Replaced v6's constant-foldable arithmetic ((2*5), bit32.bxor(31,287))
-//   with a runtime lookup table (_N) + MBA XOR identities anchored at a
-//   runtime-computed byte (_A). Emits a small prelude (~112 bytes) that builds
-//   both at load time. Naive v6-style regex folders now recover 0% instead
-//   of ~100%.
+// FIX IN v7.1 (Layer 3 â€” stageNumericEncoding prelude scope):
+//   Prelude previously emitted `local _A` and `local _N` which are file-scope
+//   only. Callbacks registered on getgenv() (e.g.
+//     getgenv().saveLastEquippedSword = function(...) ... _N[k] ... end
+//   ) execute in a different scope where the file-local upvalues are already
+//   out of scope, causing _N to be nil, cascading into errors like:
+//     "Container is not a valid member of ScreenGui 'CoreGui.Azure'"
+//   Prelude now writes to `getgenv()._A` / `getgenv()._N` (with _G fallback)
+//   so the tables are reachable from ANY scope in the payload.
 //
-// FIX IN v7 (Layer 7 â€” stageJunkInjection):
-//   Replaced v6's 6 hardcoded FALSE_EXPRS + 7 hardcoded JUNK_STMTS with fully
-//   procedural generation. Each injection uses:
-//     * xorshift32 PRNG (proper 2^32-1 period vs v6's 16-byte cycle)
-//     * 8 false-expression templates seeded with random operands
-//     * 10 camouflaged junk statement templates using fresh identifiers
-//     * 5 wrapper shapes (if/do-local/while/for/repeat)
-//   Every injection is unique â€” attackers cannot precompute a pattern list.
-//   All v6 depth-aware injection safety guards retained.
+// CARRIED FROM v7 (Layer 3):
+//   Replaced constant-foldable arithmetic ((2*5), bit32.bxor(31,287)) with
+//   runtime lookup table (_N) + MBA XOR identities anchored at runtime byte
+//   (_A). Naive v6-style regex folders recover 0% instead of ~100%.
+//
+// CARRIED FROM v7 (Layer 7 â€” stageJunkInjection):
+//   Fully procedural: xorshift32 PRNG, 8 false-expression templates,
+//   10 camouflaged junk templates, 5 wrapper shapes, fresh identifiers per
+//   injection. 100% unique injections on the reference script.
 //
 // VERIFIED (azure.txt, 736 KB):
 //   Layer 3: 1,538 numerics encoded, +2.0% overhead, 0% naive-attack recovery
-//   Layer 7: 278 junks injected, +2.1% overhead, 100% unique, 0 duplicates
-//   Combined output overhead: ~4% total
+//   Layer 7: 278 junks injected, +2.1% overhead, 100% unique
+//   Combined: ~4% output overhead
 //
 // CARRIED FROM v6:
-//   All prior fixes intact (Layer 9 opaque predicates, Layer 10 CFF depth-aware
-//   isSimpleStmt, /obfuscate-large "nightmare" whitelist entry, etc.).
+//   All other layers untouched (Layer 9 opaque predicates, Layer 10 CFF,
+//   /obfuscate-large "nightmare" whitelist entry, etc.).
 //
 // Drop-in replacement â€” rename to obfuscator-large.js when using.
 // ============================================================================
@@ -866,17 +869,35 @@ function stageNumericEncoding(code, ctx) {
 
   // ---- Prelude injection ----
   // Only emit the parts actually referenced by the transformed code.
+  //
+  // v7.1 FIX: use getgenv() instead of `local` so the encoded constants
+  // remain accessible inside callbacks that get registered on getgenv()
+  // (e.g. `getgenv().saveLastEquippedSword = function(...) ... _N[k] ... end`).
+  // Those functions may execute in a different scope where a `local _N`
+  // declared at file-top is no longer in scope, causing nil-indexing that
+  // cascades into weird errors like "X is not a valid member of Y".
+  //
+  // Guarded with `getgenv and` + `or _G` fallback so the script still runs
+  // in vanilla Lua environments (test harnesses, standalone Luau).
   const preludeParts = [];
   if (usedMBA) {
     // 32-bit unsigned hex whose low byte == anchor. Force unsigned with
     // >>> 0 so we never emit a negative hex literal (Lua syntax error).
     const hexVal = ((0xDEADFF00 | anchor) >>> 0).toString(16).toUpperCase();
-    preludeParts.push("local _A=bit32.band(0x" + hexVal + ",255);");
+    preludeParts.push(
+      "local _ENV_A=(getgenv and getgenv()) or _G;" +
+      "if not _ENV_A._A then _ENV_A._A=bit32.band(0x" + hexVal + ",255) end;" +
+      "local _A=_ENV_A._A;"
+    );
   }
   if (usedLookup) {
     preludeParts.push(
-      "local _N=(function() local t={} for i=1," + (LOOKUP_MAX + 1) +
-      " do t[i]=i-1 end return t end)();"
+      "local _ENV_N=(getgenv and getgenv()) or _G;" +
+      "if not _ENV_N._N then " +
+      "_ENV_N._N=(function() local t={} for i=1," + (LOOKUP_MAX + 1) +
+      " do t[i]=i-1 end return t end)() " +
+      "end;" +
+      "local _N=_ENV_N._N;"
     );
   }
   const prelude = preludeParts.join("");
