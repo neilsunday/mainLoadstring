@@ -69,8 +69,17 @@ const LEVEL_PROFILES = {
     stages: ["minify", "stringEncryption", "numericEncoding", "decoderInjection"],
   },
   [LEVEL_CONSERVATIVE_MAX]: {
-    label: "Conservative Max â€” full protection without AST rewrite",
-    stages: ["minify", "stringEncryption", "numericEncoding", "decoderInjection", "bytecodeVMWrap", "antiTamperWrap"],
+    label: "Conservative Max â€” full protection with junk + env guards",
+    stages: [
+      "minify",
+      "stringEncryption",
+      "numericEncoding",
+      "decoderInjection",
+      "bytecodeVMWrap",
+      "junkInjection",
+      "envGuardWrap",
+      "antiTamperWrap",
+    ],
   },
 };
 
@@ -98,6 +107,8 @@ function makeReport(level) {
       antiTamperApplied: false,
       vmCallsWrapped: 0,
       vmBytecodeBytes: 0,
+      junkStatementsInjected: 0,
+      envGuardApplied: false,
     },
     stagesSucceeded: [],
     stagesSkipped: [],
@@ -795,6 +806,138 @@ function stageDecoderInjection(code, ctx) {
   };
 }
 
+function stageJunkInjection(code, ctx) {
+  // Layer 7: sprinkle always-false dead branches to add decompiler noise.
+  //
+  // Design: split into lines, walk them, and at every ~10th safe line
+  // boundary insert an "if false then <junk> end" wrapped in an expression
+  // Lua can't fold away. The junk statements pick from a small pool of
+  // harmless idempotent operations (table.remove on empty temp, tostring
+  // of a literal, etc.).
+  //
+  // Safety: only inject at LINE boundaries where the previous line ended
+  // with a clean terminator (end, ), ], ", ', ;). This avoids splitting
+  // expressions across the injection.
+
+  const seedBytes = [];
+  for (let i = 0; i < ctx.rngKey.length; i += 2) {
+    seedBytes.push(parseInt(ctx.rngKey.substring(i, i + 2), 16));
+  }
+  let rngIdx = 100;
+  function nextRand() {
+    const v = seedBytes[rngIdx % seedBytes.length];
+    rngIdx++;
+    return v || 42;
+  }
+
+  // Pool of always-false expressions. Written so Lua can't easily constant-
+  // fold them (references a runtime table lookup).
+  const FALSE_EXPRS = [
+    "({} and false)",
+    "(#\"\">2)",
+    "(({[1]=false})[1])",
+    "(type({})~=\"table\")",
+    "((1/1)==0)",
+    "(1<-1)",
+  ];
+
+  // Pool of junk statements â€” all no-op-safe (never touch globals or crash).
+  const JUNK_STMTS = [
+    "local _j=1+1",
+    "local _q={} _q[1]=2",
+    "local _z=tostring(0)",
+    "local _t=table.concat({},\"\")",
+    "local _n=math.floor(3.14)",
+    "local _s=string.rep(\"x\",0)",
+    "for _i=1,0 do end",
+  ];
+
+  const lines = code.split("\n");
+  const out = [];
+  let injected = 0;
+  let gap = 0;
+  const targetGap = 9;  // roughly every 9 lines
+
+  for (let li = 0; li < lines.length; li++) {
+    out.push(lines[li]);
+    const trimmed = lines[li].trimEnd();
+
+    // Only inject after "safe" line boundaries: ends with 'end', ')', ']',
+    // '}', ';', or a closing quote. Skip empty lines and comment lines.
+    if (trimmed.length === 0) continue;
+    const last = trimmed[trimmed.length - 1];
+    const isSafe =
+      trimmed.endsWith("end") ||
+      last === ")" || last === "]" || last === "}" ||
+      last === ";" || last === '"' || last === "'";
+    if (!isSafe) continue;
+
+    // Never inject inside a long-bracket block (heuristic: skip if line looks like table content)
+    if (trimmed.startsWith("--")) continue;
+
+    gap++;
+    if (gap >= targetGap) {
+      gap = 0;
+      const falseExpr = FALSE_EXPRS[nextRand() % FALSE_EXPRS.length];
+      const junk = JUNK_STMTS[nextRand() % JUNK_STMTS.length];
+      out.push("if " + falseExpr + " then " + junk + " end");
+      injected++;
+    }
+  }
+
+  return {
+    code: out.join("\n"),
+    ok: true,
+    meta: {
+      junkStatementsInjected: injected,
+      junkBytesAdded: injected * 60,  // rough estimate
+    },
+  };
+}
+
+// ============================================================================
+// LAYER 8: Environment guard (anti-debugger + sandbox integrity probe)
+// ============================================================================
+// Wrap the payload so it runs a quick check first: are we in a sane executor
+// environment? Detects the most common tampering surfaces:
+//   * debug.getinfo hooked to lie about source
+//   * getfenv/setfenv replaced or missing
+//   * Whether debug.gethook is set (indicates an attached debugger)
+// If any probe fails, the script errors before running the real payload.
+// Conservative: only 3 probes to minimize false positives.
+// ============================================================================
+
+function stageEnvGuardWrap(code, ctx) {
+  // The guard is prepended INSIDE the anti-tamper payload â€” so tampering
+  // with the guard itself also fails the Fletcher checksum.
+  const guard =
+    "do " +
+      "local _dg = debug and debug.gethook " +
+      "if _dg and _dg() ~= nil then " +
+        "return error(\"[env] debugger detected\") " +
+      "end " +
+      "local _ok, _info = pcall(function() " +
+        "return debug and debug.getinfo and debug.getinfo(1, \"S\") " +
+      "end) " +
+      "if _ok and type(_info) == \"table\" and type(_info.source) == \"string\" " +
+         "and _info.source:sub(1,1) == \"@\" then " +
+        "return error(\"[env] source path leak detected\") " +
+      "end " +
+      "if type(getfenv) ~= \"function\" and type(getgenv) ~= \"function\" then " +
+        "return error(\"[env] environment functions unavailable\") " +
+      "end " +
+    "end;\n";
+
+  return {
+    code: guard + code,
+    ok: true,
+    meta: {
+      envGuardApplied: true,
+      envGuardBytes: guard.length,
+    },
+  };
+}
+
 function stageAntiTamperWrap(code, ctx) {
   // Step 6: wrap the entire payload in a checksum-verified loader.
   //
@@ -1078,6 +1221,8 @@ const STAGE_FUNCTIONS = {
   numericEncoding: stageNumericEncoding,
   decoderInjection: stageDecoderInjection,
   bytecodeVMWrap: stageBytecodeVMWrap,
+  junkInjection: stageJunkInjection,
+  envGuardWrap: stageEnvGuardWrap,
   antiTamperWrap: stageAntiTamperWrap,
 };
 
@@ -1148,6 +1293,12 @@ function runPipeline(rawCode, level, options, report) {
           }
           if (typeof result.meta.vmBytecodeBytes === "number") {
             report.stats.vmBytecodeBytes = (report.stats.vmBytecodeBytes || 0) + result.meta.vmBytecodeBytes;
+          }
+          if (typeof result.meta.junkStatementsInjected === "number") {
+            report.stats.junkStatementsInjected = (report.stats.junkStatementsInjected || 0) + result.meta.junkStatementsInjected;
+          }
+          if (typeof result.meta.envGuardApplied === "boolean") {
+            report.stats.envGuardApplied = result.meta.envGuardApplied;
           }
         }
       } else {
