@@ -37,7 +37,7 @@ const referenceUpload = document.getElementById("referenceUpload");
 const referenceUploadBtn = document.getElementById("referenceUploadBtn");
 const referenceClearBtn = document.getElementById("referenceClearBtn");
 const referenceFileNameEl = document.getElementById("referenceFileName");
-let referenceCode = "";  // in-memory only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â not persisted
+let referenceCode = "";  // in-memory only ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â not persisted
 let referenceFileName = "";
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -486,7 +486,7 @@ function renderReport(report, generatedCode) {
   document.getElementById("statNumObf").textContent = s.numericConstsObfuscated != null ? s.numericConstsObfuscated : "-";
   document.getElementById("statVmStmt").textContent = s.vmCompiledStatements != null ? s.vmCompiledStatements : "0";
 
-  // Warnings Ã¢â‚¬â€ v2: with Copy all + Console toggle
+  // Warnings ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â v2: with Copy all + Console toggle
   const warningsWrap = document.getElementById("reportWarningsWrap");
   const warningsList = document.getElementById("reportWarningsList");
   const warningsCount = document.getElementById("reportWarningsCount");
@@ -530,12 +530,12 @@ function renderReport(report, generatedCode) {
     if (report.stagesSucceeded && report.stagesSucceeded.length > 0) {
       consoleLines.push("");
       consoleLines.push("=== STAGES SUCCEEDED ===");
-      for (const s of report.stagesSucceeded) consoleLines.push("  Ã¢Å“â€œ " + s);
+      for (const s of report.stagesSucceeded) consoleLines.push("  ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ " + s);
     }
     if (report.stagesSkipped && report.stagesSkipped.length > 0) {
       consoleLines.push("");
       consoleLines.push("=== STAGES SKIPPED ===");
-      for (const s of report.stagesSkipped) consoleLines.push("  Ã¢Å“â€” " + s);
+      for (const s of report.stagesSkipped) consoleLines.push("  ÃƒÂ¢Ã…â€œÃ¢â‚¬â€ " + s);
     }
     // v25.30 forensic: wide snippets from failed stages
     if (report.stageDebug && report.stageDebug.length > 0) {
@@ -563,7 +563,7 @@ function renderReport(report, generatedCode) {
     const consoleText = consoleLines.join("\n");
     reportConsole.textContent = consoleText;
 
-    // Wire Copy all Ã¢â‚¬â€ copies raw warning list (what most users want)
+    // Wire Copy all ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â copies raw warning list (what most users want)
     if (copyWarningsBtn && !copyWarningsBtn._wired) {
       copyWarningsBtn._wired = true;
       copyWarningsBtn.addEventListener("click", async () => {
@@ -1040,7 +1040,7 @@ function hideMessage() { messageDiv.classList.add("hidden"); }
 
 
 // ============================================================================
-// LARGE SCRIPT SECTION â€” separate pipeline for 300KB+ scripts
+// LARGE SCRIPT SECTION Ã¢â‚¬â€ separate pipeline for 300KB+ scripts
 // ============================================================================
 // Isolated wiring. All DOM ids are prefixed with "large*" to avoid collisions
 // with the standard small-script pipeline above. Talks to /obfuscate-large,
@@ -1198,6 +1198,7 @@ largePreviewBtn?.addEventListener("click", async () => {
       (result.elapsed || 0) + "ms";
     largePreviewOutput.textContent = result.code;
     largePreviewCard.classList.remove("hidden");
+    if (result.report) renderLargeReport(result.report, result.code);
     showLargeMessage("Preview ready.", "success");
   } catch (err) {
     showLargeMessage(err.message, "error");
@@ -1225,7 +1226,7 @@ largeClosePreviewBtn?.addEventListener("click", () => {
   largePreviewCard?.classList.add("hidden");
 });
 
-// ---- Save button â€” mirrors the small-script pattern (code stored in the row, no Storage upload) ----
+// ---- Save button Ã¢â‚¬â€ mirrors the small-script pattern (code stored in the row, no Storage upload) ----
 largeSaveBtn?.addEventListener("click", async () => {
   const code = largeScriptCodeInput.value;
   const name = largeScriptNameInput.value.trim();
@@ -1247,7 +1248,7 @@ largeSaveBtn?.addEventListener("click", async () => {
     const result = await obfuscateLarge(code, level);
     const finalCode = result.code;
 
-    // Retry on ID collision (up to 5 attempts) â€” same pattern as small path
+    // Retry on ID collision (up to 5 attempts) Ã¢â‚¬â€ same pattern as small path
     let scriptId = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       const id = generateId(8);
@@ -1280,6 +1281,8 @@ largeSaveBtn?.addEventListener("click", async () => {
 
     largeLoadstringOutput.textContent = loadstr;
     largeResultCard.classList.remove("hidden");
+    // Render the obfuscation report using the metadata from obfuscateLarge()
+    if (result.report) renderLargeReport(result.report, finalCode);
     showLargeMessage("Saved large script \"" + name + "\" (" +
                      finalCode.length.toLocaleString() + " chars).", "success");
   } catch (err) {
@@ -1306,3 +1309,150 @@ largeCopyBtn?.addEventListener("click", async () => {
 
 // Initial UI state
 updateLargeUI();
+
+
+// ============================================================================
+// LARGE OBFUSCATION REPORT â€” renderer + button wiring
+// ============================================================================
+
+const largeReportCard         = document.getElementById("largeReportCard");
+const largeReportRequestedEl  = document.getElementById("largeReportRequested");
+const largeReportAppliedEl    = document.getElementById("largeReportApplied");
+const largeReportProfileEl    = document.getElementById("largeReportProfile");
+const largeReportLayersEl     = document.getElementById("largeReportLayers");
+const largeReportStatsEl      = document.getElementById("largeReportStats");
+const largeReportWarningsWrap = document.getElementById("largeReportWarningsWrap");
+const largeReportWarningsList = document.getElementById("largeReportWarningsList");
+const largeReportWarningsCount= document.getElementById("largeReportWarningsCount");
+const largeCopyWarningsBtn    = document.getElementById("largeCopyWarningsBtn");
+const closeLargeReportBtn     = document.getElementById("closeLargeReportBtn");
+const largeViewCodeToggle     = document.getElementById("largeViewCodeToggle");
+const largeViewCodeBody       = document.getElementById("largeViewCodeBody");
+const largeViewCodeChars      = document.getElementById("largeViewCodeChars");
+const largeReportCodeOutput   = document.getElementById("largeReportCodeOutput");
+const largeCopyReportCodeBtn  = document.getElementById("largeCopyReportCodeBtn");
+
+let largeLastReport = null;
+let largeLastReportCode = "";
+
+// Layer registry â€” matches the stages emitted by obfuscator-large.js
+// Each entry: { key: stat/flag key on report, label: display name }
+const LARGE_LAYER_DEFS = [
+  { key: "minify",             label: "Minify",              detect: (r) => r.stagesSucceeded.includes("minify") },
+  { key: "stringEncryption",   label: "String encryption",   detect: (r) => (r.stats.stringsEncrypted || 0) > 0 },
+  { key: "numericEncoding",    label: "Numeric encoding",    detect: (r) => (r.stats.numericsObfuscated || 0) > 0 },
+  { key: "decoderInjection",   label: "Decoder injection",   detect: (r) => !!r.stats.decoderInjected },
+  { key: "bytecodeVMWrap",     label: "Bytecode VM wrap",    detect: (r) => (r.stats.vmCallsWrapped || 0) > 0 },
+  { key: "junkInjection",      label: "Junk injection",      detect: (r) => (r.stats.junkStatementsInjected || 0) > 0 },
+  { key: "envGuardWrap",       label: "Environment guard",   detect: (r) => !!r.stats.envGuardApplied },
+  { key: "antiTamperWrap",     label: "Anti-tamper wrap",    detect: (r) => !!r.stats.antiTamperApplied },
+];
+
+function renderLargeReport(report, generatedCode) {
+  if (!report || !largeReportCard) return;
+  largeLastReport = report;
+  largeLastReportCode = generatedCode || "";
+
+  // Hero: requested vs applied
+  largeReportRequestedEl.textContent = (report.requestedLevel || "-").toUpperCase();
+  largeReportAppliedEl.textContent   = (report.actualLevel || "-").toUpperCase();
+
+  // Profile block
+  largeReportProfileEl.textContent = report.profile || "-";
+
+  // Layers grid
+  largeReportLayersEl.innerHTML = "";
+  for (const def of LARGE_LAYER_DEFS) {
+    const active = def.detect(report);
+    const div = document.createElement("div");
+    div.className = "layer-item " + (active ? "active" : "inactive");
+    const check = active ? "M20 6L9 17l-5-5" : "M18 6L6 18M6 6l12 12";
+    div.innerHTML =
+      '<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="' + check + '"/></svg>' +
+      '<span class="layer-name">' + def.label + '</span>';
+    largeReportLayersEl.appendChild(div);
+  }
+
+  // Stats grid â€” numeric + ratio + timing
+  const s = report.stats || {};
+  const ratio = s.sizeRatio ? s.sizeRatio.toFixed(3) + "x" : "-";
+  const statPairs = [
+    ["Original size",       (s.originalBytes    || 0).toLocaleString() + " B"],
+    ["Obfuscated size",     (s.obfuscatedBytes  || 0).toLocaleString() + " B"],
+    ["Size ratio",          ratio],
+    ["Elapsed",             (s.elapsedMs        || 0) + " ms"],
+    ["Strings encrypted",   (s.stringsEncrypted    || 0).toLocaleString()],
+    ["Strings skipped",     (s.stringsSkipped      || 0).toLocaleString()],
+    ["Numerics obfuscated", (s.numericsObfuscated  || 0).toLocaleString()],
+    ["Comments stripped",   (s.commentsStripped    || 0).toLocaleString()],
+    ["VM calls wrapped",    (s.vmCallsWrapped      || 0).toLocaleString()],
+    ["Junk injected",       (s.junkStatementsInjected || 0).toLocaleString()],
+  ];
+  largeReportStatsEl.innerHTML = statPairs.map(([label, value]) =>
+    '<div>' + label + '<strong>' + value + '</strong></div>'
+  ).join("");
+
+  // Warnings
+  const warnings = report.warnings || [];
+  if (warnings.length > 0) {
+    largeReportWarningsWrap.classList.remove("hidden");
+    largeReportWarningsList.innerHTML = "";
+    for (const w of warnings) {
+      const li = document.createElement("li");
+      li.textContent = w;
+      largeReportWarningsList.appendChild(li);
+    }
+    largeReportWarningsCount.textContent = "(" + warnings.length + ")";
+  } else {
+    largeReportWarningsWrap.classList.add("hidden");
+    largeReportWarningsCount.textContent = "";
+  }
+
+  // View generated code
+  if (largeReportCodeOutput && generatedCode) {
+    largeReportCodeOutput.textContent = generatedCode;
+    largeViewCodeChars.textContent = "(" + generatedCode.length.toLocaleString() + " chars)";
+    // Try Prism highlight if available (loaded via CDN in dashboard.html)
+    try { if (window.Prism) window.Prism.highlightElement(largeReportCodeOutput); } catch (e) {}
+  }
+
+  largeReportCard.classList.remove("hidden");
+}
+
+// Close button
+closeLargeReportBtn?.addEventListener("click", () => {
+  largeReportCard.classList.add("hidden");
+});
+
+// Copy all warnings
+largeCopyWarningsBtn?.addEventListener("click", async () => {
+  if (!largeLastReport || !largeLastReport.warnings) return;
+  const text = largeLastReport.warnings.map((w, i) => "[" + (i + 1) + "] " + w).join("\n\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    const orig = largeCopyWarningsBtn.textContent;
+    largeCopyWarningsBtn.textContent = "Copied!";
+    setTimeout(() => { largeCopyWarningsBtn.textContent = orig; }, 1500);
+  } catch (e) {
+    largeCopyWarningsBtn.textContent = "Copy failed";
+  }
+});
+
+// Collapsible view-code toggle
+largeViewCodeToggle?.addEventListener("click", () => {
+  largeViewCodeToggle.classList.toggle("open");
+  largeViewCodeBody.classList.toggle("open");
+});
+
+// Copy generated code
+largeCopyReportCodeBtn?.addEventListener("click", async () => {
+  if (!largeLastReportCode) return;
+  try {
+    await navigator.clipboard.writeText(largeLastReportCode);
+    const orig = largeCopyReportCodeBtn.textContent;
+    largeCopyReportCodeBtn.textContent = "Copied!";
+    setTimeout(() => { largeCopyReportCodeBtn.textContent = orig; }, 1500);
+  } catch (e) {
+    largeCopyReportCodeBtn.textContent = "Copy failed";
+  }
+});
