@@ -1,34 +1,27 @@
 // ============================================================================
-// obfuscator-large PATCH v7 â€” 11 layers of protection (verified vs azure.txt)
+// obfuscator-large PATCH v6 â€” Layer 10 depth-aware fix (verified vs azure.txt)
 //
-// NEW IN v7:
-//   LAYER 11 (stageStringFragmentation) â€” post-processes Layer 2 output.
-//   Splits _D({b,b,b,...}) calls into scattered fragments stored in a
-//   randomized-key lookup table _F, replaces the call site with _D(_R(a,b))
-//   where _R() reassembles fragments at runtime. Makes AI-driven or manual
-//   deobfuscation harder because attackers must follow 2-level indirection
-//   (call site -> fragment IDs -> pool entries -> concatenate -> decrypt).
+// FIX IN v6:
+//   Layer 10 (stageControlFlowFlatten) â€” isSimpleStmt() now rejects any line
+//   with unbalanced paren/brace/bracket depth. Previous version treated
+//   `pcall(function()` as a simple statement because it ended in ')', but
+//   the '(' opened a call spanning multiple lines. Flattening such a line
+//   orphaned the closing ')' at runtime â€” Roblox error:
+//     'Expected \')\' (to close \'(\' at line NNNN), got \'end\''
+//   Now the stage walks each line with string/comment awareness and requires
+//   final depth === 0 before considering it simple.
 //
-// PRIOR FIXES CARRIED FROM v6:
-//   Layer 2  â€” expanded RESERVED set, prefix detector, path-like skip.
-//   Layer 5  â€” VM regex fixed (no more crashes).
-//   Layer 6  â€” multi-line continuation guards (no junk breakage).
-//   Layer 9  â€” opaque predicates (584 wrapped in azure).
-//   Layer 10 â€” depth-aware simple-stmt detector (no pcall(function()) crash).
+// CARRIED FROM v5:
+//   Layer 9  (stageOpaquePredicates)   â€” 584 wrapped, 0 breakage
+//   Layer 10 (stageControlFlowFlatten) â€” now correctly conservative
+//   All prior v2/v3/v4 fixes intact.
 //
 // NIGHTMARE VERIFIED (azure.txt, 736 KB):
-//   - 11/11 stages succeed, 0 warnings
+//   - 10/10 stages succeed, 0 warnings
 //   - Bracket balance: 0/0/0 (perfect)
-//   - All 5 critical reflection strings preserved
-//   - 1,224 encrypted, 535 fragmented (44% of eligible)
-//   - 1,070-entry fragment pool with scrambled non-sequential IDs
-//   - 2,607 numerics obfuscated (up from 1,537 â€” fragment IDs also encoded)
-//   - 584 opaque predicates + 289 junk statements + 2 VM wraps intact
-//   - Ratio 1.195x (only ~3% overhead vs v6 for extra fragmentation layer)
-//
-// USAGE:
-//   obfuscateLarge(code, 'conservative-max', userId)  // 8 layers (unchanged)
-//   obfuscateLarge(code, 'nightmare', userId)         // 11 layers (new!)
+//   - Opaque predicates: 584 wrapped
+//   - CFF: 0 flattened (skipped all lines with open-depth â€” safety first)
+//   - The specific pcall(function()) crash from v5 is now impossible.
 //
 // Drop-in replacement â€” rename to obfuscator-large.js when using.
 // ============================================================================
@@ -120,11 +113,10 @@ const LEVEL_PROFILES = {
 
 const LEVEL_NIGHTMARE = "nightmare";
 LEVEL_PROFILES[LEVEL_NIGHTMARE] = {
-  label: "Maximum â€” 11-layer protection",
+  label: "Nightmare â€” 10-layer maximum protection",
   stages: [
     "minify",
     "stringEncryption",
-    "stringFragmentation",
     "numericEncoding",
     "decoderInjection",
     "bytecodeVMWrap",
@@ -165,7 +157,6 @@ function makeReport(level) {
       envGuardApplied: false,
       opaquePredicatesWrapped: 0,
       cfFlattenedSequences: 0,
-      fragmentedStrings: 0,
     },
     stagesSucceeded: [],
     stagesSkipped: [],
@@ -928,34 +919,10 @@ function stageDecoderInjection(code, ctx) {
     "end " +
     "end)();\n";
 
-  // Layer 11: emit _F fragment pool + _R reassembler if fragmentation ran
-  let fragmentHelpers = "";
-  if (ctx.fragmentPool && ctx.fragmentPool.size > 0) {
-    // Build the fragment pool as a Lua table: _F={[id]={b,b,b},...}
-    const entries = [];
-    for (const [id, bytes] of ctx.fragmentPool.entries()) {
-      entries.push("[" + id + "]={" + bytes.join(",") + "}");
-    }
-    fragmentHelpers =
-      "local _F={" + entries.join(",") + "};" +
-      "local function _R(a,b) " +
-        "local f1=_F[a] local f2=_F[b] " +
-        "local r={} " +
-        "for i=1,#f1 do r[i]=f1[i] end " +
-        "for i=1,#f2 do r[#f1+i]=f2[i] end " +
-        "return r " +
-      "end;\n";
-  }
-
   return {
-    code: fragmentHelpers + decoder + code,
+    code: decoder + code,
     ok: true,
-    meta: {
-      decoderInjected: true,
-      decoderBytes: decoder.length,
-      fragmentHelpersEmitted: fragmentHelpers.length > 0,
-      fragmentHelpersBytes: fragmentHelpers.length,
-    },
+    meta: { decoderInjected: true, decoderBytes: decoder.length },
   };
 }
 
@@ -1881,123 +1848,6 @@ function stageControlFlowFlatten(code, ctx) {
 }
 
 
-
-// ============================================================================
-// LAYER 11: Runtime String Fragmentation
-// ============================================================================
-// Post-processes stageStringEncryption output. Takes existing _D({b1,b2,...})
-// calls and scatters their byte arrays into a fragment pool, replacing each
-// call with _D(_R(id1, id2)) that reassembles at runtime.
-//
-// Design invariants:
-//   1. Only touches _D({...}) calls emitted by Layer 2 â€” never plain strings.
-//   2. Skips strings shorter than 6 bytes (fragmentation costs more than saves).
-//   3. Skips strings longer than 200 bytes (would inflate _F table).
-//   4. Fragmentation rate: 50% of eligible calls (leaves plain _D() for balance).
-//   5. Fragment IDs are scrambled per-run using ctx.rngKey.
-//   6. Emits helper functions _F (fragment pool) and _R (reassembler) at the
-//      top of the file, right before the _D decoder.
-// ============================================================================
-
-function stageStringFragmentation(code, ctx) {
-  // Only run if string encryption produced _D calls to fragment
-  if (!ctx.stringEncKeys) {
-    return { code, ok: true, meta: { fragmentedStrings: 0 } };
-  }
-
-  const seedBytes = [];
-  for (let i = 0; i < ctx.rngKey.length; i += 2) {
-    seedBytes.push(parseInt(ctx.rngKey.substring(i, i + 2), 16));
-  }
-  let rngIdx = 400;
-  function nextRand() {
-    const v = seedBytes[rngIdx % seedBytes.length];
-    rngIdx++;
-    return v || 42;
-  }
-
-  // Fragment pool: fragmentId -> byte array
-  const fragmentPool = new Map();
-  let nextFragmentId = 100;  // start high to look non-sequential
-  // Track used IDs to avoid collisions
-  const usedIds = new Set();
-
-  function allocateFragmentId() {
-    // Generate a pseudo-random ID that hasn't been used yet
-    for (let tries = 0; tries < 100; tries++) {
-      const id = nextFragmentId + (nextRand() % 47);
-      if (!usedIds.has(id)) {
-        usedIds.add(id);
-        nextFragmentId = id + 3 + (nextRand() % 7);
-        return id;
-      }
-    }
-    // Fallback: sequential
-    nextFragmentId++;
-    while (usedIds.has(nextFragmentId)) nextFragmentId++;
-    usedIds.add(nextFragmentId);
-    return nextFragmentId;
-  }
-
-  // Scan for _D({byte,byte,...}) calls
-  const dCallRe = /_D\(\{([\d,]+)\}\)/g;
-  let fragmentedCount = 0;
-  let skippedCount = 0;
-  let eligibleCount = 0;
-
-  const result = code.replace(dCallRe, (match, bytesStr) => {
-    const bytes = bytesStr.split(",").map(Number);
-
-    // Skip if bytes look malformed
-    if (bytes.some(b => b < 0 || b > 255 || !Number.isInteger(b))) {
-      skippedCount++;
-      return match;
-    }
-
-    // Skip if too short or too long
-    if (bytes.length < 6) { skippedCount++; return match; }
-    if (bytes.length > 200) { skippedCount++; return match; }
-
-    eligibleCount++;
-    // Rate limit: fragment only 50%
-    if (eligibleCount % 2 !== 0) { skippedCount++; return match; }
-
-    // Split into 2 fragments at a randomized midpoint (30-70% range)
-    const midpoint = Math.floor(bytes.length * (0.3 + (nextRand() % 40) / 100));
-    const frag1 = bytes.slice(0, midpoint);
-    const frag2 = bytes.slice(midpoint);
-
-    // Allocate IDs and store fragments
-    const id1 = allocateFragmentId();
-    const id2 = allocateFragmentId();
-    fragmentPool.set(id1, frag1);
-    fragmentPool.set(id2, frag2);
-
-    fragmentedCount++;
-    return "_D(_R(" + id1 + "," + id2 + "))";
-  });
-
-  // If nothing fragmented, return as-is
-  if (fragmentedCount === 0) {
-    return { code, ok: true, meta: { fragmentedStrings: 0 } };
-  }
-
-  // Store fragment pool on ctx so stageDecoderInjection can emit _F and _R.
-  // We emit them together with _D so they're all initialized in one block.
-  ctx.fragmentPool = fragmentPool;
-
-  return {
-    code: result,
-    ok: true,
-    meta: {
-      fragmentedStrings: fragmentedCount,
-      fragmentPoolSize: fragmentPool.size,
-      fragmentSkipped: skippedCount,
-    },
-  };
-}
-
-
 const STAGE_FUNCTIONS = {
   minify: stageMinify,
   stringEncryption: stageStringEncryption,
@@ -2009,7 +1859,6 @@ const STAGE_FUNCTIONS = {
   antiTamperWrap: stageAntiTamperWrap,
   opaquePredicates: stageOpaquePredicates,
   controlFlowFlatten: stageControlFlowFlatten,
-  stringFragmentation: stageStringFragmentation,
 };
 
 // ============================================================================
@@ -2091,9 +1940,6 @@ function runPipeline(rawCode, level, options, report) {
           }
           if (typeof result.meta.cfFlattenedSequences === "number") {
             report.stats.cfFlattenedSequences = (report.stats.cfFlattenedSequences || 0) + result.meta.cfFlattenedSequences;
-          }
-          if (typeof result.meta.fragmentedStrings === "number") {
-            report.stats.fragmentedStrings = (report.stats.fragmentedStrings || 0) + result.meta.fragmentedStrings;
           }
         }
       } else {
