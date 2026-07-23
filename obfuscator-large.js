@@ -91,8 +91,10 @@ function makeReport(level) {
       stringsEncrypted: 0,
       stringsSkipped: 0,
       numericsObfuscated: 0,
+      numericsSkipped: 0,
       commentsStripped: 0,
       minifyBytesSaved: 0,
+      decoderInjected: false,
     },
     stagesSucceeded: [],
     stagesSkipped: [],
@@ -532,13 +534,262 @@ function stageStringEncryption(code, ctx) {
 }
 
 function stageNumericEncoding(code, ctx) {
-  // TODO step 4: byte-scan numeric literals -> arithmetic expressions
-  return { code, ok: true, meta: { numericsObfuscated: 0 } };
+  // Step 4: byte-scan numeric literals, replace with equivalent arithmetic.
+  //
+  // Design:
+  //   * Only encode PLAIN integer literals (0-9)+ â€” skip floats, hex, scientific.
+  //   * Skip when the number appears inside a _D({...}) byte table (step 3
+  //     output) â€” we detect this by tracking depth of _D( braces.
+  //   * Skip small numbers (< 2 chars) â€” not worth the overhead.
+  //   * Randomize which strategy per number: add, sub, xor, mul.
+  //   * Never touch numbers inside string literals or backticks.
+  //
+  // Character state machine â€” same shape as step 2/3.
+
+  const seedBytes = [];
+  for (let i = 0; i < ctx.rngKey.length; i += 2) {
+    seedBytes.push(parseInt(ctx.rngKey.substring(i, i + 2), 16));
+  }
+  let rngIdx = 0;
+  function nextRand() {
+    const v = seedBytes[rngIdx % seedBytes.length];
+    rngIdx++;
+    return v || 42;
+  }
+
+  function encodeInt(n) {
+    // Choose strategy based on next random byte
+    const strategy = nextRand() % 4;
+    if (strategy === 0) {
+      // add: n = a + b
+      const a = 1 + (nextRand() % Math.max(1, n));
+      return "(" + a + "+" + (n - a) + ")";
+    }
+    if (strategy === 1) {
+      // sub: n = a - b
+      const a = n + (nextRand() % 100) + 1;
+      return "(" + a + "-" + (a - n) + ")";
+    }
+    if (strategy === 2) {
+      // xor: n = a XOR b, where b = a XOR n
+      const a = (nextRand() * 3 + 17) & 0xff;
+      const b = a ^ n;
+      return "bit32.bxor(" + a + "," + b + ")";
+    }
+    // mul when divisible, else fallback to add
+    for (let d = 2; d <= 12; d++) {
+      if (n % d === 0 && n / d > 0) {
+        return "(" + d + "*" + (n / d) + ")";
+      }
+    }
+    const a = 1 + (nextRand() % Math.max(1, n));
+    return "(" + a + "+" + (n - a) + ")";
+  }
+
+  const raw = code;
+  const n = raw.length;
+  const out = [];
+  let i = 0;
+  let numericsObfuscated = 0;
+  let numericsSkipped = 0;
+
+  while (i < n) {
+    const c = raw[i];
+    const c2 = raw[i + 1];
+
+    // Skip long-bracket strings verbatim
+    if (c === "[") {
+      let j = i + 1;
+      let level = 0;
+      while (j < n && raw[j] === "=") { level++; j++; }
+      if (j < n && raw[j] === "[") {
+        const closer = "]" + "=".repeat(level) + "]";
+        const endIdx = raw.indexOf(closer, j + 1);
+        if (endIdx > 0) {
+          out.push(raw.substring(i, endIdx + closer.length));
+          i = endIdx + closer.length;
+          continue;
+        }
+      }
+    }
+
+    // Skip -- comments (defensive)
+    if (c === "-" && c2 === "-") {
+      let j = i + 2;
+      if (j < n && raw[j] === "[") {
+        let level = 0;
+        let k = j + 1;
+        while (k < n && raw[k] === "=") { level++; k++; }
+        if (k < n && raw[k] === "[") {
+          const closer = "]" + "=".repeat(level) + "]";
+          const endIdx = raw.indexOf(closer, k + 1);
+          if (endIdx > 0) { i = endIdx + closer.length; continue; }
+          i = n; continue;
+        }
+      }
+      const nl = raw.indexOf("\n", i);
+      i = nl < 0 ? n : nl;
+      continue;
+    }
+
+    // Skip string literals verbatim
+    if (c === '"' || c === "'") {
+      const quote = c;
+      const start = i;
+      i++;
+      while (i < n) {
+        const ch = raw[i];
+        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
+        if (ch === quote) { i++; break; }
+        if (ch === "\n") break;
+        i++;
+      }
+      out.push(raw.substring(start, i));
+      continue;
+    }
+
+    // Skip backtick strings verbatim
+    if (c === "`") {
+      const start = i;
+      i++;
+      let bd = 0;
+      while (i < n) {
+        const ch = raw[i];
+        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
+        if (ch === "{") bd++;
+        else if (ch === "}") bd--;
+        else if (ch === "`" && bd === 0) { i++; break; }
+        i++;
+      }
+      out.push(raw.substring(start, i));
+      continue;
+    }
+
+    // Skip _D({...}) byte tables â€” the numbers inside are our own encrypted
+    // bytes and must not be re-encoded. Detect the pattern "_D({" and skip
+    // to the matching "})".
+    if (c === "_" && raw.substring(i, i + 4) === "_D({") {
+      const closeIdx = raw.indexOf("})", i + 4);
+      if (closeIdx > 0) {
+        out.push(raw.substring(i, closeIdx + 2));
+        i = closeIdx + 2;
+        continue;
+      }
+    }
+
+    // Numeric literal detection: digit not preceded by identifier char
+    if (c >= "0" && c <= "9") {
+      const prev = i > 0 ? raw[i - 1] : " ";
+      const isIdentPrefix = /[A-Za-z_0-9]/.test(prev);
+      if (isIdentPrefix) {
+        // e.g. `_0xabc123` or `var123` â€” this digit is part of an identifier,
+        // not a numeric literal. Emit as-is.
+        out.push(c);
+        i++;
+        continue;
+      }
+      // Scan the full numeric literal
+      let j = i;
+      // Handle hex prefix: 0x... or 0X... â€” skip these (leave as-is)
+      if (raw[j] === "0" && (raw[j + 1] === "x" || raw[j + 1] === "X")) {
+        while (j < n && /[0-9a-fA-F]/.test(raw[j + 2] ? raw[j] : raw[j])) {
+          if (j < i + 2) { j++; continue; }
+          if (!/[0-9a-fA-F]/.test(raw[j])) break;
+          j++;
+        }
+        // Actually simpler: scan until non-hexdigit
+        j = i + 2;
+        while (j < n && /[0-9a-fA-F]/.test(raw[j])) j++;
+        out.push(raw.substring(i, j));
+        i = j;
+        numericsSkipped++;
+        continue;
+      }
+      // Scan integer digits
+      while (j < n && raw[j] >= "0" && raw[j] <= "9") j++;
+      // Check for decimal point or scientific notation â€” skip if present
+      if (j < n && (raw[j] === "." || raw[j] === "e" || raw[j] === "E")) {
+        // Consume the whole float/scientific
+        while (j < n && /[0-9.eE+\-]/.test(raw[j])) {
+          // stop at unary +/- unless right after e/E
+          if ((raw[j] === "+" || raw[j] === "-") &&
+              !(raw[j - 1] === "e" || raw[j - 1] === "E")) break;
+          j++;
+        }
+        out.push(raw.substring(i, j));
+        i = j;
+        numericsSkipped++;
+        continue;
+      }
+
+      const numStr = raw.substring(i, j);
+      const num = parseInt(numStr, 10);
+      // Only encode integers with 2+ digits and value >= 10
+      if (numStr.length >= 2 && num >= 10 && num < 1000000) {
+        out.push(encodeInt(num));
+        numericsObfuscated++;
+      } else {
+        out.push(numStr);
+        numericsSkipped++;
+      }
+      i = j;
+      continue;
+    }
+
+    out.push(c);
+    i++;
+  }
+
+  return {
+    code: out.join(""),
+    ok: true,
+    meta: { numericsObfuscated, numericsSkipped },
+  };
 }
 
 function stageDecoderInjection(code, ctx) {
-  // TODO step 5: prepend runtime helper prelude (_D() decoder, etc.)
-  return { code, ok: true, meta: {} };
+  // Step 5: prepend the runtime _D() decoder that reverses step 3 encryption.
+  //
+  // Encryption formula (from step 3):
+  //   enc = ((original XOR (key[i%4] + (i+shift)%11)) - shift) mod 256
+  // Decryption (this function):
+  //   b = (enc + shift) mod 256
+  //   original = b XOR (key[i%4] + (i+shift)%11)
+  //
+  // If no strings were encrypted in step 3, we skip injection entirely.
+  // Detection: presence of ctx.stringEncKeys.
+
+  if (!ctx.stringEncKeys) {
+    // No string encryption happened â€” no need for a decoder.
+    return { code, ok: true, meta: { decoderInjected: false } };
+  }
+
+  const k = ctx.stringEncKeys;
+  const key0 = k.key0, key1 = k.key1, key2 = k.key2, key3 = k.key3;
+  const shift = k.shift;
+
+  // Build the decoder. Emitted as a single expression so we don't clutter the
+  // global namespace. Uses bit32.bxor which is available in Roblox Lua.
+  const decoder =
+    "local _D=(function() " +
+    "local k={" + key0 + "," + key1 + "," + key2 + "," + key3 + "} " +
+    "local s=" + shift + " " +
+    "return function(t) " +
+    "local r={} " +
+    "for i=1,#t do " +
+    "local b=(t[i]+s)%256 " +
+    "b=bit32.bxor(b,(k[((i-1)%4)+1]+((i-1+s)%11))%256) " +
+    "r[i]=string.char(b) " +
+    "end " +
+    "return table.concat(r) " +
+    "end " +
+    "end)();\n";
+
+  return {
+    code: decoder + code,
+    ok: true,
+    meta: { decoderInjected: true, decoderBytes: decoder.length },
+  };
 }
 
 function stageAntiTamperWrap(code, ctx) {
@@ -601,11 +852,17 @@ function runPipeline(rawCode, level, options, report) {
           if (typeof result.meta.numericsObfuscated === "number") {
             report.stats.numericsObfuscated += result.meta.numericsObfuscated;
           }
+          if (typeof result.meta.numericsSkipped === "number") {
+            report.stats.numericsSkipped = (report.stats.numericsSkipped || 0) + result.meta.numericsSkipped;
+          }
           if (typeof result.meta.commentsStripped === "number") {
             report.stats.commentsStripped = (report.stats.commentsStripped || 0) + result.meta.commentsStripped;
           }
           if (typeof result.meta.bytesSaved === "number") {
             report.stats.minifyBytesSaved = (report.stats.minifyBytesSaved || 0) + result.meta.bytesSaved;
+          }
+          if (typeof result.meta.decoderInjected === "boolean") {
+            report.stats.decoderInjected = result.meta.decoderInjected;
           }
         }
       } else {
