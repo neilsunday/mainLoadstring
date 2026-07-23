@@ -596,6 +596,95 @@
         <div id="message" class="message hidden" style="margin-top: 14px"></div>
       </div>
 
+      <!-- ============================================================
+           LARGE SCRIPT SECTION â€” separate pipeline for 300KB+ scripts
+           Uses a safer conservative obfuscation profile (no full AST rewrite)
+           so extreme scripts survive without cascading parse failures.
+      ============================================================ -->
+      <div class="card" id="largeScriptCard" style="margin-top: 20px; border: 1px solid rgba(255, 165, 60, 0.18);">
+        <div class="section-head">
+          <span class="icon" aria-hidden="true" style="background: rgba(255, 165, 60, 0.08); border-color: rgba(255, 165, 60, 0.22); color: #ffb44e;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M12 7v4M12 15h.01"/></svg>
+          </span>
+          <div class="title-block">
+            <h2>Large Script Obfuscator</h2>
+            <span class="sub">For scripts 300KB and above â€” uses a conservative pipeline to avoid parse issues</span>
+          </div>
+        </div>
+
+        <div style="padding: 12px 14px; margin-bottom: 20px; border-radius: 10px; background: rgba(255, 165, 60, 0.06); border: 1px solid rgba(255, 165, 60, 0.18); font-size: 12px; line-height: 1.55; color: rgba(255, 210, 128, 0.9);">
+          <strong style="color: #ffd280;">Different pipeline.</strong> This section is isolated from the standard obfuscator above. It applies string encryption, numeric obfuscation, and basic wrapping only â€” skipping the AST-rewrite stages that cause failures on complex Luau scripts (thousands of functions, deep reflection, extreme complexity). Use this for anything above ~300KB or if the standard MAXIMUM tier keeps rolling back layers on your script.
+        </div>
+
+        <div class="field">
+          <label for="largeScriptName">Script Name</label>
+          <input type="text" id="largeScriptName" placeholder="Enter script name" maxlength="100" />
+        </div>
+
+        <div class="field">
+          <label for="largeScriptCode">
+            <span>Lua Code (Large)</span>
+            <span id="largeCharCount" class="hint">0 characters</span>
+          </label>
+          <textarea id="largeScriptCode" placeholder="Paste your large Lua script here â€” this pipeline handles 300KB up to 10MB" spellcheck="false" style="min-height: 200px;"></textarea>
+        </div>
+
+        <div class="upload-row" style="margin-top: 14px">
+          <button type="button" id="largeUploadBtn" class="secondary small">Upload File</button>
+          <input type="file" id="largeFileUpload" accept=".lua,.txt" style="display: none;" />
+          <span id="largeFileName"></span>
+          <button type="button" id="largeClearBtn" class="secondary small" style="margin-left: auto;">Clear</button>
+        </div>
+
+        <hr class="card-divider" />
+
+        <div class="field">
+          <label for="largeObfuscationLevel">Conservative Level</label>
+          <select id="largeObfuscationLevel">
+            <option value="basic">Basic â€” minify only (safest)</option>
+            <option value="medium" selected>Medium â€” string + numeric encryption (recommended)</option>
+            <option value="conservative-max">Conservative Max â€” medium + integrity wrapper</option>
+          </select>
+          <small>Full MAXIMUM tier is intentionally unavailable here â€” it uses AST rewriting that breaks on extreme scripts.</small>
+        </div>
+
+        <div class="toggle-row" style="margin-top: 16px">
+          <input type="checkbox" id="largeRequireKey" />
+          <label for="largeRequireKey">
+            <div class="t-title">Require access key</div>
+            <div class="t-desc">Save the script behind a key check â€” same key system as the standard section.</div>
+          </label>
+        </div>
+
+        <div class="row" style="margin-top: 20px; gap: 10px">
+          <button type="button" id="largePreviewBtn" class="secondary" disabled>Preview Output</button>
+          <button type="button" id="largeSaveBtn" class="primary" disabled>Save Large Script</button>
+        </div>
+
+        <div id="largeMessage" class="message hidden" style="margin-top: 14px"></div>
+
+        <!-- Large-script preview / result panels (hidden until user runs preview/save) -->
+        <div id="largePreviewCard" class="hidden" style="margin-top: 20px; padding: 16px; border-radius: 12px; background: rgba(255, 255, 255, 0.015); border: 1px solid rgba(255, 255, 255, 0.04);">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+            <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px;">Large Preview</div>
+            <div style="display: flex; gap: 8px;">
+              <button type="button" id="largeCopyPreviewBtn" class="secondary" style="padding: 4px 12px; font-size: 11px;">Copy</button>
+              <button type="button" id="largeClosePreviewBtn" class="secondary" style="padding: 4px 12px; font-size: 11px;">Close</button>
+            </div>
+          </div>
+          <div id="largePreviewStats" style="font-size: 12px; color: rgba(255,255,255,0.55); margin-bottom: 10px;"></div>
+          <div id="largePreviewOutput" class="output-box"></div>
+        </div>
+
+        <div id="largeResultCard" class="hidden" style="margin-top: 20px; padding: 16px; border-radius: 12px; background: rgba(72, 176, 92, 0.06); border: 1px solid rgba(72, 176, 92, 0.2);">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+            <div style="font-size: 12px; font-weight: 700; color: #7de095; text-transform: uppercase; letter-spacing: 0.8px;">Large Script Loadstring</div>
+            <button type="button" id="largeCopyBtn" class="secondary" style="padding: 4px 12px; font-size: 11px;">Copy Loadstring</button>
+          </div>
+          <div id="largeLoadstringOutput" class="output-box small"></div>
+        </div>
+      </div>
+
       <!-- ============ v16 NEW: OBFUSCATION REPORT CARD (hidden until preview) ============ -->
       <div id="reportCard" class="card hidden">
         <div class="section-head">
