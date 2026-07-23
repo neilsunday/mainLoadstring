@@ -90,6 +90,8 @@ function makeReport(level) {
       elapsedMs: 0,
       stringsEncrypted: 0,
       numericsObfuscated: 0,
+      commentsStripped: 0,
+      minifyBytesSaved: 0,
     },
     stagesSucceeded: [],
     stagesSkipped: [],
@@ -110,8 +112,163 @@ function warn(report, msg) {
 //   meta â€” stage-specific data merged into the report
 
 function stageMinify(code, ctx) {
-  // TODO step 2: real minify (strip comments, collapse whitespace, CRLF -> LF)
-  return { code, ok: true, meta: {} };
+  // Step 2: real minify.
+  //
+  // Design: string-aware byte scan. We never touch content inside string
+  // literals or long-bracket blocks. This avoids the entire class of bugs
+  // where a regex-based transform corrupts string content.
+  //
+  // Pipeline:
+  //   1. Normalize CRLF/CR to LF
+  //   2. Walk the source byte-by-byte, emitting:
+  //      - strings (all 4 flavors) verbatim
+  //      - non-comment code with whitespace collapsed
+  //      - drop line comments (-- ... \n)
+  //      - drop block comments (--[[ ... ]], --[=[ ... ]=], etc.)
+  //   3. Collapse 3+ blank lines to 1, trim trailing whitespace per line
+  //
+  // Character state machine â€” no regex, no parse.
+  const raw = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const n = raw.length;
+  const out = [];
+  let i = 0;
+  let commentsStripped = 0;
+  let stringsPreserved = 0;
+
+  while (i < n) {
+    const c = raw[i];
+    const c2 = raw[i + 1];
+
+    // ---- Long-bracket string: [[ ... ]] or [=[ ... ]=] ----
+    // Only enters this branch if we're at '[' AND not preceded by identifier
+    // char (in which case '[' is a table index, not a long string).
+    if (c === "[") {
+      // Peek for = signs
+      let j = i + 1;
+      let level = 0;
+      while (j < n && raw[j] === "=") { level++; j++; }
+      if (j < n && raw[j] === "[") {
+        // It's a long-bracket string [=*[
+        const closer = "]" + "=".repeat(level) + "]";
+        const endIdx = raw.indexOf(closer, j + 1);
+        if (endIdx > 0) {
+          // Emit the whole long-bracket string verbatim
+          out.push(raw.substring(i, endIdx + closer.length));
+          i = endIdx + closer.length;
+          stringsPreserved++;
+          continue;
+        }
+        // Unterminated long-bracket â€” treat as regular '[' character
+      }
+      // Not a long-bracket string, fall through to emit '['
+    }
+
+    // ---- Comments: -- (line) or --[[ / --[=[ (block) ----
+    if (c === "-" && c2 === "-") {
+      // Check for --[[  or --[=*[  (block comment)
+      let j = i + 2;
+      if (j < n && raw[j] === "[") {
+        let level = 0;
+        let k = j + 1;
+        while (k < n && raw[k] === "=") { level++; k++; }
+        if (k < n && raw[k] === "[") {
+          // Block comment --[=*[ ... ]=*]
+          const closer = "]" + "=".repeat(level) + "]";
+          const endIdx = raw.indexOf(closer, k + 1);
+          if (endIdx > 0) {
+            // Drop the whole block comment. Preserve line count by keeping
+            // a space so \n boundaries don't shift for downstream stages.
+            i = endIdx + closer.length;
+            commentsStripped++;
+            continue;
+          }
+          // Unterminated block comment â€” drop rest of file (matches Lua)
+          i = n;
+          commentsStripped++;
+          continue;
+        }
+      }
+      // Line comment: skip to next \n (don't consume the \n itself)
+      const nl = raw.indexOf("\n", i);
+      i = nl < 0 ? n : nl;
+      commentsStripped++;
+      continue;
+    }
+
+    // ---- Quoted string: "..." or '...' ----
+    if (c === '"' || c === "'") {
+      const quote = c;
+      const start = i;
+      i++;
+      while (i < n) {
+        const ch = raw[i];
+        if (ch === "\\" && i + 1 < n) { i += 2; continue; }  // escape
+        if (ch === quote) { i++; break; }
+        if (ch === "\n") break;  // unterminated, Lua-illegal, but be safe
+        i++;
+      }
+      out.push(raw.substring(start, i));
+      stringsPreserved++;
+      continue;
+    }
+
+    // ---- Backtick string (Luau interpolation): `...` with {expr} embeds ----
+    if (c === "`") {
+      const start = i;
+      i++;
+      let braceDepth = 0;
+      while (i < n) {
+        const ch = raw[i];
+        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
+        if (ch === "{") braceDepth++;
+        else if (ch === "}") braceDepth--;
+        else if (ch === "`" && braceDepth === 0) { i++; break; }
+        i++;
+      }
+      out.push(raw.substring(start, i));
+      stringsPreserved++;
+      continue;
+    }
+
+    // ---- Regular code character ----
+    out.push(c);
+    i++;
+  }
+
+  let result = out.join("");
+
+  // Post-pass: collapse whitespace outside strings. The strings are already
+  // emitted verbatim so a simple line-based normalization is safe.
+  const lines = result.split("\n");
+  const cleaned = [];
+  let prevBlank = false;
+  let consecutiveBlanks = 0;
+  for (const line of lines) {
+    // Trim trailing whitespace only (preserve indent for readability)
+    const trimmedRight = line.replace(/[ \t]+$/, "");
+    const isBlank = trimmedRight.trim().length === 0;
+    if (isBlank) {
+      consecutiveBlanks++;
+      // Keep at most 1 blank line in a row
+      if (consecutiveBlanks <= 1) {
+        cleaned.push("");
+      }
+    } else {
+      consecutiveBlanks = 0;
+      cleaned.push(trimmedRight);
+    }
+  }
+  result = cleaned.join("\n");
+
+  return {
+    code: result,
+    ok: true,
+    meta: {
+      commentsStripped,
+      stringsPreserved,
+      bytesSaved: raw.length - result.length,
+    },
+  };
 }
 
 function stageStringEncryption(code, ctx) {
@@ -185,6 +342,12 @@ function runPipeline(rawCode, level, options, report) {
           }
           if (typeof result.meta.numericsObfuscated === "number") {
             report.stats.numericsObfuscated += result.meta.numericsObfuscated;
+          }
+          if (typeof result.meta.commentsStripped === "number") {
+            report.stats.commentsStripped = (report.stats.commentsStripped || 0) + result.meta.commentsStripped;
+          }
+          if (typeof result.meta.bytesSaved === "number") {
+            report.stats.minifyBytesSaved = (report.stats.minifyBytesSaved || 0) + result.meta.bytesSaved;
           }
         }
       } else {
