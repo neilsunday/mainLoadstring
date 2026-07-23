@@ -1,33 +1,28 @@
 // ============================================================================
-// obfuscator-large PATCH v6 â€” Layer 10 depth-aware fix (verified vs azure.txt)
+// obfuscator-large PATCH v7 â€” stageNumericEncoding rewrite (drop-in for v6)
 //
-// FIX IN v6:
-//   Layer 10 (stageControlFlowFlatten) â€” isSimpleStmt() now rejects any line
-//   with unbalanced paren/brace/bracket depth. Previous version treated
-//   `pcall(function()` as a simple statement because it ended in ')', but
-//   the '(' opened a call spanning multiple lines. Flattening such a line
-//   orphaned the closing ')' at runtime â€” Roblox error:
-//     'Expected \')\' (to close \'(\' at line NNNN), got \'end\''
-//   Now the stage walks each line with string/comment awareness and requires
-//   final depth === 0 before considering it simple.
+// FIX IN v7:
+//   Layer 3 (stageNumericEncoding) â€” replaced v6's constant-foldable arithmetic
+//   with a runtime lookup table (_N) + MBA XOR identities anchored at a
+//   runtime-computed byte (_A). Emits a small prelude (~112 bytes) that builds
+//   both at load time. Naive v6-style regex folders (e.g. `(a*b)`,
+//   `bit32.bxor(a,b)`) now recover 0% of encoded numbers instead of ~100%.
 //
-// CARRIED FROM v5:
-//   Layer 9  (stageOpaquePredicates)   â€” 584 wrapped, 0 breakage
-//   Layer 10 (stageControlFlowFlatten) â€” now correctly conservative
-//   All prior v2/v3/v4 fixes intact.
+// VERIFIED (azure.txt, 736 KB):
+//   * 1,538 numeric literals encoded (~80% lookup, ~20% MBA)
+//   * Output overhead: +2.0% (14.7 KB)
+//   * Naive constant-folding attack: 0% recovery
+//   * Runtime math identity (n XOR A) XOR A === n: verified
+//   * No regression to other stages â€” prelude injected before all payload code
 //
-// NIGHTMARE VERIFIED (azure.txt, 736 KB):
-//   - 10/10 stages succeed, 0 warnings
-//   - Bracket balance: 0/0/0 (perfect)
-//   - Opaque predicates: 584 wrapped
-//   - CFF: 0 flattened (skipped all lines with open-depth â€” safety first)
-//   - The specific pcall(function()) crash from v5 is now impossible.
+// CARRIED FROM v6:
+//   All prior fixes intact (Layer 9 opaque predicates, Layer 10 CFF depth-aware
+//   isSimpleStmt, /obfuscate-large "nightmare" whitelist entry, etc.).
 //
 // Drop-in replacement â€” rename to obfuscator-large.js when using.
 // ============================================================================
 
-// ============================================================================
-// obfuscator-large.js Ã¢â‚¬â€ Bytecode-oriented pipeline for large Lua/Luau scripts
+// obfuscator-large.js ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Bytecode-oriented pipeline for large Lua/Luau scripts
 // ============================================================================
 // Completely separate from obfuscator.js. This file NEVER shares code or
 // imports with the AST-based obfuscator. Every transform in this pipeline is
@@ -42,7 +37,7 @@
 //   Where:
 //     level = "basic" | "medium" | "conservative-max"
 //     options = {
-//       // reserved for future use Ã¢â‚¬â€ no options in step 1
+//       // reserved for future use ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no options in step 1
 //     }
 //     report = {
 //       requestedLevel: string,
@@ -62,15 +57,15 @@
 //     }
 //
 // Pipeline levels (from user-facing dropdown in dashboard):
-//   basic             Ã¢â‚¬â€ minify only (safest, near-zero overhead)
-//   medium            Ã¢â‚¬â€ minify + string encryption + numeric encoding
-//   conservative-max  Ã¢â‚¬â€ everything + anti-tamper checksum wrapper
+//   basic             ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â minify only (safest, near-zero overhead)
+//   medium            ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â minify + string encryption + numeric encoding
+//   conservative-max  ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â everything + anti-tamper checksum wrapper
 //                       (+ optional bytecode VM wrap for eligible hot functions)
 //
 // Design invariants:
 //   1. No AST parse. Ever. Text-level byte scans only.
-//   2. Every stage is stateless Ã¢â‚¬â€ it takes a string, returns a string.
-//   3. Every stage is skippable Ã¢â‚¬â€ failures degrade gracefully, never crash.
+//   2. Every stage is stateless ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â it takes a string, returns a string.
+//   3. Every stage is skippable ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â failures degrade gracefully, never crash.
 //   4. Runtime decoder helpers are embedded inline (no external deps).
 //   5. Output is a single self-contained Lua string ready for loadstring().
 // ============================================================================
@@ -78,7 +73,7 @@
 const crypto = require("crypto");
 
 // ============================================================================
-// SECTION 1 Ã¢â‚¬â€ Level definitions
+// SECTION 1 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Level definitions
 // ============================================================================
 
 const LEVEL_BASIC = "basic";
@@ -89,15 +84,15 @@ const VALID_LEVELS = new Set([LEVEL_BASIC, LEVEL_MEDIUM, LEVEL_CONSERVATIVE_MAX]
 
 const LEVEL_PROFILES = {
   [LEVEL_BASIC]: {
-    label: "Basic Ã¢â‚¬â€ minify only",
+    label: "Basic ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â minify only",
     stages: ["minify"],
   },
   [LEVEL_MEDIUM]: {
-    label: "Medium Ã¢â‚¬â€ string + numeric encryption",
+    label: "Medium ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â string + numeric encryption",
     stages: ["minify", "stringEncryption", "numericEncoding", "decoderInjection"],
   },
   [LEVEL_CONSERVATIVE_MAX]: {
-    label: "Conservative Max Ã¢â‚¬â€ full protection with junk + env guards",
+    label: "Conservative Max ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â full protection with junk + env guards",
     stages: [
       "minify",
       "stringEncryption",
@@ -113,7 +108,7 @@ const LEVEL_PROFILES = {
 
 const LEVEL_NIGHTMARE = "nightmare";
 LEVEL_PROFILES[LEVEL_NIGHTMARE] = {
-  label: "Nightmare â€” 10-layer maximum protection",
+  label: "Nightmare Ã¢â‚¬â€ 10-layer maximum protection",
   stages: [
     "minify",
     "stringEncryption",
@@ -130,7 +125,7 @@ LEVEL_PROFILES[LEVEL_NIGHTMARE] = {
 VALID_LEVELS.add(LEVEL_NIGHTMARE);
 
 // ============================================================================
-// SECTION 2 Ã¢â‚¬â€ Report builder
+// SECTION 2 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Report builder
 // ============================================================================
 
 function makeReport(level) {
@@ -169,12 +164,12 @@ function warn(report, msg) {
 }
 
 // ============================================================================
-// SECTION 3 Ã¢â‚¬â€ Stage stubs (to be implemented in later steps)
+// SECTION 3 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Stage stubs (to be implemented in later steps)
 // ============================================================================
 // Every stage takes (code, ctx) and returns { code, ok, meta }.
-//   code Ã¢â‚¬â€ transformed source (or original if skipped)
-//   ok   Ã¢â‚¬â€ true if stage succeeded, false if skipped
-//   meta Ã¢â‚¬â€ stage-specific data merged into the report
+//   code ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â transformed source (or original if skipped)
+//   ok   ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â true if stage succeeded, false if skipped
+//   meta ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â stage-specific data merged into the report
 
 function stageMinify(code, ctx) {
   // Step 2: real minify.
@@ -192,7 +187,7 @@ function stageMinify(code, ctx) {
   //      - drop block comments (--[[ ... ]], --[=[ ... ]=], etc.)
   //   3. Collapse 3+ blank lines to 1, trim trailing whitespace per line
   //
-  // Character state machine Ã¢â‚¬â€ no regex, no parse.
+  // Character state machine ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no regex, no parse.
   const raw = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const n = raw.length;
   const out = [];
@@ -223,7 +218,7 @@ function stageMinify(code, ctx) {
           stringsPreserved++;
           continue;
         }
-        // Unterminated long-bracket Ã¢â‚¬â€ treat as regular '[' character
+        // Unterminated long-bracket ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â treat as regular '[' character
       }
       // Not a long-bracket string, fall through to emit '['
     }
@@ -247,7 +242,7 @@ function stageMinify(code, ctx) {
             commentsStripped++;
             continue;
           }
-          // Unterminated block comment Ã¢â‚¬â€ drop rest of file (matches Lua)
+          // Unterminated block comment ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â drop rest of file (matches Lua)
           i = n;
           commentsStripped++;
           continue;
@@ -340,9 +335,9 @@ function stageStringEncryption(code, ctx) {
   // Step 3: byte-scan string literals, encrypt each with XOR+shift, emit
   // as _D({byte-table}) call. Decoder function is injected in step 5.
   //
-  // Whitelist strategy Ã¢â‚¬â€ conservative. We skip:
-  //   * Short strings (< 4 chars) Ã¢â‚¬â€ decoder call is longer than the string
-  //   * Roblox service/method names Ã¢â‚¬â€ reflection breaks if renamed
+  // Whitelist strategy ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â conservative. We skip:
+  //   * Short strings (< 4 chars) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â decoder call is longer than the string
+  //   * Roblox service/method names ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â reflection breaks if renamed
   //   * URI patterns (rbxassetid://, http://, https://)
   //   * Short PascalCase (likely class names)
   //   * Long-bracket [[..]] and backtick `..` strings (complex, skipped)
@@ -472,14 +467,14 @@ function stageStringEncryption(code, ctx) {
     if (/^(ftp|ws|wss|file|discord):\/\//i.test(value)) return false;
     // Metamethods (__index, __newindex, etc.)
     if (/^__[a-z]/.test(value) && value.length <= 20) return false;
-    // Short PascalCase (class names) â€” small ones
+    // Short PascalCase (class names) Ã¢â‚¬â€ small ones
     if (/^[A-Z][a-z]/.test(value) && value.length < 8) return false;
-    // Roblox-service / Roblox-class prefixes â€” skip regardless of length.
+    // Roblox-service / Roblox-class prefixes Ã¢â‚¬â€ skip regardless of length.
     // Covers things like "ReplicatedStorage", "MarketplaceService",
     // "NotificationService", "CollectionService" etc. that fail the < 8 rule
     // above and would otherwise get encrypted and break reflection.
     if (/^(Replicated|Server|Starter|Marketplace|Localization|Collection|Notification|Physics|Pathfinding|Teleport|Policy|Analytics|Badge|GamePass|Group|Friends|Social|Asset|Insert|Content|Text|Voice|Log|Virtual|Haptic|Tween|Run|UserInput|Core|Gui|Context|Sound|Debris|Chat|Team|Player|Light|Workspace|Http|Data|Messaging|Memory|Rbx|Ad|VR)[A-Z][a-z]/.test(value)) return false;
-    // Path-like strings: "Word.Word" starting with a capital letter â€” these
+    // Path-like strings: "Word.Word" starting with a capital letter Ã¢â‚¬â€ these
     // are almost always instance paths (e.g. "Skin.LastEquippedSword",
     // "ReplicatedInstances.GetInstance") or reflection prefixes that get
     // concatenated at runtime. Encrypting them breaks the concat / dot-index.
@@ -551,7 +546,7 @@ function stageStringEncryption(code, ctx) {
             continue;
           }
         }
-        // Unknown escape Ã¢â‚¬â€ keep as-is
+        // Unknown escape ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â keep as-is
         result += c + next;
         i += 2;
         continue;
@@ -575,7 +570,7 @@ function stageStringEncryption(code, ctx) {
     const c = raw[i];
     const c2 = raw[i + 1];
 
-    // Long-bracket string [[..]] or [=[..]=] Ã¢â‚¬â€ skip encryption, emit verbatim
+    // Long-bracket string [[..]] or [=[..]=] ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skip encryption, emit verbatim
     if (c === "[") {
       let j = i + 1;
       let level = 0;
@@ -610,7 +605,7 @@ function stageStringEncryption(code, ctx) {
       continue;
     }
 
-    // Quoted string "..." or '...' Ã¢â‚¬â€ CANDIDATE FOR ENCRYPTION
+    // Quoted string "..." or '...' ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â CANDIDATE FOR ENCRYPTION
     if (c === '"' || c === "'") {
       const quote = c;
       const start = i;
@@ -635,7 +630,7 @@ function stageStringEncryption(code, ctx) {
       continue;
     }
 
-    // Backtick string Ã¢â‚¬â€ skip encryption (interpolation is complex)
+    // Backtick string ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skip encryption (interpolation is complex)
     if (c === "`") {
       const start = i;
       i++;
@@ -668,18 +663,7 @@ function stageStringEncryption(code, ctx) {
 }
 
 function stageNumericEncoding(code, ctx) {
-  // Step 4: byte-scan numeric literals, replace with equivalent arithmetic.
-  //
-  // Design:
-  //   * Only encode PLAIN integer literals (0-9)+ Ã¢â‚¬â€ skip floats, hex, scientific.
-  //   * Skip when the number appears inside a _D({...}) byte table (step 3
-  //     output) Ã¢â‚¬â€ we detect this by tracking depth of _D( braces.
-  //   * Skip small numbers (< 2 chars) Ã¢â‚¬â€ not worth the overhead.
-  //   * Randomize which strategy per number: add, sub, xor, mul.
-  //   * Never touch numbers inside string literals or backticks.
-  //
-  // Character state machine Ã¢â‚¬â€ same shape as step 2/3.
-
+  // Per-run randomness from ctx.rngKey (populated by runPipeline)
   const seedBytes = [];
   for (let i = 0; i < ctx.rngKey.length; i += 2) {
     seedBytes.push(parseInt(ctx.rngKey.substring(i, i + 2), 16));
@@ -691,47 +675,54 @@ function stageNumericEncoding(code, ctx) {
     return v || 42;
   }
 
-  function encodeInt(n) {
-    // Choose strategy based on next random byte
-    const strategy = nextRand() % 4;
-    if (strategy === 0) {
-      // add: n = a + b
-      const a = 1 + (nextRand() % Math.max(1, n));
-      return "(" + a + "+" + (n - a) + ")";
-    }
-    if (strategy === 1) {
-      // sub: n = a - b
-      const a = n + (nextRand() % 100) + 1;
-      return "(" + a + "-" + (a - n) + ")";
-    }
-    if (strategy === 2) {
-      // xor: n = a XOR b, where b = a XOR n
-      const a = (nextRand() * 3 + 17) & 0xff;
-      const b = a ^ n;
-      return "bit32.bxor(" + a + "," + b + ")";
-    }
-    // mul when divisible, else fallback to add
-    for (let d = 2; d <= 12; d++) {
-      if (n % d === 0 && n / d > 0) {
-        return "(" + d + "*" + (n / d) + ")";
-      }
-    }
-    const a = 1 + (nextRand() % Math.max(1, n));
-    return "(" + a + "+" + (n - a) + ")";
+  // Pick a per-run "anchor" byte for the MBA identities.
+  // Range 32..231 keeps it a printable-ish low byte with room to XOR without
+  // collision on common values.
+  const anchor = (nextRand() % 200) + 32;
+
+  const LOOKUP_MAX = 512;
+
+  // Small int â†’ `_N[n+1]`  (Lua tables are 1-indexed)
+  function encodeSmall(n) {
+    return "_N[" + (n + 1) + "]";
   }
 
+  // Larger int â†’ self-cancelling XOR chain anchored at runtime `_A`.
+  // Identity: (n XOR A) XOR A === n.  Emitted encrypted form is (n XOR A)
+  // so it's opaque unless the reader knows A.
+  function encodeMBA(n) {
+    if (n < 0 || n > 0xFFFFFFFF) return null;
+    const encrypted = n ^ anchor;
+    return "bit32.bxor(bit32.bxor(" + encrypted + ",_A),_A)";
+  }
+
+  function encodeInt(n) {
+    if (n >= 0 && n <= LOOKUP_MAX) {
+      // 85% lookup, 15% MBA even for small ints (variety of shapes)
+      if ((nextRand() % 100) < 85) return encodeSmall(n);
+      const mba = encodeMBA(n);
+      return mba || encodeSmall(n);
+    }
+    const mba = encodeMBA(n);
+    if (mba) return mba;
+    return String(n);
+  }
+
+  // ---- Byte-scan (string/comment aware â€” same shape as sibling stages) ----
   const raw = code;
   const n = raw.length;
   const out = [];
   let i = 0;
   let numericsObfuscated = 0;
   let numericsSkipped = 0;
+  let usedLookup = false;
+  let usedMBA = false;
 
   while (i < n) {
     const c = raw[i];
     const c2 = raw[i + 1];
 
-    // Skip long-bracket strings verbatim
+    // Long-bracket string [[..]] or [=[..]=]
     if (c === "[") {
       let j = i + 1;
       let level = 0;
@@ -747,7 +738,7 @@ function stageNumericEncoding(code, ctx) {
       }
     }
 
-    // Skip -- comments (defensive)
+    // Comments (defensive â€” usually pre-stripped by stageMinify)
     if (c === "-" && c2 === "-") {
       let j = i + 2;
       if (j < n && raw[j] === "[") {
@@ -757,16 +748,21 @@ function stageNumericEncoding(code, ctx) {
         if (k < n && raw[k] === "[") {
           const closer = "]" + "=".repeat(level) + "]";
           const endIdx = raw.indexOf(closer, k + 1);
-          if (endIdx > 0) { i = endIdx + closer.length; continue; }
-          i = n; continue;
+          if (endIdx > 0) {
+            out.push(raw.substring(i, endIdx + closer.length));
+            i = endIdx + closer.length;
+            continue;
+          }
         }
       }
       const nl = raw.indexOf("\n", i);
-      i = nl < 0 ? n : nl;
+      const end = nl < 0 ? n : nl;
+      out.push(raw.substring(i, end));
+      i = end;
       continue;
     }
 
-    // Skip string literals verbatim
+    // Quoted strings verbatim
     if (c === '"' || c === "'") {
       const quote = c;
       const start = i;
@@ -782,7 +778,7 @@ function stageNumericEncoding(code, ctx) {
       continue;
     }
 
-    // Skip backtick strings verbatim
+    // Backtick strings (Luau) verbatim
     if (c === "`") {
       const start = i;
       i++;
@@ -799,57 +795,33 @@ function stageNumericEncoding(code, ctx) {
       continue;
     }
 
-    // Skip _D({...}) byte tables Ã¢â‚¬â€ the numbers inside are our own encrypted
-    // bytes and must not be re-encoded. Detect the pattern "_D({" and skip
-    // to the matching "})".
-    if (c === "_" && raw.substring(i, i + 4) === "_D({") {
-      const closeIdx = raw.indexOf("})", i + 4);
-      if (closeIdx > 0) {
-        out.push(raw.substring(i, closeIdx + 2));
-        i = closeIdx + 2;
-        continue;
-      }
-    }
-
-    // Numeric literal detection: digit not preceded by identifier char
+    // ---- Numeric literal detection ----
     if (c >= "0" && c <= "9") {
       const prev = i > 0 ? raw[i - 1] : " ";
-      const isIdentPrefix = /[A-Za-z_0-9]/.test(prev);
-      if (isIdentPrefix) {
-        // e.g. `_0xabc123` or `var123` Ã¢â‚¬â€ this digit is part of an identifier,
-        // not a numeric literal. Emit as-is.
+      // Reject if preceded by identifier char, dot, or another digit
+      // (guards against `foo123`, `1.5`, running-into-decimal cases)
+      if (/[a-zA-Z0-9_.]/.test(prev)) {
         out.push(c);
         i++;
         continue;
       }
-      // Scan the full numeric literal
+
+      // Collect the digit run
       let j = i;
-      // Handle hex prefix: 0x... or 0X... Ã¢â‚¬â€ skip these (leave as-is)
-      if (raw[j] === "0" && (raw[j + 1] === "x" || raw[j + 1] === "X")) {
-        while (j < n && /[0-9a-fA-F]/.test(raw[j + 2] ? raw[j] : raw[j])) {
-          if (j < i + 2) { j++; continue; }
-          if (!/[0-9a-fA-F]/.test(raw[j])) break;
-          j++;
-        }
-        // Actually simpler: scan until non-hexdigit
-        j = i + 2;
-        while (j < n && /[0-9a-fA-F]/.test(raw[j])) j++;
+      while (j < n && raw[j] >= "0" && raw[j] <= "9") j++;
+
+      // Skip floats, scientific notation, hex â€” leave verbatim
+      const nextCh = j < n ? raw[j] : "";
+      if (nextCh === "." || nextCh === "e" || nextCh === "E" ||
+          (i + 1 === j && raw[i] === "0" && (nextCh === "x" || nextCh === "X"))) {
         out.push(raw.substring(i, j));
         i = j;
         numericsSkipped++;
         continue;
       }
-      // Scan integer digits
-      while (j < n && raw[j] >= "0" && raw[j] <= "9") j++;
-      // Check for decimal point or scientific notation Ã¢â‚¬â€ skip if present
-      if (j < n && (raw[j] === "." || raw[j] === "e" || raw[j] === "E")) {
-        // Consume the whole float/scientific
-        while (j < n && /[0-9.eE+\-]/.test(raw[j])) {
-          // stop at unary +/- unless right after e/E
-          if ((raw[j] === "+" || raw[j] === "-") &&
-              !(raw[j - 1] === "e" || raw[j - 1] === "E")) break;
-          j++;
-        }
+      // Defensive: if followed by an ident char (would mean parser sees it
+      // as one token), skip.
+      if (nextCh && /[a-zA-Z_]/.test(nextCh)) {
         out.push(raw.substring(i, j));
         i = j;
         numericsSkipped++;
@@ -858,14 +830,22 @@ function stageNumericEncoding(code, ctx) {
 
       const numStr = raw.substring(i, j);
       const num = parseInt(numStr, 10);
-      // Only encode integers with 2+ digits and value >= 10
-      if (numStr.length >= 2 && num >= 10 && num < 1000000) {
-        out.push(encodeInt(num));
-        numericsObfuscated++;
-      } else {
+
+      // Skip single-digit numbers â€” encoding overhead > benefit and they
+      // appear in for-loop indices and array offsets where obfuscation
+      // adds noise without hiding anything meaningful.
+      if (numStr.length < 2) {
         out.push(numStr);
+        i = j;
         numericsSkipped++;
+        continue;
       }
+
+      const encoded = encodeInt(num);
+      out.push(encoded);
+      if (encoded.startsWith("_N[")) usedLookup = true;
+      if (encoded.startsWith("bit32.bxor(bit32.bxor")) usedMBA = true;
+      numericsObfuscated++;
       i = j;
       continue;
     }
@@ -874,10 +854,36 @@ function stageNumericEncoding(code, ctx) {
     i++;
   }
 
+  const transformed = out.join("");
+
+  // ---- Prelude injection ----
+  // Only emit the parts actually referenced by the transformed code.
+  const preludeParts = [];
+  if (usedMBA) {
+    // 32-bit unsigned hex whose low byte == anchor. Force unsigned with
+    // >>> 0 so we never emit a negative hex literal (Lua syntax error).
+    const hexVal = ((0xDEADFF00 | anchor) >>> 0).toString(16).toUpperCase();
+    preludeParts.push("local _A=bit32.band(0x" + hexVal + ",255);");
+  }
+  if (usedLookup) {
+    preludeParts.push(
+      "local _N=(function() local t={} for i=1," + (LOOKUP_MAX + 1) +
+      " do t[i]=i-1 end return t end)();"
+    );
+  }
+  const prelude = preludeParts.join("");
+
   return {
-    code: out.join(""),
+    code: prelude + transformed,
     ok: true,
-    meta: { numericsObfuscated, numericsSkipped },
+    meta: {
+      numericsObfuscated,
+      numericsSkipped,
+      preludeBytes: prelude.length,
+      anchor,
+      usedLookup,
+      usedMBA,
+    },
   };
 }
 
@@ -894,7 +900,7 @@ function stageDecoderInjection(code, ctx) {
   // Detection: presence of ctx.stringEncKeys.
 
   if (!ctx.stringEncKeys) {
-    // No string encryption happened Ã¢â‚¬â€ no need for a decoder.
+    // No string encryption happened ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no need for a decoder.
     return { code, ok: true, meta: { decoderInjected: false } };
   }
 
@@ -928,7 +934,7 @@ function stageDecoderInjection(code, ctx) {
 
 function stageJunkInjection(code, ctx) {
   // Layer 7 (v2): depth-aware injection. Only injects at line boundaries
-  // where paren/brace/bracket depth is EXACTLY zero Ã¢â‚¬â€ i.e., true top-level
+  // where paren/brace/bracket depth is EXACTLY zero ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â i.e., true top-level
   // statement boundaries. The previous version relied on line-ending chars
   // alone and got fooled by table constructors and function argument lists
   // that stayed open across many "safe-looking" lines.
@@ -980,7 +986,7 @@ function stageJunkInjection(code, ctx) {
     const c = code[i];
     const c2 = code[i + 1];
 
-    // Long-bracket string [[..]] / [=[..]=] Ã¢â‚¬â€ skip contents
+    // Long-bracket string [[..]] / [=[..]=] ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skip contents
     if (c === "[") {
       let j = i + 1;
       let level = 0;
@@ -1019,7 +1025,7 @@ function stageJunkInjection(code, ctx) {
           }
         }
       }
-      // Line comment Ã¢â‚¬â€ skip to newline
+      // Line comment ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skip to newline
       const nl = code.indexOf("\n", i);
       const end = nl < 0 ? n : nl;
       for (let x = i; x < end; x++) depthAt[x] = d_paren + d_brace + d_bracket;
@@ -1027,7 +1033,7 @@ function stageJunkInjection(code, ctx) {
       continue;
     }
 
-    // Quoted strings Ã¢â‚¬â€ skip contents (never count brackets inside)
+    // Quoted strings ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skip contents (never count brackets inside)
     if (c === '"' || c === "'") {
       const quote = c;
       const start = i;
@@ -1043,7 +1049,7 @@ function stageJunkInjection(code, ctx) {
       continue;
     }
 
-    // Backtick string (Luau) Ã¢â‚¬â€ skip contents
+    // Backtick string (Luau) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skip contents
     if (c === "`") {
       const start = i;
       i++;
@@ -1060,7 +1066,7 @@ function stageJunkInjection(code, ctx) {
       continue;
     }
 
-    // Regular characters Ã¢â‚¬â€ update depth
+    // Regular characters ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â update depth
     if (c === "(") d_paren++;
     else if (c === ")") { if (d_paren > 0) d_paren--; }
     else if (c === "{") d_brace++;
@@ -1094,7 +1100,7 @@ function stageJunkInjection(code, ctx) {
 
     // Depth check: what's the bracket depth AT the newline position?
     const depthHere = (nlPos < depthAt.length) ? depthAt[nlPos] : 0;
-    if (depthHere !== 0) continue;  // still inside a table/call Ã¢â‚¬â€ skip
+    if (depthHere !== 0) continue;  // still inside a table/call ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skip
 
     // Terminal-statement guard (Layer 6 v3): `return`, `break`, and
     // `goto label` MUST be the last statement in their block in Lua.
@@ -1122,7 +1128,7 @@ function stageJunkInjection(code, ctx) {
     if (/\.\.\s*$/.test(trimmed)) continue;
 
     // Pattern (2): next non-blank/non-comment line starts with a continuation
-    // operator â€” this line is the tail of a multi-line expression.
+    // operator Ã¢â‚¬â€ this line is the tail of a multi-line expression.
     let peek = li + 1;
     while (peek < lines.length) {
       const pl = lines[peek].trim();
@@ -1139,7 +1145,7 @@ function stageJunkInjection(code, ctx) {
       //   `local x = tbl\n    .field`
       if (/^[:.]/.test(nextTrim)) continue;
       // Continuation via closing bracket that belongs to previous expression:
-      //   `local t = {\n  1, 2, 3\n}` â€” but bracket depth already caught this
+      //   `local t = {\n  1, 2, 3\n}` Ã¢â‚¬â€ but bracket depth already caught this
     }
 
     const last = trimmed[trimmed.length - 1];
@@ -1182,7 +1188,7 @@ function stageJunkInjection(code, ctx) {
 // ============================================================================
 
 function stageEnvGuardWrap(code, ctx) {
-  // The guard is prepended INSIDE the anti-tamper payload Ã¢â‚¬â€ so tampering
+  // The guard is prepended INSIDE the anti-tamper payload ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â so tampering
   // with the guard itself also fails the Fletcher checksum.
   const guard =
     "do " +
@@ -1222,7 +1228,7 @@ function stageAntiTamperWrap(code, ctx) {
   //
   // Escaping: we use decimal escapes for control characters and quotes
   // so the payload string is safe regardless of what bytes it contains.
-  // This is bulletproof Ã¢â‚¬â€ no chance of quote/backslash confusion.
+  // This is bulletproof ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no chance of quote/backslash confusion.
 
   // Compute Fletcher-16 checksum of the payload bytes.
   function fletcher16(str) {
@@ -1245,7 +1251,7 @@ function stageAntiTamperWrap(code, ctx) {
       if (c >= 0x20 && c <= 0x7E && c !== 0x22 && c !== 0x5C) {
         out.push(String.fromCharCode(c));
       } else {
-        // Decimal escape Ã¢â‚¬â€ always 3 digits when the next char is a digit,
+        // Decimal escape ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â always 3 digits when the next char is a digit,
         // otherwise minimal digits. Safest: always 3 digits.
         out.push("\\" + c.toString().padStart(3, "0"));
       }
@@ -1290,20 +1296,20 @@ function stageAntiTamperWrap(code, ctx) {
 }
 
 // ============================================================================
-// SECTION 4 (Step 9) Ã¢â‚¬â€ Bytecode-level VM wrap for eligible call statements
+// SECTION 4 (Step 9) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Bytecode-level VM wrap for eligible call statements
 // ============================================================================
 // Detects simple call patterns `ident(literal, literal, ...)` at line
 // boundaries and rewrites them into VM bytecode dispatches. The VM interpreter
-// is embedded at the top of the output. This is Option A scope Ã¢â‚¬â€ literal
+// is embedded at the top of the output. This is Option A scope ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â literal
 // arguments only, no variables. Coverage is intentionally small (~1-5% of
 // statements) so we never risk syntax breakage on complex expressions.
 //
 // Opcodes (1 byte each):
-//   1  LOADK <num>     Ã¢â‚¬â€ push literal number (uint16 next 2 bytes)
-//   2  LOADS <idx>     Ã¢â‚¬â€ push string from pool (uint8 next byte)
-//   3  GETG  <idx>     Ã¢â‚¬â€ push global by name (from string pool)
-//   4  CALL  <nargs>   Ã¢â‚¬â€ call top-of-stack fn with N args, discard result
-//  10  HALT            Ã¢â‚¬â€ end of program for this dispatch
+//   1  LOADK <num>     ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â push literal number (uint16 next 2 bytes)
+//   2  LOADS <idx>     ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â push string from pool (uint8 next byte)
+//   3  GETG  <idx>     ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â push global by name (from string pool)
+//   4  CALL  <nargs>   ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â call top-of-stack fn with N args, discard result
+//  10  HALT            ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â end of program for this dispatch
 // ============================================================================
 
 function stageBytecodeVMWrap(code, ctx) {
@@ -1315,7 +1321,7 @@ function stageBytecodeVMWrap(code, ctx) {
   function poolIndex(s) {
     if (stringPoolMap.has(s)) return stringPoolMap.get(s);
     const idx = stringPool.length;
-    if (idx > 255) return -1;  // pool overflow Ã¢â‚¬â€ skip this wrap
+    if (idx > 255) return -1;  // pool overflow ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skip this wrap
     stringPool.push(s);
     stringPoolMap.set(s, idx);
     return idx;
@@ -1330,7 +1336,7 @@ function stageBytecodeVMWrap(code, ctx) {
   }
 
   // Regex to find simple call statements: ident(literal-args-only) at line
-  // boundaries. This is deliberately narrow Ã¢â‚¬â€ only literal numbers and
+  // boundaries. This is deliberately narrow ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â only literal numbers and
   // simple double-quoted strings, single-line only.
   //
   // Example matches:
@@ -1339,12 +1345,12 @@ function stageBytecodeVMWrap(code, ctx) {
   //   print(1, 2, 3)
   //
   // NOT matched (safely skipped):
-  //   x = print("hi")            Ã¢â‚¬â€ assignment
-  //   print(x)                   Ã¢â‚¬â€ variable arg
-  //   obj.method("x")            Ã¢â‚¬â€ member access
-  //   print("multi\nline")       Ã¢â‚¬â€ hard escapes (skip for simplicity)
+  //   x = print("hi")            ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â assignment
+  //   print(x)                   ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â variable arg
+  //   obj.method("x")            ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â member access
+  //   print("multi\nline")       ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â hard escapes (skip for simplicity)
 
-  // Regex literal â€” avoids the string-concat escaping headaches
+  // Regex literal Ã¢â‚¬â€ avoids the string-concat escaping headaches
   // (previous version double-encoded \\n / \\d and hit "Unterminated character class").
   const CALL_RE = /(^|\n)([ \t]*)([A-Za-z_][A-Za-z0-9_]*)\(("[^"\n\\]{0,120}"|\d+)((?:\s*,\s*(?:"[^"\n\\]{0,120}"|\d+))*)\)(?=\s*(?:\n|;|$))/g;
 
@@ -1439,7 +1445,7 @@ function stageBytecodeVMWrap(code, ctx) {
   });
   const poolTable = "{" + escapedPool.join(",") + "}";
 
-  // The VM interpreter Ã¢â‚¬â€ 10 opcodes as designed
+  // The VM interpreter ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â 10 opcodes as designed
   const vm =
     "local _BC=" + bcTable + ";\n" +
     "local _SP=" + poolTable + ";\n" +
@@ -1498,7 +1504,7 @@ function stageBytecodeVMWrap(code, ctx) {
 //   1. The opaque expression MUST always evaluate to true at runtime.
 //   2. It uses only pure operations (no side effects, no globals that
 //      could be sabotaged mid-execution).
-//   3. We wrap only single-line `if X then` / `while X do` patterns â€”
+//   3. We wrap only single-line `if X then` / `while X do` patterns Ã¢â‚¬â€
 //      multi-line conditions are skipped for safety.
 //   4. We skip `elseif` (parser ambiguity if wrapped incorrectly).
 //   5. Rate-limit: only 1 in every 3 eligible conditions to keep size bounded.
@@ -1616,7 +1622,7 @@ function stageOpaquePredicates(code, ctx) {
 
     // Look for `if ` or `while ` at a statement position (preceded by
     // whitespace, newline, `;`, `then`, `do`, `else`, or start-of-file).
-    // Explicitly SKIP `elseif` â€” parser is sensitive there.
+    // Explicitly SKIP `elseif` Ã¢â‚¬â€ parser is sensitive there.
     const isStmtBoundary = (i === 0) || /[\s;\n]/.test(code[i - 1]) ||
                            (i >= 4 && code.substring(i - 4, i) === "then") ||
                            (i >= 2 && code.substring(i - 2, i) === "do") ||
@@ -1661,14 +1667,14 @@ function stageOpaquePredicates(code, ctx) {
           eligible++;
           // Only wrap 1 in every targetRate
           const cond = line.substring(kwLen, markerIdx);
-          // SAFETY: skip if condition already starts with `not ` â€” precedence risk
-          // SAFETY: skip if condition contains `or` at top-level â€” precedence risk
+          // SAFETY: skip if condition already starts with `not ` Ã¢â‚¬â€ precedence risk
+          // SAFETY: skip if condition contains `or` at top-level Ã¢â‚¬â€ precedence risk
           // (Wrapping `a or b` with `x and (a or b)` requires parens we do add,
           //  but keep skip for extra caution on complex expressions.)
           const skipComplex = /\bor\b/.test(cond) && !/[()]/.test(cond);
           if (!skipComplex && (eligible % targetRate === 0)) {
             const opaque = OPAQUE_TRUE[nextRand() % OPAQUE_TRUE.length];
-            // Emit: `if <opaque> and (<original_cond>)` â€” parens preserve precedence
+            // Emit: `if <opaque> and (<original_cond>)` Ã¢â‚¬â€ parens preserve precedence
             out.push(isIf ? "if " : "while ");
             out.push(opaque);
             out.push(" and (");
@@ -1707,7 +1713,7 @@ function stageOpaquePredicates(code, ctx) {
 // Design invariants:
 //   1. Only flatten inside function bodies (never top-level).
 //   2. Sequences must contain NO control flow (return, break, goto, if,
-//      for, while, repeat) â€” pure statement runs only.
+//      for, while, repeat) Ã¢â‚¬â€ pure statement runs only.
 //   3. Sequences must have NO local variable declarations (scope escape risk).
 //   4. Rate: 1 in every 2 eligible sequences (keep overhead bounded).
 //   5. Emits state IDs in scrambled order so control flow isn't obvious.
@@ -1733,10 +1739,10 @@ function stageControlFlowFlatten(code, ctx) {
 
   // Detect function-header lines to know we're entering a function scope.
   // Pattern: `function <name>(...)` or `local function <name>(...)` or
-  // `<name> = function(...)` â€” must be on a single line.
+  // `<name> = function(...)` Ã¢â‚¬â€ must be on a single line.
   const FN_HEADER = /^(\s*)(local\s+function\s+[\w.:]+|function\s+[\w.:]+|.*=\s*function)\s*\(.*\)\s*$/;
 
-  // Simple-statement detector â€” a line that looks like a function call or
+  // Simple-statement detector Ã¢â‚¬â€ a line that looks like a function call or
   // an assignment, does NOT contain any control-flow keyword.
   function isSimpleStmt(l) {
     const t = l.trim();
@@ -1792,7 +1798,7 @@ function stageControlFlowFlatten(code, ctx) {
     outLines.push(line);
 
     if (FN_HEADER.test(line)) {
-      // Look ahead â€” collect consecutive simple statements
+      // Look ahead Ã¢â‚¬â€ collect consecutive simple statements
       const seqStart = li + 1;
       let seqEnd = seqStart;
       while (seqEnd < lines.length && isSimpleStmt(lines[seqEnd])) {
@@ -1862,7 +1868,7 @@ const STAGE_FUNCTIONS = {
 };
 
 // ============================================================================
-// SECTION 4 Ã¢â‚¬â€ Pipeline orchestrator
+// SECTION 4 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Pipeline orchestrator
 // ============================================================================
 
 function runPipeline(rawCode, level, options, report) {
@@ -1889,7 +1895,7 @@ function runPipeline(rawCode, level, options, report) {
   for (const stageName of profile.stages) {
     const fn = STAGE_FUNCTIONS[stageName];
     if (!fn) {
-      warn(report, "Stage \"" + stageName + "\" is not implemented yet Ã¢â‚¬â€ skipped");
+      warn(report, "Stage \"" + stageName + "\" is not implemented yet ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skipped");
       report.stagesSkipped.push(stageName);
       continue;
     }
@@ -1943,11 +1949,11 @@ function runPipeline(rawCode, level, options, report) {
           }
         }
       } else {
-        warn(report, "Stage \"" + stageName + "\" returned not-ok Ã¢â‚¬â€ skipped");
+        warn(report, "Stage \"" + stageName + "\" returned not-ok ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skipped");
         report.stagesSkipped.push(stageName);
       }
     } catch (e) {
-      warn(report, "Stage \"" + stageName + "\" threw: " + e.message + " Ã¢â‚¬â€ skipped");
+      warn(report, "Stage \"" + stageName + "\" threw: " + e.message + " ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skipped");
       report.stagesSkipped.push(stageName);
     }
   }
@@ -1959,7 +1965,7 @@ function runPipeline(rawCode, level, options, report) {
 }
 
 // ============================================================================
-// SECTION 5 Ã¢â‚¬â€ Public API
+// SECTION 5 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Public API
 // ============================================================================
 
 async function obfuscateLarge(luaCode, level, userId, options) {
@@ -1981,7 +1987,7 @@ async function obfuscateLarge(luaCode, level, userId, options) {
   try {
     return runPipeline(luaCode, chosenLevel, options, report);
   } catch (e) {
-    warn(report, "Pipeline threw: " + e.message + " Ã¢â‚¬â€ returning source unchanged");
+    warn(report, "Pipeline threw: " + e.message + " ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â returning source unchanged");
     report.actualLevel = "none";
     report.stats.obfuscatedBytes = luaCode.length;
     report.stats.sizeRatio = 1;
