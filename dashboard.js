@@ -1345,6 +1345,7 @@ const LARGE_LAYER_DEFS = [
   { key: "decoderInjection",   label: "Decoder injection",   detect: (r) => !!r.stats.decoderInjected },
   { key: "bytecodeVMWrap",     label: "Bytecode VM wrap",    detect: (r) => (r.stats.vmCallsWrapped || 0) > 0 },
   { key: "junkInjection",      label: "Junk injection",      detect: (r) => (r.stats.junkStatementsInjected || 0) > 0 },
+  { key: "stringFragmentation", label: "String fragmentation", detect: (r) => (r.stats.fragmentedStrings || 0) > 0 },
   { key: "opaquePredicates",   label: "Opaque predicates",   detect: (r) => (r.stats.opaquePredicatesWrapped || 0) > 0 },
   { key: "controlFlowFlatten", label: "Control-flow flatten", detect: (r) => (r.stats.cfFlattenedSequences || 0) > 0 },
   { key: "envGuardWrap",       label: "Environment guard",   detect: (r) => !!r.stats.envGuardApplied },
@@ -1402,6 +1403,7 @@ function renderLargeReport(report, generatedCode) {
   setText("largeStatAntiTamper", s.antiTamperApplied ? "Active" : "Off");
   setText("largeStatOpaque",     (s.opaquePredicatesWrapped || 0).toLocaleString());
   setText("largeStatCFF",        (s.cfFlattenedSequences    || 0).toLocaleString());
+  setText("largeStatFragmented", (s.fragmentedStrings       || 0).toLocaleString());
 
   // Warnings
   const warnings = report.warnings || [];
