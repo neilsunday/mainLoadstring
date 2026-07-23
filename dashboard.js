@@ -37,7 +37,7 @@ const referenceUpload = document.getElementById("referenceUpload");
 const referenceUploadBtn = document.getElementById("referenceUploadBtn");
 const referenceClearBtn = document.getElementById("referenceClearBtn");
 const referenceFileNameEl = document.getElementById("referenceFileName");
-let referenceCode = "";  // in-memory only ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â not persisted
+let referenceCode = "";  // in-memory only ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â not persisted
 let referenceFileName = "";
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -486,7 +486,7 @@ function renderReport(report, generatedCode) {
   document.getElementById("statNumObf").textContent = s.numericConstsObfuscated != null ? s.numericConstsObfuscated : "-";
   document.getElementById("statVmStmt").textContent = s.vmCompiledStatements != null ? s.vmCompiledStatements : "0";
 
-  // Warnings ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â v2: with Copy all + Console toggle
+  // Warnings ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â v2: with Copy all + Console toggle
   const warningsWrap = document.getElementById("reportWarningsWrap");
   const warningsList = document.getElementById("reportWarningsList");
   const warningsCount = document.getElementById("reportWarningsCount");
@@ -530,12 +530,12 @@ function renderReport(report, generatedCode) {
     if (report.stagesSucceeded && report.stagesSucceeded.length > 0) {
       consoleLines.push("");
       consoleLines.push("=== STAGES SUCCEEDED ===");
-      for (const s of report.stagesSucceeded) consoleLines.push("  ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ " + s);
+      for (const s of report.stagesSucceeded) consoleLines.push("  ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ " + s);
     }
     if (report.stagesSkipped && report.stagesSkipped.length > 0) {
       consoleLines.push("");
       consoleLines.push("=== STAGES SKIPPED ===");
-      for (const s of report.stagesSkipped) consoleLines.push("  ÃƒÂ¢Ã…â€œÃ¢â‚¬â€ " + s);
+      for (const s of report.stagesSkipped) consoleLines.push("  ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â " + s);
     }
     // v25.30 forensic: wide snippets from failed stages
     if (report.stageDebug && report.stageDebug.length > 0) {
@@ -563,7 +563,7 @@ function renderReport(report, generatedCode) {
     const consoleText = consoleLines.join("\n");
     reportConsole.textContent = consoleText;
 
-    // Wire Copy all ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â copies raw warning list (what most users want)
+    // Wire Copy all ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â copies raw warning list (what most users want)
     if (copyWarningsBtn && !copyWarningsBtn._wired) {
       copyWarningsBtn._wired = true;
       copyWarningsBtn.addEventListener("click", async () => {
@@ -1040,7 +1040,7 @@ function hideMessage() { messageDiv.classList.add("hidden"); }
 
 
 // ============================================================================
-// LARGE SCRIPT SECTION Ã¢â‚¬â€ separate pipeline for 300KB+ scripts
+// LARGE SCRIPT SECTION ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â separate pipeline for 300KB+ scripts
 // ============================================================================
 // Isolated wiring. All DOM ids are prefixed with "large*" to avoid collisions
 // with the standard small-script pipeline above. Talks to /obfuscate-large,
@@ -1169,6 +1169,7 @@ async function obfuscateLarge(code, level) {
     originalSize: data.original_size,
     obfuscatedSize: data.obfuscated_size,
     profile: data.profile || null,   // e.g. "basic"|"medium"|"conservative-max"
+    report: data.report || null,     // full obfuscation report for renderLargeReport()
   };
 }
 
@@ -1226,7 +1227,7 @@ largeClosePreviewBtn?.addEventListener("click", () => {
   largePreviewCard?.classList.add("hidden");
 });
 
-// ---- Save button Ã¢â‚¬â€ mirrors the small-script pattern (code stored in the row, no Storage upload) ----
+// ---- Save button ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â mirrors the small-script pattern (code stored in the row, no Storage upload) ----
 largeSaveBtn?.addEventListener("click", async () => {
   const code = largeScriptCodeInput.value;
   const name = largeScriptNameInput.value.trim();
@@ -1248,7 +1249,7 @@ largeSaveBtn?.addEventListener("click", async () => {
     const result = await obfuscateLarge(code, level);
     const finalCode = result.code;
 
-    // Retry on ID collision (up to 5 attempts) Ã¢â‚¬â€ same pattern as small path
+    // Retry on ID collision (up to 5 attempts) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â same pattern as small path
     let scriptId = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       const id = generateId(8);
@@ -1312,7 +1313,7 @@ updateLargeUI();
 
 
 // ============================================================================
-// LARGE OBFUSCATION REPORT â€” renderer + button wiring
+// LARGE OBFUSCATION REPORT Ã¢â‚¬â€ renderer + button wiring
 // ============================================================================
 
 const largeReportCard         = document.getElementById("largeReportCard");
@@ -1335,7 +1336,7 @@ const largeCopyReportCodeBtn  = document.getElementById("largeCopyReportCodeBtn"
 let largeLastReport = null;
 let largeLastReportCode = "";
 
-// Layer registry â€” matches the stages emitted by obfuscator-large.js
+// Layer registry Ã¢â‚¬â€ matches the stages emitted by obfuscator-large.js
 // Each entry: { key: stat/flag key on report, label: display name }
 const LARGE_LAYER_DEFS = [
   { key: "minify",             label: "Minify",              detect: (r) => r.stagesSucceeded.includes("minify") },
