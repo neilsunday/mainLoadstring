@@ -1,3 +1,18 @@
+// ============================================================================
+// server.js PATCH v1 â€” adds "nightmare" level to /obfuscate-large whitelist
+//
+// FIX: The /obfuscate-large endpoint had a hardcoded validLevels whitelist
+//      that silently downgraded any unknown level to "medium". This meant
+//      requests for the new 10-layer "nightmare" pipeline were being
+//      rewritten to 8-layer conservative-max defaults on the server.
+//
+// CHANGE: Line ~145 (inside app.post("/obfuscate-large")):
+//   OLD: const validLevels = ["basic", "medium", "conservative-max"];
+//   NEW: const validLevels = ["basic", "medium", "conservative-max", "nightmare"];
+//
+// Drop-in replacement â€” rename to server.js when using.
+// ============================================================================
+
 const express = require("express");
 const path = require("path");
 const https = require("https");
@@ -149,7 +164,7 @@ app.post("/obfuscate", async (req, res) => {
 // ==========================================
 // /obfuscate-large â€” separate pipeline for 300KB+ scripts
 // Body: { code, level, userId? }
-//   level: "basic" | "medium" | "conservative-max"
+//   level: "basic" | "medium" | "conservative-max" | "nightmare"
 // Response: { success, level, original_size, obfuscated_size, elapsed_ms, code, profile, report }
 // ==========================================
 app.post("/obfuscate-large", async (req, res) => {
@@ -163,7 +178,8 @@ app.post("/obfuscate-large", async (req, res) => {
       res.status(413).json({ error: "Code too large (max 10MB)" });
       return;
     }
-    const validLevels = ["basic", "medium", "conservative-max"];
+    // v5: added "nightmare" (10 layers â€” adds opaque predicates + control-flow flattening)
+    const validLevels = ["basic", "medium", "conservative-max", "nightmare"];
     const obfLevel = validLevels.includes(level) ? level : "medium";
 
     const start = Date.now();
