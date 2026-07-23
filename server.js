@@ -2,16 +2,17 @@ const express = require("express");
 const path = require("path");
 const https = require("https");
 const { createClient } = require("@supabase/supabase-js");
-// v24.0: obfuscateWithReport now accepts options.referenceCode for the manifest.
+// obfuscateWithReport accepts options.referenceCode for the manifest.
 const { obfuscate, obfuscateWithReport } = require("./obfuscator");
+// Large-script pipeline (separate module, text-level transforms, no AST parse)
+const { obfuscateLarge } = require("./obfuscator-large");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 // ---------------------------------------------------------------------------
-// Security hardening (server v2):
-//   * SUPABASE_URL is now REQUIRED via env, no hardcoded fallback.
-//     Set it in Render -> Environment before deploying.
+// Security hardening:
+//   * SUPABASE_URL is required via env, no hardcoded fallback.
 //   * HWID validated against a strict character whitelist to prevent
 //     injection of weird Unicode / SQL-like chars into the DB.
 //   * Rate limit falls back to IP when HWID is missing so an attacker
@@ -43,12 +44,12 @@ const SUPABASE_RAW_URL =
 // gets rejected before it can touch the DB.
 const HWID_PATTERN = /^[a-zA-Z0-9_-]{8,128}$/;
 
-// v24.0: bumped limit to 24mb to accommodate primary code + reference file
+// 24 MB limit accommodates primary code + reference file
 app.use(express.json({ limit: "24mb" }));
 app.use(express.static(path.join(__dirname), { extensions: ["html"] }));
 
 // ==========================================
-// /obfuscate â€” v24.0 + Phase 2a layer overrides
+// /obfuscate â€” standard pipeline (small/medium scripts)
 // Body: { code, level, forceMaximum?, userId?, referenceCode?, layerOverrides? }
 // Response: { success, level, original_size, obfuscated_size, elapsed_ms, code, report }
 // ==========================================
@@ -63,7 +64,6 @@ app.post("/obfuscate", async (req, res) => {
       res.status(413).json({ error: "Code too large (max 10MB)" });
       return;
     }
-    // v24.0: reference is optional; validate size but allow missing
     if (referenceCode != null && typeof referenceCode !== "string") {
       res.status(400).json({ error: "Invalid 'referenceCode' field type" });
       return;
@@ -75,7 +75,7 @@ app.post("/obfuscate", async (req, res) => {
     const validLevels = ["none", "basic", "medium", "maximum"];
     const obfLevel = validLevels.includes(level) ? level : "medium";
 
-    // Phase 2a: sanitize layerOverrides. Only 6 known keys, values must be
+    // Sanitize layerOverrides. Only 6 known keys, values must be
     // one of "auto" | "force" | "skip". Anything else is dropped silently.
     const ALLOWED_LAYERS = ["antiDebugger", "antiDump", "antiTamper", "byteLevelXor", "vmWrap", "outerVM"];
     const ALLOWED_MODES  = ["auto", "force", "skip"];
@@ -147,8 +147,57 @@ app.post("/obfuscate", async (req, res) => {
 });
 
 // ==========================================
-// /s/:id â€” v2 (HWID whitelist + IP-fallback rate limit)
-// Unchanged from server-v2.
+// /obfuscate-large â€” separate pipeline for 300KB+ scripts
+// Body: { code, level, userId? }
+//   level: "basic" | "medium" | "conservative-max"
+// Response: { success, level, original_size, obfuscated_size, elapsed_ms, code, profile, report }
+// ==========================================
+app.post("/obfuscate-large", async (req, res) => {
+  try {
+    const { code, level, userId } = req.body || {};
+    if (!code || typeof code !== "string") {
+      res.status(400).json({ error: "Missing or invalid 'code' field" });
+      return;
+    }
+    if (code.length > 10 * 1024 * 1024) {
+      res.status(413).json({ error: "Code too large (max 10MB)" });
+      return;
+    }
+    const validLevels = ["basic", "medium", "conservative-max"];
+    const obfLevel = validLevels.includes(level) ? level : "medium";
+
+    const start = Date.now();
+    let result;
+    try {
+      result = await obfuscateLarge(code, obfLevel, userId, {});
+    } catch (err) {
+      console.warn("obfuscateLarge threw:", err.message);
+      return res.status(500).json({ error: "Large obfuscation failed: " + err.message });
+    }
+
+    if (!result || typeof result.code !== "string") {
+      throw new Error("Large obfuscator returned invalid result");
+    }
+    const elapsed = Date.now() - start;
+
+    res.json({
+      success: true,
+      level: obfLevel,
+      original_size: code.length,
+      obfuscated_size: result.code.length,
+      elapsed_ms: elapsed,
+      code: result.code,
+      profile: result.report ? result.report.profile : obfLevel,
+      report: result.report || null,
+    });
+  } catch (err) {
+    console.error("Obfuscate-large endpoint error:", err.message);
+    res.status(500).json({ error: err.message || "Large obfuscation failed" });
+  }
+});
+
+// ==========================================
+// /s/:id â€” HWID whitelist + IP-fallback rate limit
 // ==========================================
 app.get("/s/:id", async (req, res) => {
   const scriptId = req.params.id;
