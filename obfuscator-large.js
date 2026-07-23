@@ -70,7 +70,7 @@ const LEVEL_PROFILES = {
   },
   [LEVEL_CONSERVATIVE_MAX]: {
     label: "Conservative Max â€” full protection without AST rewrite",
-    stages: ["minify", "stringEncryption", "numericEncoding", "decoderInjection", "antiTamperWrap"],
+    stages: ["minify", "stringEncryption", "numericEncoding", "decoderInjection", "bytecodeVMWrap", "antiTamperWrap"],
   },
 };
 
@@ -96,6 +96,8 @@ function makeReport(level) {
       minifyBytesSaved: 0,
       decoderInjected: false,
       antiTamperApplied: false,
+      vmCallsWrapped: 0,
+      vmBytecodeBytes: 0,
     },
     stagesSucceeded: [],
     stagesSkipped: [],
@@ -870,11 +872,212 @@ function stageAntiTamperWrap(code, ctx) {
   };
 }
 
+// ============================================================================
+// SECTION 4 (Step 9) â€” Bytecode-level VM wrap for eligible call statements
+// ============================================================================
+// Detects simple call patterns `ident(literal, literal, ...)` at line
+// boundaries and rewrites them into VM bytecode dispatches. The VM interpreter
+// is embedded at the top of the output. This is Option A scope â€” literal
+// arguments only, no variables. Coverage is intentionally small (~1-5% of
+// statements) so we never risk syntax breakage on complex expressions.
+//
+// Opcodes (1 byte each):
+//   1  LOADK <num>     â€” push literal number (uint16 next 2 bytes)
+//   2  LOADS <idx>     â€” push string from pool (uint8 next byte)
+//   3  GETG  <idx>     â€” push global by name (from string pool)
+//   4  CALL  <nargs>   â€” call top-of-stack fn with N args, discard result
+//  10  HALT            â€” end of program for this dispatch
+// ============================================================================
+
+function stageBytecodeVMWrap(code, ctx) {
+  // We collect eligible call patterns into a "programs" array, each entry
+  // being a bytecode sequence + string pool. At the end, we emit a single
+  // combined bytecode blob with entry points, and a shared VM interpreter.
+  const stringPool = [];
+  const stringPoolMap = new Map();
+  function poolIndex(s) {
+    if (stringPoolMap.has(s)) return stringPoolMap.get(s);
+    const idx = stringPool.length;
+    if (idx > 255) return -1;  // pool overflow â€” skip this wrap
+    stringPool.push(s);
+    stringPoolMap.set(s, idx);
+    return idx;
+  }
+
+  // Program bytecode segments; each segment is a byte array
+  const programs = [];
+  function addProgram(bytes) {
+    const entry = programs.reduce((n, p) => n + p.length, 0);
+    programs.push(bytes);
+    return entry;
+  }
+
+  // Regex to find simple call statements: ident(literal-args-only) at line
+  // boundaries. This is deliberately narrow â€” only literal numbers and
+  // simple double-quoted strings, single-line only.
+  //
+  // Example matches:
+  //   print("hello")
+  //   warn("error", 42)
+  //   print(1, 2, 3)
+  //
+  // NOT matched (safely skipped):
+  //   x = print("hi")            â€” assignment
+  //   print(x)                   â€” variable arg
+  //   obj.method("x")            â€” member access
+  //   print("multi\nline")       â€” hard escapes (skip for simplicity)
+
+  const IDENT = "[A-Za-z_][A-Za-z0-9_]*";
+  const LITERAL = '(?:"[^"\n\\]{0,120}"|\d+)';
+  const CALL_RE = new RegExp(
+    "(^|\n)(\s*)(" + IDENT + ")\((" + LITERAL + "(?:\s*,\s*" + LITERAL + ")*)\)(?=\s*(?:\n|;|$))",
+    "g"
+  );
+
+  let vmCallsWrapped = 0;
+  let vmProgramsBuilt = 0;
+
+  const result = code.replace(CALL_RE, (match, leading, indent, fnName, argsStr) => {
+    // Skip if the ident is a Lua keyword or common local name
+    const RESERVED = new Set(["if","then","else","elseif","end","for","do","while","repeat",
+      "until","function","local","return","break","in","and","or","not","true","false","nil"]);
+    if (RESERVED.has(fnName)) return match;
+
+    // Parse args
+    const args = [];
+    let ok = true;
+    let i = 0;
+    const s = argsStr;
+    while (i < s.length) {
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (i >= s.length) break;
+      if (s[i] === '"') {
+        // String literal
+        let j = i + 1;
+        while (j < s.length && s[j] !== '"' && s[j] !== "\\") j++;
+        if (j >= s.length || s[j] !== '"') { ok = false; break; }
+        args.push({ type: "string", value: s.substring(i + 1, j) });
+        i = j + 1;
+      } else if (/\d/.test(s[i])) {
+        let j = i;
+        while (j < s.length && /\d/.test(s[j])) j++;
+        const n = parseInt(s.substring(i, j), 10);
+        if (n > 65535) { ok = false; break; }
+        args.push({ type: "number", value: n });
+        i = j;
+      } else {
+        ok = false;
+        break;
+      }
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (i < s.length && s[i] === ",") i++;
+    }
+    if (!ok) return match;
+
+    // Build bytecode: GETG fnName, LOADK/LOADS args..., CALL nargs, HALT
+    const bytes = [];
+    // GETG
+    const fnPoolIdx = poolIndex(fnName);
+    if (fnPoolIdx < 0) return match;  // pool overflow
+    bytes.push(3, fnPoolIdx);  // GETG
+    // Arguments
+    for (const arg of args) {
+      if (arg.type === "string") {
+        const idx = poolIndex(arg.value);
+        if (idx < 0) return match;
+        bytes.push(2, idx);  // LOADS
+      } else {
+        // LOADK <uint16>
+        bytes.push(1, (arg.value >> 8) & 0xff, arg.value & 0xff);
+      }
+    }
+    // CALL <nargs>
+    bytes.push(4, args.length & 0xff);
+    // HALT
+    bytes.push(10);
+
+    const entry = addProgram(bytes);
+    vmCallsWrapped++;
+    vmProgramsBuilt++;
+
+    // Replace the call statement with a VM dispatch
+    return leading + indent + "_VM(" + entry + ")";
+  });
+
+  if (vmCallsWrapped === 0) {
+    return { code, ok: true, meta: { vmCallsWrapped: 0, vmBytecodeBytes: 0 } };
+  }
+
+  // Concatenate all program segments into a single bytecode blob
+  const combined = [];
+  for (const p of programs) {
+    for (const b of p) combined.push(b);
+  }
+
+  // Emit the bytecode table
+  const bcTable = "{" + combined.join(",") + "}";
+
+  // Emit the string pool (using our existing _D if strings are encrypted,
+  // else plain strings). For simplicity in this toy VM, plain strings.
+  const escapedPool = stringPool.map(s => {
+    // Escape for a Lua double-quoted string
+    return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r") + '"';
+  });
+  const poolTable = "{" + escapedPool.join(",") + "}";
+
+  // The VM interpreter â€” 10 opcodes as designed
+  const vm =
+    "local _BC=" + bcTable + ";\n" +
+    "local _SP=" + poolTable + ";\n" +
+    "local function _VM(pc) " +
+      "local stk={} " +
+      "local sp=0 " +
+      "while true do " +
+        "local op=_BC[pc] " +
+        "if op==1 then " +
+          "local hi=_BC[pc+1] " +
+          "local lo=_BC[pc+2] " +
+          "sp=sp+1 stk[sp]=hi*256+lo " +
+          "pc=pc+3 " +
+        "elseif op==2 then " +
+          "sp=sp+1 stk[sp]=_SP[_BC[pc+1]+1] " +
+          "pc=pc+2 " +
+        "elseif op==3 then " +
+          "sp=sp+1 stk[sp]=_G[_SP[_BC[pc+1]+1]] " +
+          "pc=pc+2 " +
+        "elseif op==4 then " +
+          "local n=_BC[pc+1] " +
+          "local args={} " +
+          "for i=1,n do args[i]=stk[sp-n+i] end " +
+          "local fn=stk[sp-n] " +
+          "sp=sp-n-1 " +
+          "if type(fn)==\"function\" then fn(table.unpack(args,1,n)) end " +
+          "pc=pc+2 " +
+        "elseif op==10 then return " +
+        "else return " +
+        "end " +
+      "end " +
+    "end;\n";
+
+  return {
+    code: vm + result,
+    ok: true,
+    meta: {
+      vmCallsWrapped,
+      vmProgramsBuilt,
+      vmBytecodeBytes: combined.length,
+      vmStringPoolSize: stringPool.length,
+      vmInterpreterBytes: vm.length,
+    },
+  };
+}
+
 const STAGE_FUNCTIONS = {
   minify: stageMinify,
   stringEncryption: stageStringEncryption,
   numericEncoding: stageNumericEncoding,
   decoderInjection: stageDecoderInjection,
+  bytecodeVMWrap: stageBytecodeVMWrap,
   antiTamperWrap: stageAntiTamperWrap,
 };
 
@@ -939,6 +1142,12 @@ function runPipeline(rawCode, level, options, report) {
           }
           if (typeof result.meta.antiTamperApplied === "boolean") {
             report.stats.antiTamperApplied = result.meta.antiTamperApplied;
+          }
+          if (typeof result.meta.vmCallsWrapped === "number") {
+            report.stats.vmCallsWrapped = (report.stats.vmCallsWrapped || 0) + result.meta.vmCallsWrapped;
+          }
+          if (typeof result.meta.vmBytecodeBytes === "number") {
+            report.stats.vmBytecodeBytes = (report.stats.vmBytecodeBytes || 0) + result.meta.vmBytecodeBytes;
           }
         }
       } else {
