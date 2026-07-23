@@ -1353,67 +1353,77 @@ function renderLargeReport(report, generatedCode) {
   largeLastReport = report;
   largeLastReportCode = generatedCode || "";
 
-  // Hero: requested vs applied
-  largeReportRequestedEl.textContent = (report.requestedLevel || "-").toUpperCase();
-  largeReportAppliedEl.textContent   = (report.actualLevel || "-").toUpperCase();
+  const setText = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  };
 
-  // Profile block
-  largeReportProfileEl.textContent = report.profile || "-";
+  // Hero
+  setText("largeReportRequestedLevel", (report.requestedLevel || "-").toUpperCase());
+  setText("largeReportActualLevel",    (report.actualLevel    || "-").toUpperCase());
 
-  // Layers grid
-  largeReportLayersEl.innerHTML = "";
-  for (const def of LARGE_LAYER_DEFS) {
-    const active = def.detect(report);
-    const div = document.createElement("div");
-    div.className = "layer-item " + (active ? "active" : "inactive");
-    const check = active ? "M20 6L9 17l-5-5" : "M18 6L6 18M6 6l12 12";
-    div.innerHTML =
-      '<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="' + check + '"/></svg>' +
-      '<span class="layer-name">' + def.label + '</span>';
-    largeReportLayersEl.appendChild(div);
-  }
-
-  // Stats grid â€” numeric + ratio + timing
+  // Script profile
   const s = report.stats || {};
   const ratio = s.sizeRatio ? s.sizeRatio.toFixed(3) + "x" : "-";
-  const statPairs = [
-    ["Original size",       (s.originalBytes    || 0).toLocaleString() + " B"],
-    ["Obfuscated size",     (s.obfuscatedBytes  || 0).toLocaleString() + " B"],
-    ["Size ratio",          ratio],
-    ["Elapsed",             (s.elapsedMs        || 0) + " ms"],
-    ["Strings encrypted",   (s.stringsEncrypted    || 0).toLocaleString()],
-    ["Strings skipped",     (s.stringsSkipped      || 0).toLocaleString()],
-    ["Numerics obfuscated", (s.numericsObfuscated  || 0).toLocaleString()],
-    ["Comments stripped",   (s.commentsStripped    || 0).toLocaleString()],
-    ["VM calls wrapped",    (s.vmCallsWrapped      || 0).toLocaleString()],
-    ["Junk injected",       (s.junkStatementsInjected || 0).toLocaleString()],
-  ];
-  largeReportStatsEl.innerHTML = statPairs.map(([label, value]) =>
-    '<div>' + label + '<strong>' + value + '</strong></div>'
-  ).join("");
+  setText("largeProfOrig",    (s.originalBytes   || 0).toLocaleString() + " B");
+  setText("largeProfObf",     (s.obfuscatedBytes || 0).toLocaleString() + " B");
+  setText("largeProfRatio",   ratio);
+  setText("largeProfElapsed", (s.elapsedMs       || 0) + " ms");
+  setText("largeProfStages",  (report.stagesSucceeded || []).length.toString());
+  setText("largeProfSkipped", (report.stagesSkipped   || []).length.toString());
+
+  // Protection layers grid (checkmark-style)
+  const layersEl = document.getElementById("largeReportLayers");
+  if (layersEl) {
+    layersEl.innerHTML = "";
+    for (const def of LARGE_LAYER_DEFS) {
+      const active = def.detect(report);
+      const div = document.createElement("div");
+      div.className = "layer-item " + (active ? "active" : "inactive");
+      const check = active
+        ? '<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>'
+        : '<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>';
+      div.innerHTML = check + '<span class="layer-name">' + def.label + '</span>';
+      layersEl.appendChild(div);
+    }
+  }
+
+  // Stats
+  setText("largeStatStrEnc",     (s.stringsEncrypted       || 0).toLocaleString());
+  setText("largeStatStrSkip",    (s.stringsSkipped         || 0).toLocaleString());
+  setText("largeStatNumObf",     (s.numericsObfuscated     || 0).toLocaleString());
+  setText("largeStatComments",   (s.commentsStripped       || 0).toLocaleString());
+  setText("largeStatMinify",     (s.minifyBytesSaved       || 0).toLocaleString() + " B");
+  setText("largeStatVmCalls",    (s.vmCallsWrapped         || 0).toLocaleString());
+  setText("largeStatJunk",       (s.junkStatementsInjected || 0).toLocaleString());
+  setText("largeStatAntiTamper", s.antiTamperApplied ? "Active" : "Off");
 
   // Warnings
   const warnings = report.warnings || [];
+  const warnWrap  = document.getElementById("largeReportWarningsWrap");
+  const warnList  = document.getElementById("largeReportWarningsList");
+  const warnCount = document.getElementById("largeReportWarningsCount");
   if (warnings.length > 0) {
-    largeReportWarningsWrap.classList.remove("hidden");
-    largeReportWarningsList.innerHTML = "";
+    warnWrap.classList.remove("hidden");
+    warnList.innerHTML = "";
     for (const w of warnings) {
       const li = document.createElement("li");
       li.textContent = w;
-      largeReportWarningsList.appendChild(li);
+      warnList.appendChild(li);
     }
-    largeReportWarningsCount.textContent = "(" + warnings.length + ")";
+    if (warnCount) warnCount.textContent = "(" + warnings.length + ")";
   } else {
-    largeReportWarningsWrap.classList.add("hidden");
-    largeReportWarningsCount.textContent = "";
+    warnWrap.classList.add("hidden");
+    if (warnCount) warnCount.textContent = "";
   }
 
   // View generated code
-  if (largeReportCodeOutput && generatedCode) {
-    largeReportCodeOutput.textContent = generatedCode;
-    largeViewCodeChars.textContent = "(" + generatedCode.length.toLocaleString() + " chars)";
-    // Try Prism highlight if available (loaded via CDN in dashboard.html)
-    try { if (window.Prism) window.Prism.highlightElement(largeReportCodeOutput); } catch (e) {}
+  const codeOut = document.getElementById("largeReportCodeOutput");
+  const codeChars = document.getElementById("largeViewCodeChars");
+  if (codeOut && generatedCode) {
+    codeOut.textContent = generatedCode;
+    if (codeChars) codeChars.textContent = "(" + generatedCode.length.toLocaleString() + " chars)";
+    try { if (window.Prism) window.Prism.highlightElement(codeOut); } catch (e) {}
   }
 
   largeReportCard.classList.remove("hidden");
