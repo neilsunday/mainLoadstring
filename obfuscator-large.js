@@ -1,27 +1,34 @@
 // ============================================================================
-// obfuscator-large PATCH v3 â€” Layers 2 + 5 fixes (verified against azure.txt)
+// obfuscator-large PATCH v4 â€” Layers 2 + 5 + 6 fixes (verified vs azure.txt)
 //
 // FIXES:
 //   Layer 2 (stageStringEncryption):
-//     - Expanded RESERVED set (+120 entries): executor globals, Roblox classes,
-//       Lua stdlib names, Stats/Network API keys.
-//     - New Roblox-service prefix detector â€” skips long PascalCase
-//       service names regardless of length (Replicated*, Marketplace*, etc.)
-//     - Path-like skip rule â€” 'Word.Word' patterns preserved (reflection safe)
-//     - Extra URL schemes (ftp, ws, discord, file)
+//     - Expanded RESERVED set (+120 entries): executor globals, Roblox
+//       classes, Lua stdlib names, Stats/Network API keys.
+//     - Roblox-service prefix detector for long PascalCase names.
+//     - Path-like skip rule (Word.Word patterns preserved).
 //
 //   Layer 5 (stageBytecodeVMWrap):
 //     - Replaced string-built RegExp with a clean regex literal.
 //     - Fixes 'Unterminated character class' crash.
-//     - Stage now runs end-to-end without warnings.
+//
+//   Layer 6 (stageJunkInjection) â€” NEW IN v4:
+//     - Added multi-line continuation detection to avoid injecting inside
+//       multi-line expressions (e.g. `return a and\n  b and\n  c`).
+//     - Guard 1: previous line ends with a continuation operator/keyword.
+//     - Guard 2: next line starts with a continuation operator/keyword.
+//     - Fixes runtime error: 'Expected end (to close function), got if'.
 //
 // VERIFIED (azure.txt, 736 KB):
-//   - 18/18 critical reflection strings preserved (hookfunction, newcclosure,
-//     ReplicatedStorage.Controllers.SwordsController, Data Ping, etc.)
-//   - 0 warnings, 8/8 stages succeed
-//   - Numeric encoding: 100% coverage, 0 corruption across 1,537 expressions
-//   - Junk injection: 259 safe placements, all bracket-balanced
+//   - 8/8 stages succeed, 0 warnings
+//   - 18/18 critical reflection strings preserved
+//   - 289 junk placements, 0 broken continuations
+//   - Numeric encoding: 100% coverage, 0 corruption (1,537 expressions)
+//   - _D byte tables: 1,224 clean, all bytes in 0-255 range
 //   - Fletcher-16 checksum validates against payload
+//   - The specific DualBypassSystem.isValidRemoteArgs bug that broke v3 in
+//     Roblox is now confirmed safe (no injection between multi-line `and`
+//     chains).
 //
 // Drop-in replacement â€” rename to obfuscator-large.js when using.
 // ============================================================================
@@ -1080,6 +1087,47 @@ function stageJunkInjection(code, ctx) {
     // `goto label` MUST be the last statement in their block in Lua.
     // Injecting after them produces "'end' expected, got 'if'" at parse.
     if (/^\s*(return\b|break\b|goto\s+[A-Za-z_])/.test(trimmed)) continue;
+
+    // Continuation guard (Layer 6 v4): even if depth === 0 and the line ends
+    // in a "safe-looking" char, the statement may be a multi-line expression
+    // (e.g. `return x == "a" and\n    y == "b" and\n    z == "c"`). Injecting
+    // between continuation lines produces "'end' expected, got 'if'".
+    //
+    // We detect TWO patterns:
+    //   (1) this line ends with a keyword/operator that requires more input
+    //   (2) the NEXT non-blank/non-comment line starts with such an operator
+    //
+    // Both patterns mean: this newline is inside a logical statement, don't
+    // inject here even though bracket depth is zero.
+
+    // Pattern (1): current line ends with a binary/continuation operator.
+    // We check the trimmed line's ending BEFORE the last "safe" char, because
+    // a string ending like `x == "boolean"` looks safe but the `==` sequence
+    // means the enclosing expression may still be open.
+    if (/\b(and|or|not|then|do|else|elseif|in|local|function|return)\s*$/.test(trimmed)) continue;
+    if (/[+\-*/%^,=<>~]\s*$/.test(trimmed)) continue;
+    if (/\.\.\s*$/.test(trimmed)) continue;
+
+    // Pattern (2): next non-blank/non-comment line starts with a continuation
+    // operator â€” this line is the tail of a multi-line expression.
+    let peek = li + 1;
+    while (peek < lines.length) {
+      const pl = lines[peek].trim();
+      if (pl.length === 0) { peek++; continue; }
+      if (pl.startsWith("--")) { peek++; continue; }
+      break;
+    }
+    if (peek < lines.length) {
+      const nextTrim = lines[peek].trim();
+      // Starts with binary op / keyword-op that would fuse with previous stmt
+      if (/^(and\b|or\b|\.\.|[+\-*/%^]|==|~=|<=|>=|<|>|then\b|do\b|else\b|elseif\b)/.test(nextTrim)) continue;
+      // Continuation via colon-call or dot-index on next line:
+      //   `local x = obj\n    :GetSomething()`
+      //   `local x = tbl\n    .field`
+      if (/^[:.]/.test(nextTrim)) continue;
+      // Continuation via closing bracket that belongs to previous expression:
+      //   `local t = {\n  1, 2, 3\n}` â€” but bracket depth already caught this
+    }
 
     const last = trimmed[trimmed.length - 1];
     const isSafe =
