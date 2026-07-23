@@ -37,7 +37,7 @@ const referenceUpload = document.getElementById("referenceUpload");
 const referenceUploadBtn = document.getElementById("referenceUploadBtn");
 const referenceClearBtn = document.getElementById("referenceClearBtn");
 const referenceFileNameEl = document.getElementById("referenceFileName");
-let referenceCode = "";  // in-memory only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â not persisted
+let referenceCode = "";  // in-memory only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â not persisted
 let referenceFileName = "";
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -486,7 +486,7 @@ function renderReport(report, generatedCode) {
   document.getElementById("statNumObf").textContent = s.numericConstsObfuscated != null ? s.numericConstsObfuscated : "-";
   document.getElementById("statVmStmt").textContent = s.vmCompiledStatements != null ? s.vmCompiledStatements : "0";
 
-  // Warnings â€” v2: with Copy all + Console toggle
+  // Warnings Ã¢â‚¬â€ v2: with Copy all + Console toggle
   const warningsWrap = document.getElementById("reportWarningsWrap");
   const warningsList = document.getElementById("reportWarningsList");
   const warningsCount = document.getElementById("reportWarningsCount");
@@ -530,12 +530,12 @@ function renderReport(report, generatedCode) {
     if (report.stagesSucceeded && report.stagesSucceeded.length > 0) {
       consoleLines.push("");
       consoleLines.push("=== STAGES SUCCEEDED ===");
-      for (const s of report.stagesSucceeded) consoleLines.push("  âœ“ " + s);
+      for (const s of report.stagesSucceeded) consoleLines.push("  Ã¢Å“â€œ " + s);
     }
     if (report.stagesSkipped && report.stagesSkipped.length > 0) {
       consoleLines.push("");
       consoleLines.push("=== STAGES SKIPPED ===");
-      for (const s of report.stagesSkipped) consoleLines.push("  âœ— " + s);
+      for (const s of report.stagesSkipped) consoleLines.push("  Ã¢Å“â€” " + s);
     }
     // v25.30 forensic: wide snippets from failed stages
     if (report.stageDebug && report.stageDebug.length > 0) {
@@ -563,7 +563,7 @@ function renderReport(report, generatedCode) {
     const consoleText = consoleLines.join("\n");
     reportConsole.textContent = consoleText;
 
-    // Wire Copy all â€” copies raw warning list (what most users want)
+    // Wire Copy all Ã¢â‚¬â€ copies raw warning list (what most users want)
     if (copyWarningsBtn && !copyWarningsBtn._wired) {
       copyWarningsBtn._wired = true;
       copyWarningsBtn.addEventListener("click", async () => {
@@ -1037,3 +1037,274 @@ function showMessage(text, type = "info") {
   messageDiv.classList.remove("hidden");
 }
 function hideMessage() { messageDiv.classList.add("hidden"); }
+
+
+// ============================================================================
+// LARGE SCRIPT SECTION â€” separate pipeline for 300KB+ scripts
+// ============================================================================
+// Isolated wiring. All DOM ids are prefixed with "large*" to avoid collisions
+// with the standard small-script pipeline above. Talks to /obfuscate-large,
+// which uses a conservative transform pipeline (no full AST rewrite) so
+// extreme Luau scripts don't cascade parse failures across stages.
+// ============================================================================
+
+const LARGE_OBFUSCATE_ENDPOINT = "/obfuscate-large";
+
+// ---- DOM handles ----
+const largeScriptNameInput = document.getElementById("largeScriptName");
+const largeScriptCodeInput = document.getElementById("largeScriptCode");
+const largeCharCountEl     = document.getElementById("largeCharCount");
+const largeUploadBtn       = document.getElementById("largeUploadBtn");
+const largeFileUpload      = document.getElementById("largeFileUpload");
+const largeFileNameEl      = document.getElementById("largeFileName");
+const largeClearBtn        = document.getElementById("largeClearBtn");
+const largeLevelSelect     = document.getElementById("largeObfuscationLevel");
+const largeRequireKeyCheck = document.getElementById("largeRequireKey");
+const largePreviewBtn      = document.getElementById("largePreviewBtn");
+const largeSaveBtn         = document.getElementById("largeSaveBtn");
+const largeMessageDiv      = document.getElementById("largeMessage");
+const largePreviewCard     = document.getElementById("largePreviewCard");
+const largePreviewStats    = document.getElementById("largePreviewStats");
+const largePreviewOutput   = document.getElementById("largePreviewOutput");
+const largeCopyPreviewBtn  = document.getElementById("largeCopyPreviewBtn");
+const largeClosePreviewBtn = document.getElementById("largeClosePreviewBtn");
+const largeResultCard      = document.getElementById("largeResultCard");
+const largeLoadstringOutput= document.getElementById("largeLoadstringOutput");
+const largeCopyBtn         = document.getElementById("largeCopyBtn");
+
+let largeLastPreviewedCode = "";
+let largeLastSavedScriptId = null;
+
+// ---- Message helpers (scoped to the large-script card) ----
+function showLargeMessage(text, type) {
+  if (!largeMessageDiv) return;
+  largeMessageDiv.textContent = text;
+  largeMessageDiv.className = "message message-" + (type || "info");
+  largeMessageDiv.classList.remove("hidden");
+}
+function hideLargeMessage() {
+  if (largeMessageDiv) largeMessageDiv.classList.add("hidden");
+}
+
+// ---- UI state (enable/disable buttons based on code presence) ----
+function updateLargeUI() {
+  if (!largeScriptCodeInput) return;
+  const len = largeScriptCodeInput.value.length;
+  if (largeCharCountEl) largeCharCountEl.textContent = len.toLocaleString() + " characters";
+  const hasCode = len > 0;
+  if (largePreviewBtn) largePreviewBtn.disabled = !hasCode;
+  if (largeSaveBtn)    largeSaveBtn.disabled    = !hasCode;
+}
+largeScriptCodeInput?.addEventListener("input", updateLargeUI);
+
+// ---- File upload (10MB cap, .lua/.txt only) ----
+largeUploadBtn?.addEventListener("click", () => largeFileUpload?.click());
+largeFileUpload?.addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > MAX_SCRIPT_SIZE) {
+    showLargeMessage("File too large. Max 10MB.", "error");
+    return;
+  }
+  const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
+  if (![".lua", ".txt"].includes(ext)) {
+    showLargeMessage("Only .lua or .txt files allowed.", "error");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    largeScriptCodeInput.value = ev.target.result;
+    largeFileNameEl.textContent = "Loaded: " + file.name;
+    if (!largeScriptNameInput.value.trim()) {
+      largeScriptNameInput.value = file.name.replace(/\.(lua|txt)$/i, "");
+    }
+    updateLargeUI();
+    showLargeMessage("Loaded \"" + file.name + "\" (" +
+                     ev.target.result.length.toLocaleString() + " chars)", "success");
+  };
+  reader.onerror = () => showLargeMessage("Failed to read file.", "error");
+  reader.readAsText(file);
+});
+
+// ---- Clear button ----
+largeClearBtn?.addEventListener("click", () => {
+  if (!largeScriptCodeInput.value && !largeScriptNameInput.value) return;
+  if (!confirm("Clear the large script editor?")) return;
+  largeScriptNameInput.value = "";
+  largeScriptCodeInput.value = "";
+  largeFileNameEl.textContent = "";
+  largeFileUpload.value = "";
+  hideLargeMessage();
+  largePreviewCard?.classList.add("hidden");
+  largeResultCard?.classList.add("hidden");
+  updateLargeUI();
+});
+
+// ---- Obfuscation call (large pipeline) ----
+async function obfuscateLarge(code, level) {
+  const response = await fetch(LARGE_OBFUSCATE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code, level,
+      userId: currentUser ? currentUser.id : null,
+    }),
+  });
+
+  // The large endpoint is a separate backend route; if the server hasn't been
+  // updated yet, surface a clear message instead of a raw 404.
+  if (response.status === 404) {
+    throw new Error("Large-script endpoint not yet deployed on the server. Ask the backend to add /obfuscate-large.");
+  }
+  if (!response.ok) {
+    let errMsg = "Large obfuscation failed";
+    try { const data = await response.json(); errMsg = data.error || errMsg; } catch (e) {}
+    throw new Error(errMsg);
+  }
+  const data = await response.json();
+  if (!data.success || !data.code) throw new Error(data.error || "Large obfuscation returned no code");
+  return {
+    code: data.code,
+    elapsed: data.elapsed_ms,
+    originalSize: data.original_size,
+    obfuscatedSize: data.obfuscated_size,
+    profile: data.profile || null,   // e.g. "basic"|"medium"|"conservative-max"
+  };
+}
+
+// ---- Preview button ----
+largePreviewBtn?.addEventListener("click", async () => {
+  const code = largeScriptCodeInput.value;
+  if (!code) return;
+  const level = largeLevelSelect ? largeLevelSelect.value : "medium";
+
+  largePreviewBtn.disabled = true;
+  const originalLabel = largePreviewBtn.textContent;
+  largePreviewBtn.textContent = "Obfuscating...";
+  hideLargeMessage();
+
+  try {
+    const result = await obfuscateLarge(code, level);
+    largeLastPreviewedCode = result.code;
+
+    const ratio = result.originalSize > 0
+      ? (result.obfuscatedSize / result.originalSize)
+      : 0;
+    largePreviewStats.textContent =
+      "Profile: " + (result.profile || level) + " | " +
+      result.originalSize.toLocaleString() + " -> " +
+      result.obfuscatedSize.toLocaleString() + " chars (" +
+      ratio.toFixed(2) + "x) | " +
+      (result.elapsed || 0) + "ms";
+    largePreviewOutput.textContent = result.code;
+    largePreviewCard.classList.remove("hidden");
+    showLargeMessage("Preview ready.", "success");
+  } catch (err) {
+    showLargeMessage(err.message, "error");
+  } finally {
+    largePreviewBtn.disabled = false;
+    largePreviewBtn.textContent = originalLabel;
+  }
+});
+
+// ---- Copy preview ----
+largeCopyPreviewBtn?.addEventListener("click", async () => {
+  if (!largeLastPreviewedCode) return;
+  try {
+    await navigator.clipboard.writeText(largeLastPreviewedCode);
+    const orig = largeCopyPreviewBtn.textContent;
+    largeCopyPreviewBtn.textContent = "Copied!";
+    setTimeout(() => { largeCopyPreviewBtn.textContent = orig; }, 1500);
+  } catch (e) {
+    showLargeMessage("Copy failed: " + e.message, "error");
+  }
+});
+
+// ---- Close preview ----
+largeClosePreviewBtn?.addEventListener("click", () => {
+  largePreviewCard?.classList.add("hidden");
+});
+
+// ---- Save button (obfuscate + persist to Supabase, same schema as small path) ----
+largeSaveBtn?.addEventListener("click", async () => {
+  const code = largeScriptCodeInput.value;
+  const name = largeScriptNameInput.value.trim();
+  if (!code) return;
+  if (!name) {
+    showLargeMessage("Please enter a script name.", "error");
+    return;
+  }
+
+  const level = largeLevelSelect ? largeLevelSelect.value : "medium";
+  const requireKey = !!(largeRequireKeyCheck && largeRequireKeyCheck.checked);
+
+  largeSaveBtn.disabled = true;
+  const originalLabel = largeSaveBtn.textContent;
+  largeSaveBtn.textContent = "Obfuscating & saving...";
+  hideLargeMessage();
+
+  try {
+    const result = await obfuscateLarge(code, level);
+    const scriptId = generateId(8);
+
+    // Same Supabase pattern as the small-script Save button uses.
+    // The 'scripts' table + storage upload contract is unchanged.
+    const { error: insertErr } = await sb.from("scripts").insert({
+      id: scriptId,
+      user_id: currentUser.id,
+      name: name,
+      key_required: requireKey,
+    });
+    if (insertErr) throw new Error("DB insert failed: " + insertErr.message);
+
+    // Upload obfuscated code to Supabase Storage (bucket 'scripts', path <id>)
+    const { error: uploadErr } = await sb.storage
+      .from("scripts")
+      .upload(scriptId, new Blob([result.code], { type: "text/plain" }), {
+        contentType: "text/plain",
+        upsert: true,
+      });
+    if (uploadErr) throw new Error("Upload failed: " + uploadErr.message);
+
+    largeLastSavedScriptId = scriptId;
+
+    // Build the loadstring the same way the small path does.
+    let loadstr;
+    if (requireKey) {
+      const key = generateLicenseKey();
+      const { error: keyErr } = await sb.from("user_keys").insert({
+        key, script_id: scriptId, owner_id: currentUser.id,
+      });
+      if (keyErr) throw new Error("Key insert failed: " + keyErr.message);
+      loadstr = buildProtectedLoadstring(scriptId, key);
+    } else {
+      loadstr = buildLoadstring(scriptId);
+    }
+
+    largeLoadstringOutput.textContent = loadstr;
+    largeResultCard.classList.remove("hidden");
+    showLargeMessage("Saved large script \"" + name + "\".", "success");
+  } catch (err) {
+    showLargeMessage(err.message, "error");
+  } finally {
+    largeSaveBtn.disabled = false;
+    largeSaveBtn.textContent = originalLabel;
+  }
+});
+
+// ---- Copy loadstring ----
+largeCopyBtn?.addEventListener("click", async () => {
+  const text = largeLoadstringOutput.textContent;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    const orig = largeCopyBtn.textContent;
+    largeCopyBtn.textContent = "Copied!";
+    setTimeout(() => { largeCopyBtn.textContent = orig; }, 1500);
+  } catch (e) {
+    showLargeMessage("Copy failed: " + e.message, "error");
+  }
+});
+
+// Initial UI state
+updateLargeUI();
