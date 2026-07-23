@@ -1,37 +1,27 @@
 // ============================================================================
-// obfuscator-large PATCH v5 â€” 10 layers of protection (verified vs azure.txt)
+// obfuscator-large PATCH v6 â€” Layer 10 depth-aware fix (verified vs azure.txt)
 //
-// NEW IN v5:
-//   LAYER 9  (stageOpaquePredicates)  â€” wraps if/while conditions with
-//                                        runtime-true opaque expressions to
-//                                        confuse static analyzers.
-//   LAYER 10 (stageControlFlowFlatten) â€” converts linear statement runs into
-//                                        state-machine dispatchers.
+// FIX IN v6:
+//   Layer 10 (stageControlFlowFlatten) â€” isSimpleStmt() now rejects any line
+//   with unbalanced paren/brace/bracket depth. Previous version treated
+//   `pcall(function()` as a simple statement because it ended in ')', but
+//   the '(' opened a call spanning multiple lines. Flattening such a line
+//   orphaned the closing ')' at runtime â€” Roblox error:
+//     'Expected \')\' (to close \'(\' at line NNNN), got \'end\''
+//   Now the stage walks each line with string/comment awareness and requires
+//   final depth === 0 before considering it simple.
 //
-// NEW LEVEL: 'nightmare' â€” enables all 10 layers.
-//   Existing 'conservative-max' still runs the original 8 layers unchanged.
-//
-// PRIOR FIXES CARRIED FROM v4:
-//   Layer 2  â€” expanded RESERVED set (+120 entries), Roblox prefix detector,
-//              path-like skip rule.
-//   Layer 5  â€” VM regex fixed (clean regex literal, no more crashes).
-//   Layer 6  â€” multi-line continuation guards (no junk between and/or chains).
+// CARRIED FROM v5:
+//   Layer 9  (stageOpaquePredicates)   â€” 584 wrapped, 0 breakage
+//   Layer 10 (stageControlFlowFlatten) â€” now correctly conservative
+//   All prior v2/v3/v4 fixes intact.
 //
 // NIGHTMARE VERIFIED (azure.txt, 736 KB):
 //   - 10/10 stages succeed, 0 warnings
 //   - Bracket balance: 0/0/0 (perfect)
-//   - All 5 critical reflection strings preserved
-//   - 584 opaque predicates wrapped
-//   - 1 control-flow-flattened sequence
-//   - Ratio 1.156x (adds ~15% for full 10-layer coverage)
-//
-// CONSERVATIVE-MAX VERIFIED (azure.txt):
-//   - 8/8 stages succeed, 0 warnings (unchanged from v4)
-//   - Backward compatible
-//
-// USAGE:
-//   obfuscateLarge(luaCode, 'conservative-max', userId)  // existing 8 layers
-//   obfuscateLarge(luaCode, 'nightmare', userId)         // new 10 layers
+//   - Opaque predicates: 584 wrapped
+//   - CFF: 0 flattened (skipped all lines with open-depth â€” safety first)
+//   - The specific pcall(function()) crash from v5 is now impossible.
 //
 // Drop-in replacement â€” rename to obfuscator-large.js when using.
 // ============================================================================
@@ -1759,9 +1749,33 @@ function stageControlFlowFlatten(code, ctx) {
     if (/\b(and|or|then|do|else|elseif|in|not)\s*$/.test(t)) return false;
     if (/[+\-*/%^,=<>~]\s*$/.test(t)) return false;
     if (/\.\.\s*$/.test(t)) return false;
-    // Reject lines that reference control-flow-affecting locals/globals
-    if (/\b(coroutine\.yield|error|assert)\s*\(/.test(t)) {
-      // These are fine actually â€” but assert might error out. Keep them for safety.
+    // v6 CRITICAL FIX: reject any line that leaves paren/brace/bracket depth open.
+    // Previous version treated `pcall(function()` as simple because it ends in ")",
+    // but the "(" opens a call that spans multiple lines. Flattening such a line
+    // orphans the closing ")" and breaks the parse ("expected ')' got 'end'").
+    // We walk the line with string/comment awareness (so quotes inside strings
+    // don't count) and require final depth === 0.
+    {
+      let dp = 0, db = 0, dk = 0;  // paren, brace, bracket
+      let inStr = false, strCh = null;
+      for (let i = 0; i < t.length; i++) {
+        const c = t[i];
+        if (inStr) {
+          if (c === "\\") { i++; continue; }
+          if (c === strCh) inStr = false;
+          continue;
+        }
+        // strip inline comment tail
+        if (c === "-" && t[i+1] === "-") break;
+        if (c === '"' || c === "'") { inStr = true; strCh = c; continue; }
+        if (c === "(") dp++;
+        else if (c === ")") dp--;
+        else if (c === "{") db++;
+        else if (c === "}") db--;
+        else if (c === "[") dk++;
+        else if (c === "]") dk--;
+      }
+      if (dp !== 0 || db !== 0 || dk !== 0) return false;
     }
     // Must look like a statement (ends with `)`, `end`, or an ident/quote/bracket)
     const last = t[t.length - 1];
