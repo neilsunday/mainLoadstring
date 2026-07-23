@@ -597,7 +597,7 @@
       </div>
 
       <!-- ============================================================
-           LARGE SCRIPT SECTION "Ã¢â‚¬Â separate pipeline for 300KB+ scripts
+           LARGE SCRIPT SECTION â€” separate pipeline for 300KB+ scripts
            Uses a safer conservative obfuscation profile (no full AST rewrite)
            so extreme scripts survive without cascading parse failures.
       ============================================================ -->
@@ -608,12 +608,12 @@
           </span>
           <div class="title-block">
             <h2>Large Script Obfuscator</h2>
-            <span class="sub">For scripts 300KB and above "Ã¢â‚¬Â uses a conservative pipeline to avoid parse issues</span>
+            <span class="sub">For scripts 300KB and above â€” uses a conservative pipeline to avoid parse issues</span>
           </div>
         </div>
 
         <div style="padding: 12px 14px; margin-bottom: 20px; border-radius: 10px; background: rgba(255, 165, 60, 0.06); border: 1px solid rgba(255, 165, 60, 0.18); font-size: 12px; line-height: 1.55; color: rgba(255, 210, 128, 0.9);">
-          <strong style="color: #ffd280;">Different pipeline.</strong> This section is isolated from the standard obfuscator above. It applies string encryption, numeric obfuscation, and basic wrapping only "Ã¢â‚¬Â skipping the AST-rewrite stages that cause failures on complex Luau scripts (thousands of functions, deep reflection, extreme complexity). Use this for anything above ~300KB or if the standard MAXIMUM tier keeps rolling back layers on your script.
+          <strong style="color: #ffd280;">Different pipeline.</strong> This section is isolated from the standard obfuscator above. It applies string encryption, numeric obfuscation, and basic wrapping only â€” skipping the AST-rewrite stages that cause failures on complex Luau scripts (thousands of functions, deep reflection, extreme complexity). Use this for anything above ~300KB or if the standard MAXIMUM tier keeps rolling back layers on your script.
         </div>
 
         <div class="field">
@@ -626,7 +626,7 @@
             <span>Lua Code (Large)</span>
             <span id="largeCharCount" class="hint">0 characters</span>
           </label>
-          <textarea id="largeScriptCode" placeholder="Paste your large Lua script here "Ã¢â‚¬Â this pipeline handles 300KB up to 10MB" spellcheck="false" style="min-height: 200px;"></textarea>
+          <textarea id="largeScriptCode" placeholder="Paste your large Lua script here â€” this pipeline handles 300KB up to 10MB" spellcheck="false" style="min-height: 200px;"></textarea>
         </div>
 
         <div class="upload-row" style="margin-top: 14px">
@@ -652,7 +652,7 @@
           <input type="checkbox" id="largeRequireKey" />
           <label for="largeRequireKey">
             <div class="t-title">Require access key</div>
-            <div class="t-desc">Save the script behind a key check "Ã¢â‚¬Â same key system as the standard section.</div>
+            <div class="t-desc">Save the script behind a key check â€” same key system as the standard section.</div>
           </label>
         </div>
 
@@ -686,9 +686,9 @@
       </div>
 
       <!-- ============ LARGE-SCRIPT OBFUSCATION REPORT CARD (hidden until preview) ============ -->
-      <div id="largeReportCard" class="card hidden" style="margin-top: 20px; border: 1px solid rgba(255, 165, 60, 0.18);">
+      <div id="largeReportCard" class="card hidden">
         <div class="section-head">
-          <span class="icon" aria-hidden="true" style="background: rgba(255, 165, 60, 0.08); border-color: rgba(255, 165, 60, 0.22); color: #ffb44e;">
+          <span class="icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11H1l8-8v8zm14 3h-8l8 8v-8z"/><path d="M9 3v18M15 3v18"/></svg>
           </span>
           <div class="title-block">
@@ -700,37 +700,61 @@
           </div>
         </div>
 
-        <!-- Hero: requested vs applied level -->
+        <!-- Hero: requested vs applied -->
         <div class="report-hero">
           <div class="report-hero-item">
             <div class="label">Requested</div>
-            <div class="value" id="largeReportRequested">-</div>
+            <div class="value"><span id="largeReportRequestedLevel">-</span></div>
           </div>
           <div class="report-hero-item">
             <div class="label">Applied</div>
-            <div class="value" id="largeReportApplied">-</div>
+            <div class="value">
+              <span id="largeReportActualLevel">-</span>
+            </div>
           </div>
         </div>
 
-        <!-- Profile summary -->
-        <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Profile</div>
-        <div id="largeReportProfile" style="padding: 12px 14px; margin-bottom: 20px; border-radius: 10px; background: rgba(255,255,255,0.015); border: 1px solid rgba(255,255,255,0.04); font-size: 13px; color: rgba(255,255,255,0.85);"></div>
+        <!-- Script profile -->
+        <div style="margin-bottom: 20px">
+          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Script profile</div>
+          <div class="profile-grid" id="largeReportProfile">
+            <div>Original size<strong id="largeProfOrig">-</strong></div>
+            <div>Obfuscated size<strong id="largeProfObf">-</strong></div>
+            <div>Size ratio<strong id="largeProfRatio">-</strong></div>
+            <div>Elapsed<strong id="largeProfElapsed">-</strong></div>
+            <div>Stages succeeded<strong id="largeProfStages">-</strong></div>
+            <div>Stages skipped<strong id="largeProfSkipped">-</strong></div>
+          </div>
+        </div>
 
-        <!-- Protection layers grid -->
-        <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Protection Layers</div>
-        <div class="layers-grid" id="largeReportLayers"></div>
+        <!-- Protection layers -->
+        <div style="margin-bottom: 20px">
+          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Protection layers</div>
+          <div class="layers-grid" id="largeReportLayers"></div>
+        </div>
 
         <!-- Stats -->
-        <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Stats</div>
-        <div class="stats-grid" id="largeReportStats" style="margin-bottom: 20px;"></div>
+        <div style="margin-bottom: 20px">
+          <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">Stats</div>
+          <div class="stats-grid">
+            <div>Strings encrypted<strong id="largeStatStrEnc">-</strong></div>
+            <div>Strings skipped<strong id="largeStatStrSkip">-</strong></div>
+            <div>Numerics obfuscated<strong id="largeStatNumObf">-</strong></div>
+            <div>Comments stripped<strong id="largeStatComments">-</strong></div>
+            <div>Minify bytes saved<strong id="largeStatMinify">-</strong></div>
+            <div>VM calls wrapped<strong id="largeStatVmCalls">-</strong></div>
+            <div>Junk injected<strong id="largeStatJunk">-</strong></div>
+            <div>Anti-tamper<strong id="largeStatAntiTamper">-</strong></div>
+          </div>
+        </div>
 
-        <!-- Warnings (only if any) -->
+        <!-- Warnings (only shown if any) -->
         <div id="largeReportWarningsWrap" class="hidden" style="margin-bottom: 20px">
           <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
             <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px;">
               Warnings <span id="largeReportWarningsCount" style="color: rgba(255,255,255,0.35); font-weight: 500;"></span>
             </div>
-            <button type="button" id="largeCopyWarningsBtn" class="secondary" style="padding: 4px 12px; font-size: 11px;">Copy all</button>
+            <button type="button" id="largeCopyWarningsBtn" class="secondary small" style="padding: 4px 12px; font-size: 11px;">Copy all</button>
           </div>
           <ul class="warnings-list" id="largeReportWarningsList"></ul>
         </div>
@@ -738,13 +762,13 @@
         <!-- View generated code (collapsible) -->
         <div>
           <div class="collapsible-toggle" id="largeViewCodeToggle">
-            <span>View generated code <span id="largeViewCodeChars" style="color: rgba(255,255,255,0.4); font-weight: 500;"></span></span>
-            <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+            <span>View generated code <span id="largeViewCodeChars" style="color: rgba(255,255,255,0.4); font-weight: 400; margin-left: 6px"></span></span>
+            <svg class="caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"></polyline></svg>
           </div>
           <div class="collapsible-body" id="largeViewCodeBody">
-            <pre style="margin-top: 12px;"><code id="largeReportCodeOutput" class="language-lua"></code></pre>
-            <div style="margin-top: 8px; display: flex; justify-content: flex-end;">
-              <button type="button" id="largeCopyReportCodeBtn" class="secondary" style="padding: 4px 12px; font-size: 11px;">Copy code</button>
+            <pre style="margin-top: 12px"><code id="largeReportCodeOutput" class="language-lua"></code></pre>
+            <div class="row" style="margin-top: 12px">
+              <button type="button" id="largeCopyReportCodeBtn" class="secondary small">Copy Generated Code</button>
             </div>
           </div>
         </div>
