@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Dashboard - Loadstring Gen</title>
     <link rel="stylesheet" href="style.css" />
-    <!-- v16: Prism.js for Lua syntax highlighting in the Obfuscated Preview card -->
+    <!-- Prism.js for Lua syntax highlighting -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" />
     <style>
       /* Minimal additions only - reuse .card, .btn, .row from style.css */
@@ -125,7 +125,7 @@
       }
       .output-box.small { max-height: none; padding: 12px 14px; }
 
-      /* v16: Prism.js override to match dark theme */
+      /* Prism.js dark-theme override */
       pre[class*="language-"] {
         margin: 0; padding: 14px 16px;
         background: rgba(0, 0, 0, 0.35) !important;
@@ -152,7 +152,7 @@
       }
 
       /* ================================================================
-         v16: OBFUSCATION REPORT CARD STYLES
+         OBFUSCATION REPORT CARD STYLES
       ================================================================ */
       .report-hero {
         display: grid;
@@ -289,7 +289,7 @@
       .collapsible-body.open { display: block; }
 
       /* ================================================================
-         v16: MODAL DIALOG (for Force Maximum confirmation)
+         MODAL DIALOG (Force Maximum confirmation)
       ================================================================ */
       .modal-backdrop {
         position: fixed; inset: 0;
@@ -347,7 +347,7 @@
       }
 
       /* ================================================================
-         Phase 2a: per-layer overrides in Advanced Options
+         Per-layer overrides in Advanced Options
       ================================================================ */
       .layer-override-block {
         margin-top: 16px; padding: 14px;
@@ -446,7 +446,7 @@
           <span id="fileName"></span>
         </div>
 
-        <!-- v24 NEW: Reference Script upload -->
+        <!-- Reference Script upload -->
         <hr class="card-divider" />
         <div class="field">
           <label for="referenceUpload">
@@ -498,7 +498,7 @@
           </label>
         </div>
 
-        <!-- v16: Advanced options collapsible -->
+        <!-- Advanced options collapsible -->
         <div style="margin-top: 14px">
           <div class="collapsible-toggle" id="advOptionsToggle">
             <span>Advanced options</span>
@@ -518,7 +518,7 @@
               </label>
             </div>
 
-            <!-- Phase 2a: per-layer overrides -->
+            <!-- Per-layer overrides -->
             <div class="layer-override-block">
               <div class="lob-title">Per-layer overrides</div>
               <div class="lob-desc">
@@ -597,7 +597,7 @@
       </div>
 
       <!-- ============================================================
-           LARGE SCRIPT SECTION â€” separate pipeline for 300KB+ scripts
+           LARGE SCRIPT SECTION "â€ separate pipeline for 300KB+ scripts
            Uses a safer conservative obfuscation profile (no full AST rewrite)
            so extreme scripts survive without cascading parse failures.
       ============================================================ -->
@@ -608,12 +608,12 @@
           </span>
           <div class="title-block">
             <h2>Large Script Obfuscator</h2>
-            <span class="sub">For scripts 300KB and above â€” uses a conservative pipeline to avoid parse issues</span>
+            <span class="sub">For scripts 300KB and above "â€ uses a conservative pipeline to avoid parse issues</span>
           </div>
         </div>
 
         <div style="padding: 12px 14px; margin-bottom: 20px; border-radius: 10px; background: rgba(255, 165, 60, 0.06); border: 1px solid rgba(255, 165, 60, 0.18); font-size: 12px; line-height: 1.55; color: rgba(255, 210, 128, 0.9);">
-          <strong style="color: #ffd280;">Different pipeline.</strong> This section is isolated from the standard obfuscator above. It applies string encryption, numeric obfuscation, and basic wrapping only â€” skipping the AST-rewrite stages that cause failures on complex Luau scripts (thousands of functions, deep reflection, extreme complexity). Use this for anything above ~300KB or if the standard MAXIMUM tier keeps rolling back layers on your script.
+          <strong style="color: #ffd280;">Different pipeline.</strong> This section is isolated from the standard obfuscator above. It applies string encryption, numeric obfuscation, and basic wrapping only "â€ skipping the AST-rewrite stages that cause failures on complex Luau scripts (thousands of functions, deep reflection, extreme complexity). Use this for anything above ~300KB or if the standard MAXIMUM tier keeps rolling back layers on your script.
         </div>
 
         <div class="field">
@@ -626,7 +626,7 @@
             <span>Lua Code (Large)</span>
             <span id="largeCharCount" class="hint">0 characters</span>
           </label>
-          <textarea id="largeScriptCode" placeholder="Paste your large Lua script here â€” this pipeline handles 300KB up to 10MB" spellcheck="false" style="min-height: 200px;"></textarea>
+          <textarea id="largeScriptCode" placeholder="Paste your large Lua script here "â€ this pipeline handles 300KB up to 10MB" spellcheck="false" style="min-height: 200px;"></textarea>
         </div>
 
         <div class="upload-row" style="margin-top: 14px">
@@ -641,18 +641,18 @@
         <div class="field">
           <label for="largeObfuscationLevel">Conservative Level</label>
           <select id="largeObfuscationLevel">
-            <option value="basic">Basic â€” minify only (safest)</option>
-            <option value="medium" selected>Medium â€” string + numeric encryption (recommended)</option>
-            <option value="conservative-max">Conservative Max â€” medium + integrity wrapper</option>
+            <option value="basic">Basic</option>
+            <option value="medium" selected>Medium</option>
+            <option value="conservative-max">Conservative</option>
           </select>
-          <small>Full MAXIMUM tier is intentionally unavailable here â€” it uses AST rewriting that breaks on extreme scripts.</small>
+          <small>Full MAXIMUM tier is intentionally unavailable here it uses AST rewriting that breaks on extreme scripts.</small>
         </div>
 
         <div class="toggle-row" style="margin-top: 16px">
           <input type="checkbox" id="largeRequireKey" />
           <label for="largeRequireKey">
             <div class="t-title">Require access key</div>
-            <div class="t-desc">Save the script behind a key check â€” same key system as the standard section.</div>
+            <div class="t-desc">Save the script behind a key check "â€ same key system as the standard section.</div>
           </label>
         </div>
 
@@ -685,7 +685,7 @@
         </div>
       </div>
 
-      <!-- ============ v16 NEW: OBFUSCATION REPORT CARD (hidden until preview) ============ -->
+      <!-- ============ OBFUSCATION REPORT CARD (hidden until preview) ============ -->
       <div id="reportCard" class="card hidden">
         <div class="section-head">
           <span class="icon" aria-hidden="true">
@@ -744,7 +744,7 @@
           <div class="layers-grid" id="reportLayers"></div>
         </div>
 
-        <!-- v22 NEW: Reference Manifest (auto-whitelist from source) -->
+        <!-- Reference Manifest (auto-whitelist from source) -->
         <div id="reportManifestSection" style="margin-bottom: 20px" class="hidden">
           <div style="font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px;">
             Reference manifest
