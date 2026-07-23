@@ -37,7 +37,7 @@ const referenceUpload = document.getElementById("referenceUpload");
 const referenceUploadBtn = document.getElementById("referenceUploadBtn");
 const referenceClearBtn = document.getElementById("referenceClearBtn");
 const referenceFileNameEl = document.getElementById("referenceFileName");
-let referenceCode = "";  // in-memory only ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â not persisted
+let referenceCode = "";  // in-memory only ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â not persisted
 let referenceFileName = "";
 const clearBtn = document.getElementById("clearBtn");
 const saveBtn = document.getElementById("saveBtn");
@@ -486,7 +486,7 @@ function renderReport(report, generatedCode) {
   document.getElementById("statNumObf").textContent = s.numericConstsObfuscated != null ? s.numericConstsObfuscated : "-";
   document.getElementById("statVmStmt").textContent = s.vmCompiledStatements != null ? s.vmCompiledStatements : "0";
 
-  // Warnings ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â v2: with Copy all + Console toggle
+  // Warnings ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â v2: with Copy all + Console toggle
   const warningsWrap = document.getElementById("reportWarningsWrap");
   const warningsList = document.getElementById("reportWarningsList");
   const warningsCount = document.getElementById("reportWarningsCount");
@@ -530,12 +530,12 @@ function renderReport(report, generatedCode) {
     if (report.stagesSucceeded && report.stagesSucceeded.length > 0) {
       consoleLines.push("");
       consoleLines.push("=== STAGES SUCCEEDED ===");
-      for (const s of report.stagesSucceeded) consoleLines.push("  ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ " + s);
+      for (const s of report.stagesSucceeded) consoleLines.push("  ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ " + s);
     }
     if (report.stagesSkipped && report.stagesSkipped.length > 0) {
       consoleLines.push("");
       consoleLines.push("=== STAGES SKIPPED ===");
-      for (const s of report.stagesSkipped) consoleLines.push("  ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â " + s);
+      for (const s of report.stagesSkipped) consoleLines.push("  ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â " + s);
     }
     // v25.30 forensic: wide snippets from failed stages
     if (report.stageDebug && report.stageDebug.length > 0) {
@@ -563,7 +563,7 @@ function renderReport(report, generatedCode) {
     const consoleText = consoleLines.join("\n");
     reportConsole.textContent = consoleText;
 
-    // Wire Copy all ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â copies raw warning list (what most users want)
+    // Wire Copy all ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â copies raw warning list (what most users want)
     if (copyWarningsBtn && !copyWarningsBtn._wired) {
       copyWarningsBtn._wired = true;
       copyWarningsBtn.addEventListener("click", async () => {
@@ -1040,7 +1040,7 @@ function hideMessage() { messageDiv.classList.add("hidden"); }
 
 
 // ============================================================================
-// LARGE SCRIPT SECTION ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â separate pipeline for 300KB+ scripts
+// LARGE SCRIPT SECTION ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â separate pipeline for 300KB+ scripts
 // ============================================================================
 // Isolated wiring. All DOM ids are prefixed with "large*" to avoid collisions
 // with the standard small-script pipeline above. Talks to /obfuscate-large,
@@ -1227,7 +1227,7 @@ largeClosePreviewBtn?.addEventListener("click", () => {
   largePreviewCard?.classList.add("hidden");
 });
 
-// ---- Save button ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â mirrors the small-script pattern (code stored in the row, no Storage upload) ----
+// ---- Save button ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â mirrors the small-script pattern (code stored in the row, no Storage upload) ----
 largeSaveBtn?.addEventListener("click", async () => {
   const code = largeScriptCodeInput.value;
   const name = largeScriptNameInput.value.trim();
@@ -1249,7 +1249,7 @@ largeSaveBtn?.addEventListener("click", async () => {
     const result = await obfuscateLarge(code, level);
     const finalCode = result.code;
 
-    // Retry on ID collision (up to 5 attempts) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â same pattern as small path
+    // Retry on ID collision (up to 5 attempts) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â same pattern as small path
     let scriptId = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       const id = generateId(8);
@@ -1313,7 +1313,7 @@ updateLargeUI();
 
 
 // ============================================================================
-// LARGE OBFUSCATION REPORT Ã¢â‚¬â€ renderer + button wiring
+// LARGE OBFUSCATION REPORT ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â renderer + button wiring
 // ============================================================================
 
 const largeReportCard         = document.getElementById("largeReportCard");
@@ -1336,7 +1336,7 @@ const largeCopyReportCodeBtn  = document.getElementById("largeCopyReportCodeBtn"
 let largeLastReport = null;
 let largeLastReportCode = "";
 
-// Layer registry Ã¢â‚¬â€ matches the stages emitted by obfuscator-large.js
+// Layer registry ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â matches the stages emitted by obfuscator-large.js
 // Each entry: { key: stat/flag key on report, label: display name }
 const LARGE_LAYER_DEFS = [
   { key: "minify",             label: "Minify",              detect: (r) => r.stagesSucceeded.includes("minify") },
@@ -1345,6 +1345,8 @@ const LARGE_LAYER_DEFS = [
   { key: "decoderInjection",   label: "Decoder injection",   detect: (r) => !!r.stats.decoderInjected },
   { key: "bytecodeVMWrap",     label: "Bytecode VM wrap",    detect: (r) => (r.stats.vmCallsWrapped || 0) > 0 },
   { key: "junkInjection",      label: "Junk injection",      detect: (r) => (r.stats.junkStatementsInjected || 0) > 0 },
+  { key: "opaquePredicates",   label: "Opaque predicates",   detect: (r) => (r.stats.opaquePredicatesWrapped || 0) > 0 },
+  { key: "controlFlowFlatten", label: "Control-flow flatten", detect: (r) => (r.stats.cfFlattenedSequences || 0) > 0 },
   { key: "envGuardWrap",       label: "Environment guard",   detect: (r) => !!r.stats.envGuardApplied },
   { key: "antiTamperWrap",     label: "Anti-tamper wrap",    detect: (r) => !!r.stats.antiTamperApplied },
 ];
@@ -1398,6 +1400,8 @@ function renderLargeReport(report, generatedCode) {
   setText("largeStatVmCalls",    (s.vmCallsWrapped         || 0).toLocaleString());
   setText("largeStatJunk",       (s.junkStatementsInjected || 0).toLocaleString());
   setText("largeStatAntiTamper", s.antiTamperApplied ? "Active" : "Off");
+  setText("largeStatOpaque",     (s.opaquePredicatesWrapped || 0).toLocaleString());
+  setText("largeStatCFF",        (s.cfFlattenedSequences    || 0).toLocaleString());
 
   // Warnings
   const warnings = report.warnings || [];
