@@ -1,1211 +1,1308 @@
-// ============================================================================
-// obfuscator-large.js â€” Bytecode-oriented pipeline for large Lua/Luau scripts
-// ============================================================================
-// Completely separate from obfuscator.js. This file NEVER shares code or
-// imports with the AST-based obfuscator. Every transform in this pipeline is
-// text-level (byte scan or minimal state machine) so there is no luaparse
-// round-trip that can cascade parse failures on complex scripts.
-//
-// Public API (matches server.js integration pattern):
-//
-//   obfuscateLarge(luaCode, level, userId, options)
-//     -> Promise<{ code, report }>
-//
-//   Where:
-//     level = "basic" | "medium" | "conservative-max"
-//     options = {
-//       // reserved for future use â€” no options in step 1
-//     }
-//     report = {
-//       requestedLevel: string,
-//       actualLevel:    string,
-//       profile:        string,     // human-readable profile name
-//       stats: {
-//         originalBytes:   number,
-//         obfuscatedBytes: number,
-//         sizeRatio:       number,
-//         elapsedMs:       number,
-//         stringsEncrypted:      number,   // populated in later steps
-//         numericsObfuscated:    number,   // populated in later steps
-//       },
-//       stagesSucceeded: string[],
-//       stagesSkipped:   string[],
-//       warnings:        string[],
-//     }
-//
-// Pipeline levels (from user-facing dropdown in dashboard):
-//   basic             â€” minify only (safest, near-zero overhead)
-//   medium            â€” minify + string encryption + numeric encoding
-//   conservative-max  â€” everything + anti-tamper checksum wrapper
-//                       (+ optional bytecode VM wrap for eligible hot functions)
-//
-// Design invariants:
-//   1. No AST parse. Ever. Text-level byte scans only.
-//   2. Every stage is stateless â€” it takes a string, returns a string.
-//   3. Every stage is skippable â€” failures degrade gracefully, never crash.
-//   4. Runtime decoder helpers are embedded inline (no external deps).
-//   5. Output is a single self-contained Lua string ready for loadstring().
-// ============================================================================
-
-const crypto = require("crypto");
-
-// ============================================================================
-// SECTION 1 â€” Level definitions
-// ============================================================================
-
-const LEVEL_BASIC = "basic";
-const LEVEL_MEDIUM = "medium";
-const LEVEL_CONSERVATIVE_MAX = "conservative-max";
-
-const VALID_LEVELS = new Set([LEVEL_BASIC, LEVEL_MEDIUM, LEVEL_CONSERVATIVE_MAX]);
-
-const LEVEL_PROFILES = {
-  [LEVEL_BASIC]: {
-    label: "Basic â€” minify only",
-    stages: ["minify"],
-  },
-  [LEVEL_MEDIUM]: {
-    label: "Medium â€” string + numeric encryption",
-    stages: ["minify", "stringEncryption", "numericEncoding", "decoderInjection"],
-  },
-  [LEVEL_CONSERVATIVE_MAX]: {
-    label: "Conservative Max â€” full protection without AST rewrite",
-    stages: ["minify", "stringEncryption", "numericEncoding", "decoderInjection", "bytecodeVMWrap", "antiTamperWrap"],
-  },
-};
-
-// ============================================================================
-// SECTION 2 â€” Report builder
-// ============================================================================
-
-function makeReport(level) {
-  return {
-    requestedLevel: level,
-    actualLevel: level,
-    profile: LEVEL_PROFILES[level] ? LEVEL_PROFILES[level].label : "unknown",
-    stats: {
-      originalBytes: 0,
-      obfuscatedBytes: 0,
-      sizeRatio: 1,
-      elapsedMs: 0,
-      stringsEncrypted: 0,
-      stringsSkipped: 0,
-      numericsObfuscated: 0,
-      numericsSkipped: 0,
-      commentsStripped: 0,
-      minifyBytesSaved: 0,
-      decoderInjected: false,
-      antiTamperApplied: false,
-      vmCallsWrapped: 0,
-      vmBytecodeBytes: 0,
-    },
-    stagesSucceeded: [],
-    stagesSkipped: [],
-    warnings: [],
-  };
-}
-
-function warn(report, msg) {
-  report.warnings.push(msg);
-}
-
-// ============================================================================
-// SECTION 3 â€” Stage stubs (to be implemented in later steps)
-// ============================================================================
-// Every stage takes (code, ctx) and returns { code, ok, meta }.
-//   code â€” transformed source (or original if skipped)
-//   ok   â€” true if stage succeeded, false if skipped
-//   meta â€” stage-specific data merged into the report
-
-function stageMinify(code, ctx) {
-  // Step 2: real minify.
-  //
-  // Design: string-aware byte scan. We never touch content inside string
-  // literals or long-bracket blocks. This avoids the entire class of bugs
-  // where a regex-based transform corrupts string content.
-  //
-  // Pipeline:
-  //   1. Normalize CRLF/CR to LF
-  //   2. Walk the source byte-by-byte, emitting:
-  //      - strings (all 4 flavors) verbatim
-  //      - non-comment code with whitespace collapsed
-  //      - drop line comments (-- ... \n)
-  //      - drop block comments (--[[ ... ]], --[=[ ... ]=], etc.)
-  //   3. Collapse 3+ blank lines to 1, trim trailing whitespace per line
-  //
-  // Character state machine â€” no regex, no parse.
-  const raw = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const n = raw.length;
-  const out = [];
-  let i = 0;
-  let commentsStripped = 0;
-  let stringsPreserved = 0;
-
-  while (i < n) {
-    const c = raw[i];
-    const c2 = raw[i + 1];
-
-    // ---- Long-bracket string: [[ ... ]] or [=[ ... ]=] ----
-    // Only enters this branch if we're at '[' AND not preceded by identifier
-    // char (in which case '[' is a table index, not a long string).
-    if (c === "[") {
-      // Peek for = signs
-      let j = i + 1;
-      let level = 0;
-      while (j < n && raw[j] === "=") { level++; j++; }
-      if (j < n && raw[j] === "[") {
-        // It's a long-bracket string [=*[
-        const closer = "]" + "=".repeat(level) + "]";
-        const endIdx = raw.indexOf(closer, j + 1);
-        if (endIdx > 0) {
-          // Emit the whole long-bracket string verbatim
-          out.push(raw.substring(i, endIdx + closer.length));
-          i = endIdx + closer.length;
-          stringsPreserved++;
-          continue;
-        }
-        // Unterminated long-bracket â€” treat as regular '[' character
+async function handleOAuthCallback() {
+  const hasHash =
+    window.location.hash.includes("access_token") ||
+    window.location.hash.includes("error");
+  const hasCode = window.location.search.includes("code=");
+  if (!hasHash && !hasCode) return;
+  await new Promise((resolve) => {
+    let done = false;
+    const { data: { subscription } } = sb.auth.onAuthStateChange((event, session) => {
+      if (session && !done) {
+        done = true;
+        subscription.unsubscribe();
+        history.replaceState(null, "", window.location.pathname);
+        resolve();
       }
-      // Not a long-bracket string, fall through to emit '['
-    }
-
-    // ---- Comments: -- (line) or --[[ / --[=[ (block) ----
-    if (c === "-" && c2 === "-") {
-      // Check for --[[  or --[=*[  (block comment)
-      let j = i + 2;
-      if (j < n && raw[j] === "[") {
-        let level = 0;
-        let k = j + 1;
-        while (k < n && raw[k] === "=") { level++; k++; }
-        if (k < n && raw[k] === "[") {
-          // Block comment --[=*[ ... ]=*]
-          const closer = "]" + "=".repeat(level) + "]";
-          const endIdx = raw.indexOf(closer, k + 1);
-          if (endIdx > 0) {
-            // Drop the whole block comment. Preserve line count by keeping
-            // a space so \n boundaries don't shift for downstream stages.
-            i = endIdx + closer.length;
-            commentsStripped++;
-            continue;
-          }
-          // Unterminated block comment â€” drop rest of file (matches Lua)
-          i = n;
-          commentsStripped++;
-          continue;
-        }
-      }
-      // Line comment: skip to next \n (don't consume the \n itself)
-      const nl = raw.indexOf("\n", i);
-      i = nl < 0 ? n : nl;
-      commentsStripped++;
-      continue;
-    }
-
-    // ---- Quoted string: "..." or '...' ----
-    if (c === '"' || c === "'") {
-      const quote = c;
-      const start = i;
-      i++;
-      while (i < n) {
-        const ch = raw[i];
-        if (ch === "\\" && i + 1 < n) { i += 2; continue; }  // escape
-        if (ch === quote) { i++; break; }
-        if (ch === "\n") break;  // unterminated, Lua-illegal, but be safe
-        i++;
-      }
-      out.push(raw.substring(start, i));
-      stringsPreserved++;
-      continue;
-    }
-
-    // ---- Backtick string (Luau interpolation): `...` with {expr} embeds ----
-    if (c === "`") {
-      const start = i;
-      i++;
-      let braceDepth = 0;
-      while (i < n) {
-        const ch = raw[i];
-        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
-        if (ch === "{") braceDepth++;
-        else if (ch === "}") braceDepth--;
-        else if (ch === "`" && braceDepth === 0) { i++; break; }
-        i++;
-      }
-      out.push(raw.substring(start, i));
-      stringsPreserved++;
-      continue;
-    }
-
-    // ---- Regular code character ----
-    out.push(c);
-    i++;
-  }
-
-  let result = out.join("");
-
-  // Post-pass: collapse whitespace outside strings. The strings are already
-  // emitted verbatim so a simple line-based normalization is safe.
-  const lines = result.split("\n");
-  const cleaned = [];
-  let prevBlank = false;
-  let consecutiveBlanks = 0;
-  for (const line of lines) {
-    // Trim trailing whitespace only (preserve indent for readability)
-    const trimmedRight = line.replace(/[ \t]+$/, "");
-    const isBlank = trimmedRight.trim().length === 0;
-    if (isBlank) {
-      consecutiveBlanks++;
-      // Keep at most 1 blank line in a row
-      if (consecutiveBlanks <= 1) {
-        cleaned.push("");
-      }
-    } else {
-      consecutiveBlanks = 0;
-      cleaned.push(trimmedRight);
-    }
-  }
-  result = cleaned.join("\n");
-
-  return {
-    code: result,
-    ok: true,
-    meta: {
-      commentsStripped,
-      stringsPreserved,
-      bytesSaved: raw.length - result.length,
-    },
-  };
-}
-
-function stageStringEncryption(code, ctx) {
-  // Step 3: byte-scan string literals, encrypt each with XOR+shift, emit
-  // as _D({byte-table}) call. Decoder function is injected in step 5.
-  //
-  // Whitelist strategy â€” conservative. We skip:
-  //   * Short strings (< 4 chars) â€” decoder call is longer than the string
-  //   * Roblox service/method names â€” reflection breaks if renamed
-  //   * URI patterns (rbxassetid://, http://, https://)
-  //   * Short PascalCase (likely class names)
-  //   * Long-bracket [[..]] and backtick `..` strings (complex, skipped)
-  //
-  // Encryption is deterministic per-run: key + shift + mask4 seeded from
-  // ctx.rngKey (set once per pipeline invocation). The decoder function
-  // name is fixed as _D so step 5 knows what to inject.
-
-  // Derive per-run encryption params from ctx.rngKey (32 hex chars = 16 bytes)
-  const seedBytes = [];
-  for (let i = 0; i < ctx.rngKey.length; i += 2) {
-    seedBytes.push(parseInt(ctx.rngKey.substring(i, i + 2), 16));
-  }
-  const key0 = seedBytes[0] || 137;
-  const key1 = seedBytes[1] || 211;
-  const key2 = seedBytes[2] || 47;
-  const key3 = seedBytes[3] || 199;
-  const shift = ((seedBytes[4] || 13) % 15) + 3;  // 3..17
-
-  // Persist keys on ctx so step 5 (decoder injection) can regenerate the
-  // matching _D function.
-  ctx.stringEncKeys = { key0, key1, key2, key3, shift };
-
-  // ---- Reserved strings that must never be encrypted (reflection surface) ----
-  const RESERVED = new Set([
-    // Roblox services
-    "Players","ReplicatedStorage","ReplicatedFirst","ServerStorage","ServerScriptService",
-    "Workspace","Lighting","StarterGui","StarterPack","StarterPlayer","StarterPlayerScripts",
-    "StarterCharacterScripts","SoundService","Chat","TextChatService","Teams","Debris",
-    "TweenService","RunService","UserInputService","CoreGui","GuiService","ContextActionService",
-    "HttpService","DataStoreService","MessagingService","MemoryStoreService","PathfindingService",
-    "PhysicsService","CollectionService","MarketplaceService","TeleportService","PolicyService",
-    "LocalizationService","BadgeService","GamePassService","GroupService","FriendsService",
-    "SocialService","AnalyticsService","AssetService","InsertService","ContentProvider",
-    "TextService","VoiceChatService","Stats","LogService","VirtualUser","VirtualInputManager",
-    "HapticService","VRService","NotificationService","AdService","RbxAnalyticsService",
-    // Common method names called by name string
-    "GetService","FindFirstChild","FindFirstChildOfClass","FindFirstChildWhichIsA",
-    "FindFirstAncestor","FindFirstAncestorOfClass","FindFirstAncestorWhichIsA",
-    "WaitForChild","GetChildren","GetDescendants","IsA","IsDescendantOf","Destroy","Clone",
-    "GetPropertyChangedSignal","GetAttribute","SetAttribute","GetAttributes",
-    "FireServer","FireClient","FireAllClients","InvokeServer","InvokeClient","Fire",
-    "Connect","Disconnect","Wait","Once","ConnectParallel",
-    "OnClientEvent","OnServerEvent","OnClientInvoke","OnServerInvoke","OnInvoke",
-    "HttpGet","HttpGetAsync","HttpPost","HttpPostAsync",
-    "JSONEncode","JSONDecode","PostAsync","RequestAsync","GetAsync","SetAsync",
-    "UpdateAsync","RemoveAsync",
-    // Character parts
-    "Humanoid","HumanoidRootPart","Head","Torso","UpperTorso","LowerTorso",
-    "LeftArm","RightArm","LeftLeg","RightLeg","Character","Backpack",
-    "PlayerGui","PlayerScripts","Camera","Terrain","Animator",
-    // Type names
-    "boolean","number","string","table","function","userdata","thread","nil",
-  ]);
-
-  function shouldEncrypt(value) {
-    if (typeof value !== "string") return false;
-    if (value.length < 4) return false;
-    if (value.length > 8000) return false;
-    if (RESERVED.has(value)) return false;
-    // Roblox asset URIs
-    if (/^rbxass?et/i.test(value)) return false;
-    if (/^rbxthumb/i.test(value)) return false;
-    // HTTP URLs
-    if (/^https?:\/\//.test(value)) return false;
-    // Metamethods (__index, __newindex, etc.)
-    if (/^__[a-z]/.test(value) && value.length <= 20) return false;
-    // Short PascalCase (class names)
-    if (/^[A-Z][a-z]/.test(value) && value.length < 8) return false;
-    // Short ALL_CAPS (enums)
-    if (/^[A-Z0-9_]+$/.test(value) && value.length < 8) return false;
-    // Package versioning like "sleitnick_net@0.1.0"
-    if (/^[A-Za-z_][A-Za-z0-9_]*@[0-9]/.test(value)) return false;
-    // Class-name suffixes commonly reflected
-    if (/(Service|Controller|Handler|Manager|Remote|Event|Signal|Module)$/.test(value)
-        && value.length < 40) return false;
-    return true;
-  }
-
-  // Encrypt a JS string to a Lua byte-table literal.
-  function encryptToTable(value) {
-    const bytes = [];
-    const mask = [key0, key1, key2, key3];
-    for (let i = 0; i < value.length; i++) {
-      const c = value.charCodeAt(i) & 0xff;
-      const k = (mask[i & 3] + ((i + shift) % 11)) & 0xff;
-      const enc = ((c ^ k) - shift) & 0xff;
-      bytes.push(enc);
-    }
-    return "_D({" + bytes.join(",") + "})";
-  }
-
-  // Unescape a Lua single/double-quoted string literal to its runtime value.
-  // We need this to know what to encrypt.
-  function unescapeLuaString(raw) {
-    // raw includes outer quotes
-    const inner = raw.slice(1, -1);
-    let result = "";
-    let i = 0;
-    while (i < inner.length) {
-      const c = inner[i];
-      if (c === "\\" && i + 1 < inner.length) {
-        const next = inner[i + 1];
-        // Common escapes
-        if (next === "n") { result += "\n"; i += 2; continue; }
-        if (next === "t") { result += "\t"; i += 2; continue; }
-        if (next === "r") { result += "\r"; i += 2; continue; }
-        if (next === "a") { result += "\x07"; i += 2; continue; }
-        if (next === "b") { result += "\b"; i += 2; continue; }
-        if (next === "f") { result += "\f"; i += 2; continue; }
-        if (next === "v") { result += "\x0b"; i += 2; continue; }
-        if (next === "\\" || next === "\"" || next === "'") { result += next; i += 2; continue; }
-        // \ddd (decimal escape, up to 3 digits)
-        if (/[0-9]/.test(next)) {
-          let j = i + 1;
-          let digits = "";
-          while (j < inner.length && digits.length < 3 && /[0-9]/.test(inner[j])) {
-            digits += inner[j];
-            j++;
-          }
-          const code = parseInt(digits, 10);
-          if (code <= 255) {
-            result += String.fromCharCode(code);
-            i = j;
-            continue;
-          }
-        }
-        // \xHH hex escape
-        if (next === "x" && i + 3 < inner.length) {
-          const hex = inner.substring(i + 2, i + 4);
-          if (/^[0-9a-fA-F]{2}$/.test(hex)) {
-            result += String.fromCharCode(parseInt(hex, 16));
-            i += 4;
-            continue;
-          }
-        }
-        // Unknown escape â€” keep as-is
-        result += c + next;
-        i += 2;
-        continue;
-      }
-      result += c;
-      i++;
-    }
-    return result;
-  }
-
-  // Now the byte scan: same shape as step 2's minify but instead of emitting
-  // strings verbatim, we run each through shouldEncrypt + encryptToTable.
-  const raw = code;
-  const n = raw.length;
-  const out = [];
-  let i = 0;
-  let stringsEncrypted = 0;
-  let stringsSkipped = 0;
-
-  while (i < n) {
-    const c = raw[i];
-    const c2 = raw[i + 1];
-
-    // Long-bracket string [[..]] or [=[..]=] â€” skip encryption, emit verbatim
-    if (c === "[") {
-      let j = i + 1;
-      let level = 0;
-      while (j < n && raw[j] === "=") { level++; j++; }
-      if (j < n && raw[j] === "[") {
-        const closer = "]" + "=".repeat(level) + "]";
-        const endIdx = raw.indexOf(closer, j + 1);
-        if (endIdx > 0) {
-          out.push(raw.substring(i, endIdx + closer.length));
-          i = endIdx + closer.length;
-          continue;
-        }
-      }
-    }
-
-    // Comments already stripped in step 2, but be defensive: skip if seen
-    if (c === "-" && c2 === "-") {
-      let j = i + 2;
-      if (j < n && raw[j] === "[") {
-        let level = 0;
-        let k = j + 1;
-        while (k < n && raw[k] === "=") { level++; k++; }
-        if (k < n && raw[k] === "[") {
-          const closer = "]" + "=".repeat(level) + "]";
-          const endIdx = raw.indexOf(closer, k + 1);
-          if (endIdx > 0) { i = endIdx + closer.length; continue; }
-          i = n; continue;
-        }
-      }
-      const nl = raw.indexOf("\n", i);
-      i = nl < 0 ? n : nl;
-      continue;
-    }
-
-    // Quoted string "..." or '...' â€” CANDIDATE FOR ENCRYPTION
-    if (c === '"' || c === "'") {
-      const quote = c;
-      const start = i;
-      i++;
-      while (i < n) {
-        const ch = raw[i];
-        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
-        if (ch === quote) { i++; break; }
-        if (ch === "\n") break;
-        i++;
-      }
-      const literalRaw = raw.substring(start, i);
-      const value = unescapeLuaString(literalRaw);
-
-      if (shouldEncrypt(value)) {
-        out.push(encryptToTable(value));
-        stringsEncrypted++;
-      } else {
-        out.push(literalRaw);
-        stringsSkipped++;
-      }
-      continue;
-    }
-
-    // Backtick string â€” skip encryption (interpolation is complex)
-    if (c === "`") {
-      const start = i;
-      i++;
-      let braceDepth = 0;
-      while (i < n) {
-        const ch = raw[i];
-        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
-        if (ch === "{") braceDepth++;
-        else if (ch === "}") braceDepth--;
-        else if (ch === "`" && braceDepth === 0) { i++; break; }
-        i++;
-      }
-      out.push(raw.substring(start, i));
-      continue;
-    }
-
-    // Regular code character
-    out.push(c);
-    i++;
-  }
-
-  return {
-    code: out.join(""),
-    ok: true,
-    meta: {
-      stringsEncrypted,
-      stringsSkipped,
-    },
-  };
-}
-
-function stageNumericEncoding(code, ctx) {
-  // Step 4: byte-scan numeric literals, replace with equivalent arithmetic.
-  //
-  // Design:
-  //   * Only encode PLAIN integer literals (0-9)+ â€” skip floats, hex, scientific.
-  //   * Skip when the number appears inside a _D({...}) byte table (step 3
-  //     output) â€” we detect this by tracking depth of _D( braces.
-  //   * Skip small numbers (< 2 chars) â€” not worth the overhead.
-  //   * Randomize which strategy per number: add, sub, xor, mul.
-  //   * Never touch numbers inside string literals or backticks.
-  //
-  // Character state machine â€” same shape as step 2/3.
-
-  const seedBytes = [];
-  for (let i = 0; i < ctx.rngKey.length; i += 2) {
-    seedBytes.push(parseInt(ctx.rngKey.substring(i, i + 2), 16));
-  }
-  let rngIdx = 0;
-  function nextRand() {
-    const v = seedBytes[rngIdx % seedBytes.length];
-    rngIdx++;
-    return v || 42;
-  }
-
-  function encodeInt(n) {
-    // Choose strategy based on next random byte
-    const strategy = nextRand() % 4;
-    if (strategy === 0) {
-      // add: n = a + b
-      const a = 1 + (nextRand() % Math.max(1, n));
-      return "(" + a + "+" + (n - a) + ")";
-    }
-    if (strategy === 1) {
-      // sub: n = a - b
-      const a = n + (nextRand() % 100) + 1;
-      return "(" + a + "-" + (a - n) + ")";
-    }
-    if (strategy === 2) {
-      // xor: n = a XOR b, where b = a XOR n
-      const a = (nextRand() * 3 + 17) & 0xff;
-      const b = a ^ n;
-      return "bit32.bxor(" + a + "," + b + ")";
-    }
-    // mul when divisible, else fallback to add
-    for (let d = 2; d <= 12; d++) {
-      if (n % d === 0 && n / d > 0) {
-        return "(" + d + "*" + (n / d) + ")";
-      }
-    }
-    const a = 1 + (nextRand() % Math.max(1, n));
-    return "(" + a + "+" + (n - a) + ")";
-  }
-
-  const raw = code;
-  const n = raw.length;
-  const out = [];
-  let i = 0;
-  let numericsObfuscated = 0;
-  let numericsSkipped = 0;
-
-  while (i < n) {
-    const c = raw[i];
-    const c2 = raw[i + 1];
-
-    // Skip long-bracket strings verbatim
-    if (c === "[") {
-      let j = i + 1;
-      let level = 0;
-      while (j < n && raw[j] === "=") { level++; j++; }
-      if (j < n && raw[j] === "[") {
-        const closer = "]" + "=".repeat(level) + "]";
-        const endIdx = raw.indexOf(closer, j + 1);
-        if (endIdx > 0) {
-          out.push(raw.substring(i, endIdx + closer.length));
-          i = endIdx + closer.length;
-          continue;
-        }
-      }
-    }
-
-    // Skip -- comments (defensive)
-    if (c === "-" && c2 === "-") {
-      let j = i + 2;
-      if (j < n && raw[j] === "[") {
-        let level = 0;
-        let k = j + 1;
-        while (k < n && raw[k] === "=") { level++; k++; }
-        if (k < n && raw[k] === "[") {
-          const closer = "]" + "=".repeat(level) + "]";
-          const endIdx = raw.indexOf(closer, k + 1);
-          if (endIdx > 0) { i = endIdx + closer.length; continue; }
-          i = n; continue;
-        }
-      }
-      const nl = raw.indexOf("\n", i);
-      i = nl < 0 ? n : nl;
-      continue;
-    }
-
-    // Skip string literals verbatim
-    if (c === '"' || c === "'") {
-      const quote = c;
-      const start = i;
-      i++;
-      while (i < n) {
-        const ch = raw[i];
-        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
-        if (ch === quote) { i++; break; }
-        if (ch === "\n") break;
-        i++;
-      }
-      out.push(raw.substring(start, i));
-      continue;
-    }
-
-    // Skip backtick strings verbatim
-    if (c === "`") {
-      const start = i;
-      i++;
-      let bd = 0;
-      while (i < n) {
-        const ch = raw[i];
-        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
-        if (ch === "{") bd++;
-        else if (ch === "}") bd--;
-        else if (ch === "`" && bd === 0) { i++; break; }
-        i++;
-      }
-      out.push(raw.substring(start, i));
-      continue;
-    }
-
-    // Skip _D({...}) byte tables â€” the numbers inside are our own encrypted
-    // bytes and must not be re-encoded. Detect the pattern "_D({" and skip
-    // to the matching "})".
-    if (c === "_" && raw.substring(i, i + 4) === "_D({") {
-      const closeIdx = raw.indexOf("})", i + 4);
-      if (closeIdx > 0) {
-        out.push(raw.substring(i, closeIdx + 2));
-        i = closeIdx + 2;
-        continue;
-      }
-    }
-
-    // Numeric literal detection: digit not preceded by identifier char
-    if (c >= "0" && c <= "9") {
-      const prev = i > 0 ? raw[i - 1] : " ";
-      const isIdentPrefix = /[A-Za-z_0-9]/.test(prev);
-      if (isIdentPrefix) {
-        // e.g. `_0xabc123` or `var123` â€” this digit is part of an identifier,
-        // not a numeric literal. Emit as-is.
-        out.push(c);
-        i++;
-        continue;
-      }
-      // Scan the full numeric literal
-      let j = i;
-      // Handle hex prefix: 0x... or 0X... â€” skip these (leave as-is)
-      if (raw[j] === "0" && (raw[j + 1] === "x" || raw[j + 1] === "X")) {
-        while (j < n && /[0-9a-fA-F]/.test(raw[j + 2] ? raw[j] : raw[j])) {
-          if (j < i + 2) { j++; continue; }
-          if (!/[0-9a-fA-F]/.test(raw[j])) break;
-          j++;
-        }
-        // Actually simpler: scan until non-hexdigit
-        j = i + 2;
-        while (j < n && /[0-9a-fA-F]/.test(raw[j])) j++;
-        out.push(raw.substring(i, j));
-        i = j;
-        numericsSkipped++;
-        continue;
-      }
-      // Scan integer digits
-      while (j < n && raw[j] >= "0" && raw[j] <= "9") j++;
-      // Check for decimal point or scientific notation â€” skip if present
-      if (j < n && (raw[j] === "." || raw[j] === "e" || raw[j] === "E")) {
-        // Consume the whole float/scientific
-        while (j < n && /[0-9.eE+\-]/.test(raw[j])) {
-          // stop at unary +/- unless right after e/E
-          if ((raw[j] === "+" || raw[j] === "-") &&
-              !(raw[j - 1] === "e" || raw[j - 1] === "E")) break;
-          j++;
-        }
-        out.push(raw.substring(i, j));
-        i = j;
-        numericsSkipped++;
-        continue;
-      }
-
-      const numStr = raw.substring(i, j);
-      const num = parseInt(numStr, 10);
-      // Only encode integers with 2+ digits and value >= 10
-      if (numStr.length >= 2 && num >= 10 && num < 1000000) {
-        out.push(encodeInt(num));
-        numericsObfuscated++;
-      } else {
-        out.push(numStr);
-        numericsSkipped++;
-      }
-      i = j;
-      continue;
-    }
-
-    out.push(c);
-    i++;
-  }
-
-  return {
-    code: out.join(""),
-    ok: true,
-    meta: { numericsObfuscated, numericsSkipped },
-  };
-}
-
-function stageDecoderInjection(code, ctx) {
-  // Step 5: prepend the runtime _D() decoder that reverses step 3 encryption.
-  //
-  // Encryption formula (from step 3):
-  //   enc = ((original XOR (key[i%4] + (i+shift)%11)) - shift) mod 256
-  // Decryption (this function):
-  //   b = (enc + shift) mod 256
-  //   original = b XOR (key[i%4] + (i+shift)%11)
-  //
-  // If no strings were encrypted in step 3, we skip injection entirely.
-  // Detection: presence of ctx.stringEncKeys.
-
-  if (!ctx.stringEncKeys) {
-    // No string encryption happened â€” no need for a decoder.
-    return { code, ok: true, meta: { decoderInjected: false } };
-  }
-
-  const k = ctx.stringEncKeys;
-  const key0 = k.key0, key1 = k.key1, key2 = k.key2, key3 = k.key3;
-  const shift = k.shift;
-
-  // Build the decoder. Emitted as a single expression so we don't clutter the
-  // global namespace. Uses bit32.bxor which is available in Roblox Lua.
-  const decoder =
-    "local _D=(function() " +
-    "local k={" + key0 + "," + key1 + "," + key2 + "," + key3 + "} " +
-    "local s=" + shift + " " +
-    "return function(t) " +
-    "local r={} " +
-    "for i=1,#t do " +
-    "local b=(t[i]+s)%256 " +
-    "b=bit32.bxor(b,(k[((i-1)%4)+1]+((i-1+s)%11))%256) " +
-    "r[i]=string.char(b) " +
-    "end " +
-    "return table.concat(r) " +
-    "end " +
-    "end)();\n";
-
-  return {
-    code: decoder + code,
-    ok: true,
-    meta: { decoderInjected: true, decoderBytes: decoder.length },
-  };
-}
-
-function stageAntiTamperWrap(code, ctx) {
-  // Step 6: wrap the entire payload in a checksum-verified loader.
-  //
-  // The obfuscated code becomes a Lua string literal. A small loader
-  // computes a Fletcher-16 checksum at runtime and compares it against
-  // embedded expected values. Any modification of the payload string
-  // (even a single byte) triggers an error before execution.
-  //
-  // Escaping: we use decimal escapes for control characters and quotes
-  // so the payload string is safe regardless of what bytes it contains.
-  // This is bulletproof â€” no chance of quote/backslash confusion.
-
-  // Compute Fletcher-16 checksum of the payload bytes.
-  function fletcher16(str) {
-    let a = 0, b = 0;
-    for (let i = 0; i < str.length; i++) {
-      a = (a + str.charCodeAt(i)) % 65535;
-      b = (b + a) % 65535;
-    }
-    return { a, b };
-  }
-
-  // Escape a JS string into a Lua string literal. Uses double quotes and
-  // decimal \ddd escapes for non-printable/quote/backslash characters.
-  function escapeLuaString(str) {
-    const out = [];
-    out.push('"');
-    for (let i = 0; i < str.length; i++) {
-      const c = str.charCodeAt(i);
-      // Printable ASCII except quote and backslash
-      if (c >= 0x20 && c <= 0x7E && c !== 0x22 && c !== 0x5C) {
-        out.push(String.fromCharCode(c));
-      } else {
-        // Decimal escape â€” always 3 digits when the next char is a digit,
-        // otherwise minimal digits. Safest: always 3 digits.
-        out.push("\\" + c.toString().padStart(3, "0"));
-      }
-    }
-    out.push('"');
-    return out.join("");
-  }
-
-  const checksum = fletcher16(code);
-  const payloadLiteral = escapeLuaString(code);
-
-  const loader =
-    "local _P=" + payloadLiteral + ";" +
-    "local function _V(s) " +
-      "local a,b=0,0 " +
-      "for i=1,#s do " +
-        "a=(a+string.byte(s,i))%65535 " +
-        "b=(b+a)%65535 " +
-      "end " +
-      "return a,b " +
-    "end;" +
-    "local _a,_b=_V(_P);" +
-    "if _a~=" + checksum.a + " or _b~=" + checksum.b + " then " +
-      "error(\"[tamper] payload integrity check failed\") " +
-    "end;" +
-    "local _f=loadstring or load;" +
-    "local _fn,_err=_f(_P);" +
-    "if not _fn then error(\"[loader] \"..tostring(_err)) end;" +
-    "_fn()";
-
-  return {
-    code: loader,
-    ok: true,
-    meta: {
-      antiTamperApplied: true,
-      checksumA: checksum.a,
-      checksumB: checksum.b,
-      loaderBytes: loader.length - code.length,
-      payloadBytes: code.length,
-    },
-  };
-}
-
-// ============================================================================
-// SECTION 4 (Step 9) â€” Bytecode-level VM wrap for eligible call statements
-// ============================================================================
-// Detects simple call patterns `ident(literal, literal, ...)` at line
-// boundaries and rewrites them into VM bytecode dispatches. The VM interpreter
-// is embedded at the top of the output. This is Option A scope â€” literal
-// arguments only, no variables. Coverage is intentionally small (~1-5% of
-// statements) so we never risk syntax breakage on complex expressions.
-//
-// Opcodes (1 byte each):
-//   1  LOADK <num>     â€” push literal number (uint16 next 2 bytes)
-//   2  LOADS <idx>     â€” push string from pool (uint8 next byte)
-//   3  GETG  <idx>     â€” push global by name (from string pool)
-//   4  CALL  <nargs>   â€” call top-of-stack fn with N args, discard result
-//  10  HALT            â€” end of program for this dispatch
-// ============================================================================
-
-function stageBytecodeVMWrap(code, ctx) {
-  // We collect eligible call patterns into a "programs" array, each entry
-  // being a bytecode sequence + string pool. At the end, we emit a single
-  // combined bytecode blob with entry points, and a shared VM interpreter.
-  const stringPool = [];
-  const stringPoolMap = new Map();
-  function poolIndex(s) {
-    if (stringPoolMap.has(s)) return stringPoolMap.get(s);
-    const idx = stringPool.length;
-    if (idx > 255) return -1;  // pool overflow â€” skip this wrap
-    stringPool.push(s);
-    stringPoolMap.set(s, idx);
-    return idx;
-  }
-
-  // Program bytecode segments; each segment is a byte array
-  const programs = [];
-  function addProgram(bytes) {
-    const entry = programs.reduce((n, p) => n + p.length, 0);
-    programs.push(bytes);
-    return entry;
-  }
-
-  // Regex to find simple call statements: ident(literal-args-only) at line
-  // boundaries. This is deliberately narrow â€” only literal numbers and
-  // simple double-quoted strings, single-line only.
-  //
-  // Example matches:
-  //   print("hello")
-  //   warn("error", 42)
-  //   print(1, 2, 3)
-  //
-  // NOT matched (safely skipped):
-  //   x = print("hi")            â€” assignment
-  //   print(x)                   â€” variable arg
-  //   obj.method("x")            â€” member access
-  //   print("multi\nline")       â€” hard escapes (skip for simplicity)
-
-  const IDENT = "[A-Za-z_][A-Za-z0-9_]*";
-  const LITERAL = '(?:"[^"\n\\]{0,120}"|\d+)';
-  const CALL_RE = new RegExp(
-    "(^|\n)(\s*)(" + IDENT + ")\((" + LITERAL + "(?:\s*,\s*" + LITERAL + ")*)\)(?=\s*(?:\n|;|$))",
-    "g"
-  );
-
-  let vmCallsWrapped = 0;
-  let vmProgramsBuilt = 0;
-
-  const result = code.replace(CALL_RE, (match, leading, indent, fnName, argsStr) => {
-    // Skip if the ident is a Lua keyword or common local name
-    const RESERVED = new Set(["if","then","else","elseif","end","for","do","while","repeat",
-      "until","function","local","return","break","in","and","or","not","true","false","nil"]);
-    if (RESERVED.has(fnName)) return match;
-
-    // Parse args
-    const args = [];
-    let ok = true;
-    let i = 0;
-    const s = argsStr;
-    while (i < s.length) {
-      while (i < s.length && /\s/.test(s[i])) i++;
-      if (i >= s.length) break;
-      if (s[i] === '"') {
-        // String literal
-        let j = i + 1;
-        while (j < s.length && s[j] !== '"' && s[j] !== "\\") j++;
-        if (j >= s.length || s[j] !== '"') { ok = false; break; }
-        args.push({ type: "string", value: s.substring(i + 1, j) });
-        i = j + 1;
-      } else if (/\d/.test(s[i])) {
-        let j = i;
-        while (j < s.length && /\d/.test(s[j])) j++;
-        const n = parseInt(s.substring(i, j), 10);
-        if (n > 65535) { ok = false; break; }
-        args.push({ type: "number", value: n });
-        i = j;
-      } else {
-        ok = false;
-        break;
-      }
-      while (i < s.length && /\s/.test(s[i])) i++;
-      if (i < s.length && s[i] === ",") i++;
-    }
-    if (!ok) return match;
-
-    // Build bytecode: GETG fnName, LOADK/LOADS args..., CALL nargs, HALT
-    const bytes = [];
-    // GETG
-    const fnPoolIdx = poolIndex(fnName);
-    if (fnPoolIdx < 0) return match;  // pool overflow
-    bytes.push(3, fnPoolIdx);  // GETG
-    // Arguments
-    for (const arg of args) {
-      if (arg.type === "string") {
-        const idx = poolIndex(arg.value);
-        if (idx < 0) return match;
-        bytes.push(2, idx);  // LOADS
-      } else {
-        // LOADK <uint16>
-        bytes.push(1, (arg.value >> 8) & 0xff, arg.value & 0xff);
-      }
-    }
-    // CALL <nargs>
-    bytes.push(4, args.length & 0xff);
-    // HALT
-    bytes.push(10);
-
-    const entry = addProgram(bytes);
-    vmCallsWrapped++;
-    vmProgramsBuilt++;
-
-    // Replace the call statement with a VM dispatch
-    return leading + indent + "_VM(" + entry + ")";
+    });
+    setTimeout(() => {
+      if (!done) { done = true; subscription.unsubscribe(); resolve(); }
+    }, 10000);
   });
-
-  if (vmCallsWrapped === 0) {
-    return { code, ok: true, meta: { vmCallsWrapped: 0, vmBytecodeBytes: 0 } };
-  }
-
-  // Concatenate all program segments into a single bytecode blob
-  const combined = [];
-  for (const p of programs) {
-    for (const b of p) combined.push(b);
-  }
-
-  // Emit the bytecode table
-  const bcTable = "{" + combined.join(",") + "}";
-
-  // Emit the string pool (using our existing _D if strings are encrypted,
-  // else plain strings). For simplicity in this toy VM, plain strings.
-  const escapedPool = stringPool.map(s => {
-    // Escape for a Lua double-quoted string
-    return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r") + '"';
-  });
-  const poolTable = "{" + escapedPool.join(",") + "}";
-
-  // The VM interpreter â€” 10 opcodes as designed
-  const vm =
-    "local _BC=" + bcTable + ";\n" +
-    "local _SP=" + poolTable + ";\n" +
-    "local function _VM(pc) " +
-      "local stk={} " +
-      "local sp=0 " +
-      "while true do " +
-        "local op=_BC[pc] " +
-        "if op==1 then " +
-          "local hi=_BC[pc+1] " +
-          "local lo=_BC[pc+2] " +
-          "sp=sp+1 stk[sp]=hi*256+lo " +
-          "pc=pc+3 " +
-        "elseif op==2 then " +
-          "sp=sp+1 stk[sp]=_SP[_BC[pc+1]+1] " +
-          "pc=pc+2 " +
-        "elseif op==3 then " +
-          "sp=sp+1 stk[sp]=_G[_SP[_BC[pc+1]+1]] " +
-          "pc=pc+2 " +
-        "elseif op==4 then " +
-          "local n=_BC[pc+1] " +
-          "local args={} " +
-          "for i=1,n do args[i]=stk[sp-n+i] end " +
-          "local fn=stk[sp-n] " +
-          "sp=sp-n-1 " +
-          "if type(fn)==\"function\" then fn(table.unpack(args,1,n)) end " +
-          "pc=pc+2 " +
-        "elseif op==10 then return " +
-        "else return " +
-        "end " +
-      "end " +
-    "end;\n";
-
-  return {
-    code: vm + result,
-    ok: true,
-    meta: {
-      vmCallsWrapped,
-      vmProgramsBuilt,
-      vmBytecodeBytes: combined.length,
-      vmStringPoolSize: stringPool.length,
-      vmInterpreterBytes: vm.length,
-    },
-  };
 }
 
-const STAGE_FUNCTIONS = {
-  minify: stageMinify,
-  stringEncryption: stageStringEncryption,
-  numericEncoding: stageNumericEncoding,
-  decoderInjection: stageDecoderInjection,
-  bytecodeVMWrap: stageBytecodeVMWrap,
-  antiTamperWrap: stageAntiTamperWrap,
-};
+const MAX_SCRIPT_SIZE = 10 * 1024 * 1024;
+const OBFUSCATE_ENDPOINT = "/obfuscate";
 
-// ============================================================================
-// SECTION 4 â€” Pipeline orchestrator
-// ============================================================================
+const userEmailEl = document.getElementById("userEmail");
+const logoutBtn = document.getElementById("logoutBtn");
+const scriptNameInput = document.getElementById("scriptName");
+const scriptCodeInput = document.getElementById("scriptCode");
+const charCountEl = document.getElementById("charCount");
+const uploadBtn = document.getElementById("uploadBtn");
+const fileUpload = document.getElementById("fileUpload");
+const fileNameEl = document.getElementById("fileName");
 
-function runPipeline(rawCode, level, options, report) {
-  const startedAt = Date.now();
-  report.stats.originalBytes = rawCode.length;
+// v24 NEW: Reference script upload
+const referenceUpload = document.getElementById("referenceUpload");
+const referenceUploadBtn = document.getElementById("referenceUploadBtn");
+const referenceClearBtn = document.getElementById("referenceClearBtn");
+const referenceFileNameEl = document.getElementById("referenceFileName");
+let referenceCode = "";  // in-memory only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â not persisted
+let referenceFileName = "";
+const clearBtn = document.getElementById("clearBtn");
+const saveBtn = document.getElementById("saveBtn");
+const previewBtn = document.getElementById("previewBtn");
+const messageDiv = document.getElementById("message");
+const obfuscationLevelSelect = document.getElementById("obfuscationLevel");
+const requireKeyCheckbox = document.getElementById("requireKey");
 
-  const profile = LEVEL_PROFILES[level];
-  if (!profile) {
-    warn(report, "Unknown level \"" + level + "\", returning source unchanged");
-    report.actualLevel = "none";
-    report.stats.obfuscatedBytes = rawCode.length;
-    report.stats.sizeRatio = 1;
-    report.stats.elapsedMs = Date.now() - startedAt;
-    return { code: rawCode, report };
+// v16 NEW: force maximum + advanced options
+const forceMaximumCheckbox = document.getElementById("forceMaximum");
+const advOptionsToggle = document.getElementById("advOptionsToggle");
+const advOptionsBody = document.getElementById("advOptionsBody");
+
+// v16 NEW: modal
+const forceMaxModal = document.getElementById("forceMaxModal");
+const forceMaxConfirmCheck = document.getElementById("forceMaxConfirmCheck");
+const forceMaxProceedBtn = document.getElementById("forceMaxProceedBtn");
+const forceMaxCancelBtn = document.getElementById("forceMaxCancelBtn");
+
+// v16 NEW: report card
+const reportCard = document.getElementById("reportCard");
+const closeReportBtn = document.getElementById("closeReportBtn");
+const abCompareBtn = document.getElementById("abCompareBtn");
+const abCompareResult = document.getElementById("abCompareResult");
+const viewCodeToggle = document.getElementById("viewCodeToggle");
+const viewCodeBody = document.getElementById("viewCodeBody");
+const reportCodeOutput = document.getElementById("reportCodeOutput");
+const viewCodeChars = document.getElementById("viewCodeChars");
+const copyReportCodeBtn = document.getElementById("copyReportCodeBtn");
+
+const previewCard = document.getElementById("previewCard");
+const previewStats = document.getElementById("previewStats");
+const previewOutput = document.getElementById("previewOutput");
+const closePreviewBtn = document.getElementById("closePreviewBtn");
+const copyPreviewBtn = document.getElementById("copyPreviewBtn");
+
+const resultCard = document.getElementById("resultCard");
+const loadstringOutput = document.getElementById("loadstringOutput");
+const copyBtn = document.getElementById("copyBtn");
+
+// Key management
+const keysCard = document.getElementById("keysCard");
+const keysList = document.getElementById("keysList");
+const generateKeyBtn = document.getElementById("generateKeyBtn");
+const keyScriptSelect = document.getElementById("keyScriptSelect");
+const keyPlaceIdsInput = document.getElementById("keyPlaceIds");
+const keyMaxExecInput = document.getElementById("keyMaxExec");
+const keyExpiresInput = document.getElementById("keyExpires");
+
+let currentUser = null;
+let lastPreviewedCode = "";
+let lastReport = null;         // v16: cached most recent report
+let lastRequestedLevel = null; // v16: for A/B compare
+let lastSavedScriptId = null;
+
+(async function init() {
+  await handleOAuthCallback();
+  const user = await requireAuth();
+  if (!user) return;
+  currentUser = user;
+  if (userEmailEl) userEmailEl.textContent = user.email;
+  await loadUserKeys();
+})();
+
+logoutBtn?.addEventListener("click", async () => {
+  logoutBtn.disabled = true;
+  logoutBtn.textContent = "Logging out...";
+  try { await sb.auth.signOut(); } catch (err) {}
+  finally { window.location.href = "index.html"; }
+});
+
+function updateUI() {
+  const len = scriptCodeInput.value.length;
+  charCountEl.textContent = `${len.toLocaleString()} characters`;
+  const hasCode = len > 0;
+  saveBtn.disabled = !hasCode;
+  previewBtn.disabled = !hasCode;
+}
+
+scriptCodeInput.addEventListener("input", updateUI);
+uploadBtn.addEventListener("click", () => fileUpload.click());
+
+// v24 NEW: Reference upload handlers
+referenceUploadBtn?.addEventListener("click", () => referenceUpload.click());
+
+referenceUpload?.addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > MAX_SCRIPT_SIZE) {
+    showMessage("Reference file too large. Max 10MB.", "error");
+    return;
   }
-
-  let code = rawCode;
-  const ctx = {
-    userId: options && options.userId,
-    // Per-run randomness seeded once so later steps stay reproducible per run
-    rngKey: crypto.randomBytes(16).toString("hex"),
+  const allowedTypes = [".lua", ".txt"];
+  const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
+  if (!allowedTypes.includes(ext)) {
+    showMessage("Only .lua or .txt reference files allowed.", "error");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    referenceCode = event.target.result;
+    referenceFileName = file.name;
+    referenceFileNameEl.textContent = "Reference: " + file.name + " (" +
+      referenceCode.length.toLocaleString() + " chars)";
+    referenceClearBtn.classList.remove("hidden");
+    showMessage("Reference file loaded. It will be used for the next obfuscation.", "success");
   };
+  reader.onerror = () => showMessage("Failed to read reference file.", "error");
+  reader.readAsText(file);
+});
 
-  for (const stageName of profile.stages) {
-    const fn = STAGE_FUNCTIONS[stageName];
-    if (!fn) {
-      warn(report, "Stage \"" + stageName + "\" is not implemented yet â€” skipped");
-      report.stagesSkipped.push(stageName);
+referenceClearBtn?.addEventListener("click", () => {
+  referenceCode = "";
+  referenceFileName = "";
+  referenceUpload.value = "";
+  referenceFileNameEl.textContent = "";
+  referenceClearBtn.classList.add("hidden");
+  showMessage("Reference cleared.", "info");
+});
+
+fileUpload.addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > MAX_SCRIPT_SIZE) { showMessage("File too large. Max 10MB.", "error"); return; }
+  const allowedTypes = [".lua", ".txt"];
+  const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
+  if (!allowedTypes.includes(ext)) { showMessage("Only .lua or .txt files allowed.", "error"); return; }
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    scriptCodeInput.value = event.target.result;
+    fileNameEl.textContent = `Loaded: ${file.name}`;
+    if (!scriptNameInput.value.trim()) {
+      const nameWithoutExt = file.name.replace(/\.(lua|txt)$/i, "");
+      scriptNameInput.value = nameWithoutExt;
+    }
+    updateUI();
+    showMessage(`Loaded "${file.name}"`, "success");
+  };
+  reader.onerror = () => showMessage("Failed to read file.", "error");
+  reader.readAsText(file);
+});
+
+clearBtn.addEventListener("click", () => {
+  if (!scriptCodeInput.value && !scriptNameInput.value) return;
+  if (confirm("Clear the script editor?")) {
+    scriptNameInput.value = "";
+    scriptCodeInput.value = "";
+    fileNameEl.textContent = "";
+    fileUpload.value = "";
+    hideMessage();
+    resultCard.classList.add("hidden");
+    previewCard.classList.add("hidden");
+    reportCard.classList.add("hidden");
+    updateUI();
+  }
+});
+
+function generateId(length = 8) {
+  const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let id = "";
+  const array = new Uint8Array(length);
+  crypto.getRandomValues(array);
+  for (let i = 0; i < length; i++) id += chars[array[i] % chars.length];
+  return id;
+}
+
+function generateLicenseKey() {
+  const chunks = [];
+  for (let i = 0; i < 4; i++) {
+    const bytes = new Uint8Array(4);
+    crypto.getRandomValues(bytes);
+    chunks.push(
+      Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase()
+    );
+  }
+  return "KEY-" + chunks.join("-");
+}
+
+function buildLoadstring(scriptId) {
+  const rawUrl = `${window.location.origin}/s/${scriptId}`;
+  return `loadstring(game:HttpGet("${rawUrl}"))()`;
+}
+
+function buildProtectedLoadstring(scriptId, key) {
+  const baseUrl = `${window.location.origin}/s/${scriptId}`;
+  return `local _k="${key}"\nlocal _h=game:GetService("RbxAnalyticsService"):GetClientId()\nlocal _p=tostring(game.PlaceId)\nloadstring(game:HttpGet("${baseUrl}?key=".._k.."&hwid=".._h.."&place=".._p))()`;
+}
+
+// ============================================================================
+// Phase 2a: Per-layer overrides + hint updater
+// ============================================================================
+const OVERRIDE_LAYERS = ["antiDebugger", "antiDump", "antiTamper", "byteLevelXor", "vmWrap", "outerVM"];
+
+function readLayerOverrides() {
+  const out = {};
+  for (const key of OVERRIDE_LAYERS) {
+    const el = document.getElementById("ovr_" + key);
+    if (el && el.value && el.value !== "auto") out[key] = el.value;
+  }
+  return out;
+}
+
+function predictAutoDecision(layerKey, profile) {
+  const p = profile || {};
+  const hooks = !!p.hasHookfunction || !!p.hasHookmetamethod;
+  const refl  = !!p.hasRuntimeReflection;
+  switch (layerKey) {
+    case "antiDebugger":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (would false-positive)" }
+        : { enabled: true,  reason: "no hooks detected \u2014 safe to apply" };
+    case "antiDump":
+      return { enabled: true, reason: "pure global-existence probes \u2014 no collision risk" };
+    case "antiTamper":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (would false-positive)" }
+        : { enabled: true,  reason: "no hooks detected \u2014 safe to apply" };
+    case "byteLevelXor":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (bit32.bxor collision risk)" }
+        : { enabled: true,  reason: "no hooks detected \u2014 safe to apply" };
+    case "vmWrap":
+      return (hooks || refl)
+        ? { enabled: false, reason: (hooks ? "hooks" : "reflection") + " detected (would false-positive)" }
+        : { enabled: true,  reason: "eligible \u2014 will wrap qualifying print() calls" };
+    case "outerVM":
+      return hooks
+        ? { enabled: false, reason: "script installs hooks (decoder collision risk)" }
+        : { enabled: true,  reason: "safe \u2014 decoy or real path will emit" };
+    default:
+      return { enabled: true, reason: "" };
+  }
+}
+
+function updateOverrideHints(profile) {
+  for (const key of OVERRIDE_LAYERS) {
+    const hintEl = document.getElementById("ovrHint_" + key);
+    const selEl  = document.getElementById("ovr_" + key);
+    if (!hintEl || !selEl) continue;
+    if (selEl.value === "force") {
+      hintEl.textContent = "Force: bypass smart-skip (may false-positive at runtime)";
+      hintEl.className = "hint auto-off";
       continue;
     }
-    try {
-      const result = fn(code, ctx);
-      if (result && result.ok) {
-        code = result.code;
-        report.stagesSucceeded.push(stageName);
-        if (result.meta) {
-          if (typeof result.meta.stringsEncrypted === "number") {
-            report.stats.stringsEncrypted += result.meta.stringsEncrypted;
-          }
-          if (typeof result.meta.stringsSkipped === "number") {
-            report.stats.stringsSkipped = (report.stats.stringsSkipped || 0) + result.meta.stringsSkipped;
-          }
-          if (typeof result.meta.numericsObfuscated === "number") {
-            report.stats.numericsObfuscated += result.meta.numericsObfuscated;
-          }
-          if (typeof result.meta.numericsSkipped === "number") {
-            report.stats.numericsSkipped = (report.stats.numericsSkipped || 0) + result.meta.numericsSkipped;
-          }
-          if (typeof result.meta.commentsStripped === "number") {
-            report.stats.commentsStripped = (report.stats.commentsStripped || 0) + result.meta.commentsStripped;
-          }
-          if (typeof result.meta.bytesSaved === "number") {
-            report.stats.minifyBytesSaved = (report.stats.minifyBytesSaved || 0) + result.meta.bytesSaved;
-          }
-          if (typeof result.meta.decoderInjected === "boolean") {
-            report.stats.decoderInjected = result.meta.decoderInjected;
-          }
-          if (typeof result.meta.antiTamperApplied === "boolean") {
-            report.stats.antiTamperApplied = result.meta.antiTamperApplied;
-          }
-          if (typeof result.meta.vmCallsWrapped === "number") {
-            report.stats.vmCallsWrapped = (report.stats.vmCallsWrapped || 0) + result.meta.vmCallsWrapped;
-          }
-          if (typeof result.meta.vmBytecodeBytes === "number") {
-            report.stats.vmBytecodeBytes = (report.stats.vmBytecodeBytes || 0) + result.meta.vmBytecodeBytes;
-          }
-        }
-      } else {
-        warn(report, "Stage \"" + stageName + "\" returned not-ok â€” skipped");
-        report.stagesSkipped.push(stageName);
-      }
-    } catch (e) {
-      warn(report, "Stage \"" + stageName + "\" threw: " + e.message + " â€” skipped");
-      report.stagesSkipped.push(stageName);
+    if (selEl.value === "skip") {
+      hintEl.textContent = "Skip: this layer will never be applied";
+      hintEl.className = "hint";
+      continue;
     }
+    if (!profile) {
+      hintEl.textContent = "Auto: obfuscate once to preview what this would do";
+      hintEl.className = "hint";
+      continue;
+    }
+    const dec = predictAutoDecision(key, profile);
+    hintEl.textContent = "Auto: " + (dec.enabled ? "will be enabled" : "will be skipped") +
+                        (dec.reason ? " (" + dec.reason + ")" : "");
+    hintEl.className = "hint " + (dec.enabled ? "auto-on" : "auto-off");
   }
+}
 
-  report.stats.obfuscatedBytes = code.length;
-  report.stats.sizeRatio = code.length / Math.max(1, rawCode.length);
-  report.stats.elapsedMs = Date.now() - startedAt;
-  return { code, report };
+for (const key of OVERRIDE_LAYERS) {
+  document.getElementById("ovr_" + key)?.addEventListener("change", () => {
+    updateOverrideHints(lastReport ? lastReport.profile : null);
+  });
 }
 
 // ============================================================================
-// SECTION 5 â€” Public API
+// v16: OBFUSCATION WITH REPORT
 // ============================================================================
-
-async function obfuscateLarge(luaCode, level, userId, options) {
+async function obfuscateCode(code, level, options) {
   options = options || {};
-  options.userId = userId;
+  if (level === "none") {
+    return {
+      code, elapsed: 0, originalSize: code.length, obfuscatedSize: code.length,
+      report: null
+    };
+  }
+  const response = await fetch(OBFUSCATE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code, level,
+      forceMaximum: !!options.forceMaximum,
+      userId: currentUser ? currentUser.id : null,
+      // v24 NEW: pass the uploaded reference script as an extra manifest source
+      referenceCode: referenceCode || null,
+      // Phase 2a: per-layer overrides
+      layerOverrides: readLayerOverrides(),
+    }),
+  });
+  if (!response.ok) {
+    let errMsg = "Obfuscation failed";
+    try { const errData = await response.json(); errMsg = errData.error || errMsg; } catch (e) {}
+    throw new Error(errMsg);
+  }
+  const data = await response.json();
+  if (!data.success || !data.code) throw new Error(data.error || "Obfuscation returned no code");
+  return {
+    code: data.code,
+    elapsed: data.elapsed_ms,
+    originalSize: data.original_size,
+    obfuscatedSize: data.obfuscated_size,
+    report: data.report || null,
+  };
+}
 
-  if (typeof luaCode !== "string" || luaCode.length === 0) {
-    const report = makeReport(level || LEVEL_BASIC);
-    warn(report, "Empty input");
-    return { code: "", report };
+// ============================================================================
+// v16: FORCE MAXIMUM CONFIRM MODAL
+// ============================================================================
+function openForceMaxModal() {
+  return new Promise((resolve) => {
+    forceMaxConfirmCheck.checked = false;
+    forceMaxProceedBtn.disabled = true;
+    forceMaxModal.classList.add("open");
+    const onCheck = () => { forceMaxProceedBtn.disabled = !forceMaxConfirmCheck.checked; };
+    const onProceed = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+    const cleanup = () => {
+      forceMaxModal.classList.remove("open");
+      forceMaxConfirmCheck.removeEventListener("change", onCheck);
+      forceMaxProceedBtn.removeEventListener("click", onProceed);
+      forceMaxCancelBtn.removeEventListener("click", onCancel);
+    };
+    forceMaxConfirmCheck.addEventListener("change", onCheck);
+    forceMaxProceedBtn.addEventListener("click", onProceed);
+    forceMaxCancelBtn.addEventListener("click", onCancel);
+  });
+}
+
+// ============================================================================
+// v16: ADVANCED OPTIONS COLLAPSIBLE
+// ============================================================================
+advOptionsToggle?.addEventListener("click", () => {
+  advOptionsToggle.classList.toggle("open");
+  advOptionsBody.classList.toggle("open");
+});
+
+// ============================================================================
+// v16: REPORT RENDERING
+// ============================================================================
+function renderReport(report, generatedCode) {
+  if (!report) {
+    reportCard.classList.add("hidden");
+    return;
+  }
+  reportCard.classList.remove("hidden");
+  abCompareResult.classList.add("hidden");
+
+  // Hero
+  document.getElementById("reportRequestedLevel").textContent = (report.requestedLevel || "-").toUpperCase();
+  document.getElementById("reportActualLevel").textContent = (report.actualLevel || "-").toUpperCase();
+  const downgradeBadge = document.getElementById("reportDowngradeBadge");
+  if (report.wasDowngraded) {
+    downgradeBadge.classList.remove("hidden");
+    downgradeBadge.textContent = report.actualLevel === "fallback" || report.actualLevel === "minified"
+      ? "FALLBACK" : "DOWNGRADED";
+    downgradeBadge.className = "badge " + (
+      report.actualLevel === "fallback" || report.actualLevel === "minified"
+        ? "badge-danger" : "badge-warning"
+    );
+  } else {
+    downgradeBadge.classList.add("hidden");
   }
 
-  const chosenLevel = VALID_LEVELS.has(level) ? level : LEVEL_MEDIUM;
-  const report = makeReport(chosenLevel);
-  if (level && !VALID_LEVELS.has(level)) {
-    warn(report, "Unknown level \"" + level + "\", defaulted to medium");
+  // Downgrade banner
+  const banner = document.getElementById("reportDowngradeBanner");
+  if (report.wasDowngraded && report.downgradeReason) {
+    banner.classList.remove("hidden");
+    const isError = report.actualLevel === "fallback" || report.actualLevel === "minified";
+    banner.classList.toggle("error", isError);
+    document.getElementById("reportDowngradeTitle").textContent = isError
+      ? "Fallback mode active" : "Auto-downgrade applied";
+    document.getElementById("reportDowngradeMsg").textContent = report.downgradeReason;
+  } else {
+    banner.classList.add("hidden");
   }
+
+  // Profile
+  const p = report.profile || {};
+  document.getElementById("profRisk").textContent = p.riskTier || "-";
+  document.getElementById("profComplexity").textContent = p.complexityScore != null ? p.complexityScore : "-";
+  document.getElementById("profDepth").textContent = p.maxBlockDepth != null ? p.maxBlockDepth : "-";
+  document.getElementById("profFuncs").textContent = p.functionCount != null ? p.functionCount : "-";
+  document.getElementById("profPcalls").textContent = p.pcallCount != null ? p.pcallCount : "-";
+  const hooks = [];
+  if (p.hasHookfunction) hooks.push("hookfunction");
+  if (p.hasHookmetamethod) hooks.push("hookmetamethod");
+  document.getElementById("profHooks").textContent = hooks.length > 0 ? hooks.join(" + ") : "none";
+
+  // Layers
+  const layersEl = document.getElementById("reportLayers");
+  layersEl.innerHTML = "";
+  const L = report.layers || {};
+  const layerDefs = [
+    { key: "vmWrap", name: "Inner VM wrap" },
+    { key: "outerVM", name: "Multi-layer outer VM" },
+    { key: "antiDebugger", name: "Anti-debugger", mode: L.antiDebuggerMode },
+    { key: "integrityCheck", name: "Integrity check" },
+    { key: "stringEncryption", name: "String encryption", mode: L.stringEncryptionStrict ? "strict" : "normal" },
+    { key: "constantObfuscation", name: "Numeric obfuscation" },
+    { key: "constantPool", name: "Constant pool + poison" },
+    { key: "antiTamper", name: "Anti-tamper wrapper" },
+    { key: "antiDump", name: "Anti-dump" },
+    { key: "byteLevelXor", name: "Byte-level XOR encryption" },
+  ];
+  for (const def of layerDefs) {
+    const active = !!L[def.key];
+    const div = document.createElement("div");
+    div.className = "layer-item " + (active ? "active" : "inactive");
+    div.innerHTML = `
+      <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        ${active
+          ? '<polyline points="20 6 9 17 4 12"/>'
+          : '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'}
+      </svg>
+      <span class="layer-name">${escapeHtml(def.name)}</span>
+      ${active && def.mode ? `<span class="layer-mode">${escapeHtml(def.mode)}</span>` : ""}
+    `;
+    layersEl.appendChild(div);
+  }
+
+  // v22 NEW: Reference manifest stats
+  const manifestSection = document.getElementById("reportManifestSection");
+  const m = report.manifest;
+  if (m && !m.error && typeof m.identifiers === "number") {
+    manifestSection.classList.remove("hidden");
+    document.getElementById("manifestIdentifiers").textContent = m.identifiers.toLocaleString();
+    document.getElementById("manifestStrings").textContent = (m.strings || 0).toLocaleString();
+    document.getElementById("manifestPropertyNames").textContent = (m.propertyNames || 0).toLocaleString();
+    document.getElementById("manifestZeroInits").textContent = (m.zeroInitLocals || 0).toLocaleString();
+    document.getElementById("manifestForwardRefs").textContent = (m.forwardRefs || 0).toLocaleString();
+    document.getElementById("manifestMethodBases").textContent = (m.methodCallBases || 0).toLocaleString();
+  } else {
+    manifestSection.classList.add("hidden");
+  }
+
+  // Stats
+  const s = report.stats || {};
+  document.getElementById("statOrig").textContent = s.originalBytes ? s.originalBytes.toLocaleString() + " B" : "-";
+  document.getElementById("statObf").textContent = s.obfuscatedBytes ? s.obfuscatedBytes.toLocaleString() + " B" : "-";
+  document.getElementById("statRatio").textContent = s.sizeRatio ? s.sizeRatio.toFixed(2) + "x" : "-";
+  document.getElementById("statElapsed").textContent = s.elapsedMs != null ? s.elapsedMs + " ms" : "-";
+  document.getElementById("statStrEnc").textContent = s.stringsEncrypted != null ? s.stringsEncrypted : "-";
+  document.getElementById("statStrSkip").textContent = s.stringsSkipped != null ? s.stringsSkipped : "-";
+  document.getElementById("statNumObf").textContent = s.numericConstsObfuscated != null ? s.numericConstsObfuscated : "-";
+  document.getElementById("statVmStmt").textContent = s.vmCompiledStatements != null ? s.vmCompiledStatements : "0";
+
+  // Warnings Ã¢â‚¬â€ v2: with Copy all + Console toggle
+  const warningsWrap = document.getElementById("reportWarningsWrap");
+  const warningsList = document.getElementById("reportWarningsList");
+  const warningsCount = document.getElementById("reportWarningsCount");
+  const reportConsole = document.getElementById("reportConsole");
+  const copyWarningsBtn = document.getElementById("copyWarningsBtn");
+  const toggleConsoleBtn = document.getElementById("toggleConsoleBtn");
+
+  if (report.warnings && report.warnings.length > 0) {
+    warningsWrap.classList.remove("hidden");
+    warningsList.innerHTML = "";
+    for (const w of report.warnings) {
+      const li = document.createElement("li");
+      li.textContent = w;
+      warningsList.appendChild(li);
+    }
+    if (warningsCount) {
+      warningsCount.textContent = "(" + report.warnings.length + ")";
+    }
+
+    // Build console text: warnings + stage flow + timings + stats summary
+    const consoleLines = [];
+    consoleLines.push("=== OBFUSCATION REPORT ===");
+    consoleLines.push("Requested: " + (report.requestedLevel || "?") + "  |  Applied: " + (report.actualLevel || "?"));
+    if (report.wasDowngraded) {
+      consoleLines.push("!!! DOWNGRADED: " + (report.downgradeReason || "(no reason given)"));
+    }
+    consoleLines.push("");
+    consoleLines.push("=== STATS ===");
+    if (report.stats) {
+      for (const k of Object.keys(report.stats)) {
+        consoleLines.push("  " + k + ": " + JSON.stringify(report.stats[k]));
+      }
+    }
+    if (report.stageTimings && Object.keys(report.stageTimings).length > 0) {
+      consoleLines.push("");
+      consoleLines.push("=== STAGE TIMINGS (ms) ===");
+      for (const k of Object.keys(report.stageTimings)) {
+        consoleLines.push("  " + k + ": " + report.stageTimings[k] + " ms");
+      }
+    }
+    if (report.stagesSucceeded && report.stagesSucceeded.length > 0) {
+      consoleLines.push("");
+      consoleLines.push("=== STAGES SUCCEEDED ===");
+      for (const s of report.stagesSucceeded) consoleLines.push("  Ã¢Å“â€œ " + s);
+    }
+    if (report.stagesSkipped && report.stagesSkipped.length > 0) {
+      consoleLines.push("");
+      consoleLines.push("=== STAGES SKIPPED ===");
+      for (const s of report.stagesSkipped) consoleLines.push("  Ã¢Å“â€” " + s);
+    }
+    // v25.30 forensic: wide snippets from failed stages
+    if (report.stageDebug && report.stageDebug.length > 0) {
+      consoleLines.push("");
+      consoleLines.push("=== STAGE FORENSIC (v25.30) ===");
+      for (const d of report.stageDebug) {
+        consoleLines.push("--- Stage: " + d.stage + " ---");
+        consoleLines.push("Caret byte offset: " + d.caretByteOffset + " / " + d.outputTotalLen);
+        consoleLines.push("Char at caret: [" + (d.wideSnippet.atChar || "") + "]");
+        consoleLines.push("");
+        consoleLines.push("BEFORE (last 200 chars):");
+        consoleLines.push(d.wideSnippet.before);
+        consoleLines.push("");
+        consoleLines.push("AFTER (next 200 chars):");
+        consoleLines.push(d.wideSnippet.after);
+        consoleLines.push("");
+      }
+    }
+    consoleLines.push("");
+    consoleLines.push("=== WARNINGS (" + report.warnings.length + ") ===");
+    report.warnings.forEach((w, i) => {
+      consoleLines.push("[" + (i + 1) + "] " + w);
+      consoleLines.push("");
+    });
+    const consoleText = consoleLines.join("\n");
+    reportConsole.textContent = consoleText;
+
+    // Wire Copy all Ã¢â‚¬â€ copies raw warning list (what most users want)
+    if (copyWarningsBtn && !copyWarningsBtn._wired) {
+      copyWarningsBtn._wired = true;
+      copyWarningsBtn.addEventListener("click", async () => {
+        const text = report.warnings.map((w, i) => "[" + (i + 1) + "] " + w).join("\n\n");
+        try {
+          await navigator.clipboard.writeText(text);
+          const orig = copyWarningsBtn.textContent;
+          copyWarningsBtn.textContent = "Copied!";
+          setTimeout(() => { copyWarningsBtn.textContent = orig; }, 1500);
+        } catch (e) {
+          copyWarningsBtn.textContent = "Copy failed";
+        }
+      });
+    }
+
+    // Wire console toggle
+    if (toggleConsoleBtn && !toggleConsoleBtn._wired) {
+      toggleConsoleBtn._wired = true;
+      toggleConsoleBtn.addEventListener("click", () => {
+        const hidden = reportConsole.classList.toggle("hidden");
+        toggleConsoleBtn.textContent = hidden ? "Show console" : "Hide console";
+      });
+    }
+  } else {
+    warningsWrap.classList.add("hidden");
+    if (warningsCount) warningsCount.textContent = "";
+  }
+
+  // Phase 2a: refresh override hints based on the new profile
+  updateOverrideHints(report.profile);
+
+  // Generated code preview (Prism)
+  if (generatedCode) {
+    // Limit rendering to first 30KB for perf; show truncation notice
+    const MAX_SHOW = 30000;
+    const shown = generatedCode.length > MAX_SHOW
+      ? generatedCode.slice(0, MAX_SHOW) + "\n\n-- ... (truncated, " + (generatedCode.length - MAX_SHOW).toLocaleString() + " chars hidden. Use Copy button for full code) --"
+      : generatedCode;
+    reportCodeOutput.textContent = shown;
+    viewCodeChars.textContent = "(" + generatedCode.length.toLocaleString() + " chars)";
+    // Trigger Prism re-highlight
+    if (window.Prism && window.Prism.highlightElement) {
+      try { window.Prism.highlightElement(reportCodeOutput); } catch (e) {}
+    }
+  } else {
+    reportCodeOutput.textContent = "-- No code available --";
+    viewCodeChars.textContent = "";
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[c]);
+}
+
+closeReportBtn?.addEventListener("click", () => reportCard.classList.add("hidden"));
+
+viewCodeToggle?.addEventListener("click", () => {
+  viewCodeToggle.classList.toggle("open");
+  viewCodeBody.classList.toggle("open");
+});
+
+copyReportCodeBtn?.addEventListener("click", async () => {
+  if (!lastPreviewedCode) return;
+  try {
+    await navigator.clipboard.writeText(lastPreviewedCode);
+    const original = copyReportCodeBtn.textContent;
+    copyReportCodeBtn.textContent = "Copied!";
+    setTimeout(() => (copyReportCodeBtn.textContent = original), 1500);
+  } catch (err) {
+    showMessage("Failed to copy. Select and copy manually.", "error");
+  }
+});
+
+// ============================================================================
+// v16: A/B COMPARE (on-demand)
+// ============================================================================
+abCompareBtn?.addEventListener("click", async () => {
+  if (!lastReport || !lastRequestedLevel) return;
+  const code = scriptCodeInput.value;
+  if (!code.trim()) return;
+
+  // Pick the "other" tier to compare against
+  const actual = lastReport.actualLevel;
+  const alt = actual === "maximum" ? "medium"
+             : actual === "medium" ? "maximum"
+             : actual === "basic" ? "medium"
+             : "basic";
+
+  abCompareBtn.disabled = true;
+  const originalText = abCompareBtn.textContent;
+  abCompareBtn.textContent = "Running " + alt + "...";
 
   try {
-    return runPipeline(luaCode, chosenLevel, options, report);
-  } catch (e) {
-    warn(report, "Pipeline threw: " + e.message + " â€” returning source unchanged");
-    report.actualLevel = "none";
-    report.stats.obfuscatedBytes = luaCode.length;
-    report.stats.sizeRatio = 1;
-    return { code: luaCode, report };
+    const altResult = await obfuscateCode(code, alt, { forceMaximum: false });
+
+    abCompareResult.classList.remove("hidden");
+    document.getElementById("abThisLevel").textContent = actual.toUpperCase();
+    document.getElementById("abThisSize").textContent =
+      `${(lastReport.stats.obfuscatedBytes || 0).toLocaleString()} B (${(lastReport.stats.sizeRatio || 0).toFixed(2)}x) - ${lastReport.stats.elapsedMs || 0} ms`;
+
+    document.getElementById("abAltLevel").textContent = (altResult.report ? altResult.report.actualLevel : alt).toUpperCase();
+    const altRatio = altResult.originalSize > 0 ? (altResult.obfuscatedSize / altResult.originalSize) : 0;
+    document.getElementById("abAltSize").textContent =
+      `${altResult.obfuscatedSize.toLocaleString()} B (${altRatio.toFixed(2)}x) - ${altResult.elapsed} ms`;
+
+    showMessage(`A/B compare complete. Alternate tier: ${alt}`, "success");
+  } catch (err) {
+    showMessage("A/B compare failed: " + err.message, "error");
+  } finally {
+    abCompareBtn.disabled = false;
+    abCompareBtn.textContent = originalText;
+  }
+});
+
+// ============================================================================
+// PREVIEW HANDLER (v16: now populates report card too)
+// ============================================================================
+previewBtn.addEventListener("click", async () => {
+  const code = scriptCodeInput.value;
+  const level = obfuscationLevelSelect.value;
+  const wantForce = !!(forceMaximumCheckbox && forceMaximumCheckbox.checked);
+  hideMessage();
+
+  if (!code.trim()) { showMessage("Wala kang na-paste na code.", "error"); return; }
+  if (code.length > MAX_SCRIPT_SIZE) { showMessage("Script too long. Max 10MB.", "error"); return; }
+
+  // v16: Force max confirm modal
+  let forceMaximum = false;
+  if (wantForce && level === "maximum") {
+    const confirmed = await openForceMaxModal();
+    if (!confirmed) { showMessage("Force-maximum canceled.", "info"); return; }
+    forceMaximum = true;
+  }
+
+  previewBtn.disabled = true;
+  const originalText = previewBtn.textContent;
+  previewBtn.textContent = "Generating preview...";
+
+  try {
+    const result = await obfuscateCode(code, level, { forceMaximum });
+    lastPreviewedCode = result.code;
+    lastReport = result.report;
+    lastRequestedLevel = level;
+
+    // Preview card
+    const ratio = result.obfuscatedSize / result.originalSize;
+    const ratioStr = ratio.toFixed(2);
+    const actualLevel = result.report ? result.report.actualLevel : level;
+    const statsText = level === "none"
+      ? `Level: none | ${result.originalSize.toLocaleString()} chars (no changes)`
+      : `Applied: ${actualLevel} | ${result.originalSize.toLocaleString()} chars -> ${result.obfuscatedSize.toLocaleString()} chars (${ratioStr}x) | ${result.elapsed}ms`;
+    previewStats.textContent = statsText;
+
+    // Prism-highlighted preview (limit for perf)
+    const MAX_SHOW = 30000;
+    const shown = result.code.length > MAX_SHOW
+      ? result.code.slice(0, MAX_SHOW) + "\n\n-- ... (truncated) --"
+      : result.code;
+    previewOutput.textContent = shown;
+    if (window.Prism && window.Prism.highlightElement) {
+      try { window.Prism.highlightElement(previewOutput); } catch (e) {}
+    }
+    previewCard.classList.remove("hidden");
+
+    // v16: Report card (render with generated code, close preview code section by default)
+    renderReport(result.report, result.code);
+    // Make sure the collapsible starts closed
+    viewCodeToggle.classList.remove("open");
+    viewCodeBody.classList.remove("open");
+
+    reportCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    showMessage(`Preview ready. Check the report below, then click Save Script.`, "success");
+  } catch (err) {
+    showMessage(err.message || "Failed to preview.", "error");
+  } finally {
+    previewBtn.disabled = false;
+    previewBtn.textContent = originalText;
+    updateUI();
+  }
+});
+
+closePreviewBtn.addEventListener("click", () => {
+  previewCard.classList.add("hidden");
+});
+
+copyPreviewBtn.addEventListener("click", async () => {
+  if (!lastPreviewedCode) return;
+  try {
+    await navigator.clipboard.writeText(lastPreviewedCode);
+    const original = copyPreviewBtn.textContent;
+    copyPreviewBtn.textContent = "Copied!";
+    setTimeout(() => (copyPreviewBtn.textContent = original), 1500);
+  } catch (err) {
+    showMessage("Failed to copy. Select and copy manually.", "error");
+  }
+});
+
+// ============================================================================
+// SAVE HANDLER (v16: force max modal + report render)
+// ============================================================================
+saveBtn.addEventListener("click", async () => {
+  const name = scriptNameInput.value.trim();
+  const code = scriptCodeInput.value;
+  const level = obfuscationLevelSelect ? obfuscationLevelSelect.value : "none";
+  const requireKey = requireKeyCheckbox ? requireKeyCheckbox.checked : true;
+  const wantForce = !!(forceMaximumCheckbox && forceMaximumCheckbox.checked);
+
+  hideMessage();
+  if (!code.trim()) { showMessage("Wala kang na-paste na code.", "error"); return; }
+  if (code.length > MAX_SCRIPT_SIZE) { showMessage("Script too long. Max 10MB.", "error"); return; }
+
+  // v16: Force max confirm modal
+  let forceMaximum = false;
+  if (wantForce && level === "maximum") {
+    const confirmed = await openForceMaxModal();
+    if (!confirmed) { showMessage("Force-maximum canceled.", "info"); return; }
+    forceMaximum = true;
+  }
+
+  saveBtn.disabled = true;
+  const originalText = saveBtn.textContent;
+
+  try {
+    let finalCode = code;
+    let sizeInfo = "";
+    let report = null;
+    if (level !== "none") {
+      saveBtn.textContent = "Obfuscating...";
+      showMessage(`Obfuscating with level: ${level}${forceMaximum ? " (forced)" : ""}...`, "info");
+      const result = await obfuscateCode(code, level, { forceMaximum });
+      finalCode = result.code;
+      report = result.report;
+      lastPreviewedCode = result.code;
+      lastReport = result.report;
+      lastRequestedLevel = level;
+      sizeInfo = ` (${result.originalSize.toLocaleString()} -> ${result.obfuscatedSize.toLocaleString()} chars)`;
+    }
+
+    saveBtn.textContent = "Saving...";
+    showMessage("Saving to database...", "info");
+
+    let scriptId = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const id = generateId(8);
+      const { error } = await sb.from("scripts").insert({
+        id, user_id: currentUser.id, name: name || null,
+        code: finalCode, key_required: requireKey,
+      });
+      if (!error) { scriptId = id; break; }
+      if (error.code !== "23505") throw error;
+    }
+    if (!scriptId) throw new Error("Could not generate a unique ID. Try again.");
+
+    lastSavedScriptId = scriptId;
+    const loadstring = buildLoadstring(scriptId);
+    loadstringOutput.textContent = loadstring;
+    resultCard.classList.remove("hidden");
+
+    // v16: Also render report if available
+    if (report) {
+      renderReport(report, finalCode);
+      viewCodeToggle.classList.remove("open");
+      viewCodeBody.classList.remove("open");
+    }
+
+    resultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+    const actualLevel = report ? report.actualLevel : level;
+    const modeInfo = requireKey
+      ? ` Generate a key below to enable protection.`
+      : ` Script is FREE (no key required) - anyone can run this loadstring.`;
+    showMessage(
+      `Script saved! ID: ${scriptId} | Applied: ${actualLevel}${sizeInfo}.${modeInfo}`,
+      "success"
+    );
+
+    await refreshScriptOptions();
+  } catch (err) {
+    showMessage(err.message || "Failed to save script.", "error");
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = originalText;
+    updateUI();
+  }
+});
+
+copyBtn.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(loadstringOutput.textContent);
+    const originalText = copyBtn.textContent;
+    copyBtn.textContent = "Copied!";
+    setTimeout(() => { copyBtn.textContent = originalText; }, 1500);
+  } catch (err) {
+    showMessage("Failed to copy. Select and copy manually.", "error");
+  }
+});
+
+// ============================================================================
+// KEY MANAGEMENT (unchanged)
+// ============================================================================
+
+async function refreshScriptOptions() {
+  if (!keyScriptSelect) return;
+  const { data: scripts, error } = await sb
+    .from("scripts").select("id, name, created_at, key_required")
+    .eq("user_id", currentUser.id).order("created_at", { ascending: false });
+  if (error) { console.error("Failed to load scripts:", error); return; }
+
+  keyScriptSelect.innerHTML = '<option value="">-- Select a script --</option>';
+  (scripts || []).forEach((s) => {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    const mode = s.key_required === false ? " [FREE]" : "";
+    opt.textContent = `${s.name || "(unnamed)"} - ${s.id}${mode}`;
+    if (s.key_required === false) opt.disabled = true;
+    keyScriptSelect.appendChild(opt);
+  });
+  if (lastSavedScriptId) keyScriptSelect.value = lastSavedScriptId;
+}
+
+async function loadUserKeys() {
+  if (!keysList) return;
+  await refreshScriptOptions();
+  const { data: keys, error } = await sb
+    .from("user_keys").select("*, scripts(name)")
+    .eq("owner_id", currentUser.id).order("created_at", { ascending: false });
+  if (error) {
+    console.error("Failed to load keys:", error);
+    keysList.innerHTML = '<p class="muted">Failed to load keys.</p>';
+    return;
+  }
+  if (!keys || keys.length === 0) {
+    keysList.innerHTML = '<p class="muted">No keys generated yet. Create one above.</p>';
+    return;
+  }
+  keysList.innerHTML = keys.map((k) => renderKeyRow(k)).join("");
+  keysList.querySelectorAll("[data-action]").forEach((btn) => {
+    btn.addEventListener("click", handleKeyAction);
+  });
+}
+
+function renderKeyRow(k) {
+  const scriptName = k.scripts?.name || "(unnamed)";
+  const status = k.revoked
+    ? '<span class="badge badge-danger">REVOKED</span>'
+    : (k.expires_at && new Date(k.expires_at) < new Date())
+    ? '<span class="badge badge-warning">EXPIRED</span>'
+    : '<span class="badge badge-success">ACTIVE</span>';
+  const hwidInfo = k.hwid
+    ? `<code class="hwid">${k.hwid.substring(0, 16)}...</code>`
+    : '<span class="muted">Not bound yet</span>';
+  const placeIds = k.place_id_whitelist?.length ? k.place_id_whitelist.join(", ") : "Any game";
+  const execInfo = k.max_executions ? `${k.execution_count} / ${k.max_executions}` : `${k.execution_count} / unlimited`;
+  const expiresInfo = k.expires_at ? new Date(k.expires_at).toLocaleDateString() : "Never";
+  return `
+    <div class="key-row">
+      <div class="key-row-head">
+        <code class="key-value">${k.key}</code>
+        ${status}
+      </div>
+      <div class="key-meta">
+        <div><strong>Script:</strong> ${scriptName} (${k.script_id})</div>
+        <div><strong>HWID:</strong> ${hwidInfo}</div>
+        <div><strong>Allowed PlaceIds:</strong> ${placeIds}</div>
+        <div><strong>Executions:</strong> ${execInfo}</div>
+        <div><strong>Expires:</strong> ${expiresInfo}</div>
+      </div>
+      <div class="key-actions row" style="gap: 8px; flex-wrap: wrap">
+        <button data-action="copy-loader" data-key="${k.key}" data-script="${k.script_id}" class="secondary small">Copy Loader</button>
+        <button data-action="reset-hwid" data-key="${k.key}" class="secondary small" ${!k.hwid ? "disabled" : ""}>Reset HWID</button>
+        ${k.revoked
+          ? `<button data-action="unrevoke" data-key="${k.key}" class="secondary small">Unrevoke</button>`
+          : `<button data-action="revoke" data-key="${k.key}" class="secondary small">Kill (Revoke)</button>`}
+        <button data-action="delete" data-key="${k.key}" class="secondary small">Delete</button>
+      </div>
+    </div>
+  `;
+}
+
+async function handleKeyAction(e) {
+  const action = e.currentTarget.dataset.action;
+  const key = e.currentTarget.dataset.key;
+  const scriptId = e.currentTarget.dataset.script;
+  if (action === "copy-loader") {
+    const loader = buildProtectedLoadstring(scriptId, key);
+    try {
+      await navigator.clipboard.writeText(loader);
+      const original = e.currentTarget.textContent;
+      e.currentTarget.textContent = "Copied!";
+      setTimeout(() => (e.currentTarget.textContent = original), 1500);
+    } catch (err) {
+      showMessage("Failed to copy loader.", "error");
+    }
+    return;
+  }
+  if (action === "reset-hwid") {
+    if (!confirm("Reset HWID for this key? User will be able to re-bind on next execution.")) return;
+    const { error } = await sb.from("user_keys").update({ hwid: null, first_used_at: null }).eq("key", key);
+    if (error) { showMessage("Reset failed: " + error.message, "error"); return; }
+    showMessage("HWID reset.", "success");
+    await loadUserKeys();
+    return;
+  }
+  if (action === "revoke") {
+    if (!confirm("Revoke this key? User will get an error on next execution.")) return;
+    const { error } = await sb.from("user_keys").update({ revoked: true }).eq("key", key);
+    if (error) { showMessage("Revoke failed: " + error.message, "error"); return; }
+    showMessage("Key revoked.", "success");
+    await loadUserKeys();
+    return;
+  }
+  if (action === "unrevoke") {
+    const { error } = await sb.from("user_keys").update({ revoked: false }).eq("key", key);
+    if (error) { showMessage("Unrevoke failed: " + error.message, "error"); return; }
+    showMessage("Key restored.", "success");
+    await loadUserKeys();
+    return;
+  }
+  if (action === "delete") {
+    if (!confirm("Delete this key permanently? This cannot be undone.")) return;
+    const { error } = await sb.from("user_keys").delete().eq("key", key);
+    if (error) { showMessage("Delete failed: " + error.message, "error"); return; }
+    showMessage("Key deleted.", "success");
+    await loadUserKeys();
+    return;
   }
 }
 
+generateKeyBtn?.addEventListener("click", async () => {
+  const scriptId = keyScriptSelect.value;
+  if (!scriptId) { showMessage("Select a script first.", "error"); return; }
+  const key = generateLicenseKey();
+  const placeIdsRaw = (keyPlaceIdsInput.value || "").trim();
+  const placeIds = placeIdsRaw
+    ? placeIdsRaw.split(",").map((s) => Number(s.trim())).filter((n) => n > 0)
+    : null;
+  const maxExec = keyMaxExecInput.value ? Number(keyMaxExecInput.value) : null;
+  const expiresAt = keyExpiresInput.value ? new Date(keyExpiresInput.value).toISOString() : null;
+
+  generateKeyBtn.disabled = true;
+  const original = generateKeyBtn.textContent;
+  generateKeyBtn.textContent = "Creating...";
+  try {
+    const { error } = await sb.from("user_keys").insert({
+      key, script_id: scriptId, owner_id: currentUser.id,
+      place_id_whitelist: placeIds, max_executions: maxExec,
+      expires_at: expiresAt, execution_count: 0, revoked: false,
+    });
+    if (error) throw error;
+    showMessage(`Key created: ${key}`, "success");
+    keyPlaceIdsInput.value = "";
+    keyMaxExecInput.value = "";
+    keyExpiresInput.value = "";
+    await loadUserKeys();
+  } catch (err) {
+    showMessage("Failed to create key: " + err.message, "error");
+  } finally {
+    generateKeyBtn.disabled = false;
+    generateKeyBtn.textContent = original;
+  }
+});
+
 // ============================================================================
-// Module exports
+// UTIL
+// ============================================================================
+function showMessage(text, type = "info") {
+  messageDiv.textContent = text;
+  messageDiv.className = `message message-${type}`;
+  messageDiv.classList.remove("hidden");
+}
+function hideMessage() { messageDiv.classList.add("hidden"); }
+
+
+// ============================================================================
+// LARGE SCRIPT SECTION â€” separate pipeline for 300KB+ scripts
+// ============================================================================
+// Isolated wiring. All DOM ids are prefixed with "large*" to avoid collisions
+// with the standard small-script pipeline above. Talks to /obfuscate-large,
+// which uses a conservative transform pipeline (no full AST rewrite) so
+// extreme Luau scripts don't cascade parse failures across stages.
 // ============================================================================
 
-module.exports = {
-  obfuscateLarge,
-  // exported for step-by-step testing and eventual server integration
-  LEVEL_BASIC,
-  LEVEL_MEDIUM,
-  LEVEL_CONSERVATIVE_MAX,
-  LEVEL_PROFILES,
-};
+const LARGE_OBFUSCATE_ENDPOINT = "/obfuscate-large";
+
+// ---- DOM handles ----
+const largeScriptNameInput = document.getElementById("largeScriptName");
+const largeScriptCodeInput = document.getElementById("largeScriptCode");
+const largeCharCountEl     = document.getElementById("largeCharCount");
+const largeUploadBtn       = document.getElementById("largeUploadBtn");
+const largeFileUpload      = document.getElementById("largeFileUpload");
+const largeFileNameEl      = document.getElementById("largeFileName");
+const largeClearBtn        = document.getElementById("largeClearBtn");
+const largeLevelSelect     = document.getElementById("largeObfuscationLevel");
+const largeRequireKeyCheck = document.getElementById("largeRequireKey");
+const largePreviewBtn      = document.getElementById("largePreviewBtn");
+const largeSaveBtn         = document.getElementById("largeSaveBtn");
+const largeMessageDiv      = document.getElementById("largeMessage");
+const largePreviewCard     = document.getElementById("largePreviewCard");
+const largePreviewStats    = document.getElementById("largePreviewStats");
+const largePreviewOutput   = document.getElementById("largePreviewOutput");
+const largeCopyPreviewBtn  = document.getElementById("largeCopyPreviewBtn");
+const largeClosePreviewBtn = document.getElementById("largeClosePreviewBtn");
+const largeResultCard      = document.getElementById("largeResultCard");
+const largeLoadstringOutput= document.getElementById("largeLoadstringOutput");
+const largeCopyBtn         = document.getElementById("largeCopyBtn");
+
+let largeLastPreviewedCode = "";
+let largeLastSavedScriptId = null;
+
+// ---- Message helpers (scoped to the large-script card) ----
+function showLargeMessage(text, type) {
+  if (!largeMessageDiv) return;
+  largeMessageDiv.textContent = text;
+  largeMessageDiv.className = "message message-" + (type || "info");
+  largeMessageDiv.classList.remove("hidden");
+}
+function hideLargeMessage() {
+  if (largeMessageDiv) largeMessageDiv.classList.add("hidden");
+}
+
+// ---- UI state (enable/disable buttons based on code presence) ----
+function updateLargeUI() {
+  if (!largeScriptCodeInput) return;
+  const len = largeScriptCodeInput.value.length;
+  if (largeCharCountEl) largeCharCountEl.textContent = len.toLocaleString() + " characters";
+  const hasCode = len > 0;
+  if (largePreviewBtn) largePreviewBtn.disabled = !hasCode;
+  if (largeSaveBtn)    largeSaveBtn.disabled    = !hasCode;
+}
+largeScriptCodeInput?.addEventListener("input", updateLargeUI);
+
+// ---- File upload (10MB cap, .lua/.txt only) ----
+largeUploadBtn?.addEventListener("click", () => largeFileUpload?.click());
+largeFileUpload?.addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > MAX_SCRIPT_SIZE) {
+    showLargeMessage("File too large. Max 10MB.", "error");
+    return;
+  }
+  const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
+  if (![".lua", ".txt"].includes(ext)) {
+    showLargeMessage("Only .lua or .txt files allowed.", "error");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    largeScriptCodeInput.value = ev.target.result;
+    largeFileNameEl.textContent = "Loaded: " + file.name;
+    if (!largeScriptNameInput.value.trim()) {
+      largeScriptNameInput.value = file.name.replace(/\.(lua|txt)$/i, "");
+    }
+    updateLargeUI();
+    showLargeMessage("Loaded \"" + file.name + "\" (" +
+                     ev.target.result.length.toLocaleString() + " chars)", "success");
+  };
+  reader.onerror = () => showLargeMessage("Failed to read file.", "error");
+  reader.readAsText(file);
+});
+
+// ---- Clear button ----
+largeClearBtn?.addEventListener("click", () => {
+  if (!largeScriptCodeInput.value && !largeScriptNameInput.value) return;
+  if (!confirm("Clear the large script editor?")) return;
+  largeScriptNameInput.value = "";
+  largeScriptCodeInput.value = "";
+  largeFileNameEl.textContent = "";
+  largeFileUpload.value = "";
+  hideLargeMessage();
+  largePreviewCard?.classList.add("hidden");
+  largeResultCard?.classList.add("hidden");
+  updateLargeUI();
+});
+
+// ---- Obfuscation call (large pipeline) ----
+async function obfuscateLarge(code, level) {
+  const response = await fetch(LARGE_OBFUSCATE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code, level,
+      userId: currentUser ? currentUser.id : null,
+    }),
+  });
+
+  // The large endpoint is a separate backend route; if the server hasn't been
+  // updated yet, surface a clear message instead of a raw 404.
+  if (response.status === 404) {
+    throw new Error("Large-script endpoint not yet deployed on the server. Ask the backend to add /obfuscate-large.");
+  }
+  if (!response.ok) {
+    let errMsg = "Large obfuscation failed";
+    try { const data = await response.json(); errMsg = data.error || errMsg; } catch (e) {}
+    throw new Error(errMsg);
+  }
+  const data = await response.json();
+  if (!data.success || !data.code) throw new Error(data.error || "Large obfuscation returned no code");
+  return {
+    code: data.code,
+    elapsed: data.elapsed_ms,
+    originalSize: data.original_size,
+    obfuscatedSize: data.obfuscated_size,
+    profile: data.profile || null,   // e.g. "basic"|"medium"|"conservative-max"
+  };
+}
+
+// ---- Preview button ----
+largePreviewBtn?.addEventListener("click", async () => {
+  const code = largeScriptCodeInput.value;
+  if (!code) return;
+  const level = largeLevelSelect ? largeLevelSelect.value : "medium";
+
+  largePreviewBtn.disabled = true;
+  const originalLabel = largePreviewBtn.textContent;
+  largePreviewBtn.textContent = "Obfuscating...";
+  hideLargeMessage();
+
+  try {
+    const result = await obfuscateLarge(code, level);
+    largeLastPreviewedCode = result.code;
+
+    const ratio = result.originalSize > 0
+      ? (result.obfuscatedSize / result.originalSize)
+      : 0;
+    largePreviewStats.textContent =
+      "Profile: " + (result.profile || level) + " | " +
+      result.originalSize.toLocaleString() + " -> " +
+      result.obfuscatedSize.toLocaleString() + " chars (" +
+      ratio.toFixed(2) + "x) | " +
+      (result.elapsed || 0) + "ms";
+    largePreviewOutput.textContent = result.code;
+    largePreviewCard.classList.remove("hidden");
+    showLargeMessage("Preview ready.", "success");
+  } catch (err) {
+    showLargeMessage(err.message, "error");
+  } finally {
+    largePreviewBtn.disabled = false;
+    largePreviewBtn.textContent = originalLabel;
+  }
+});
+
+// ---- Copy preview ----
+largeCopyPreviewBtn?.addEventListener("click", async () => {
+  if (!largeLastPreviewedCode) return;
+  try {
+    await navigator.clipboard.writeText(largeLastPreviewedCode);
+    const orig = largeCopyPreviewBtn.textContent;
+    largeCopyPreviewBtn.textContent = "Copied!";
+    setTimeout(() => { largeCopyPreviewBtn.textContent = orig; }, 1500);
+  } catch (e) {
+    showLargeMessage("Copy failed: " + e.message, "error");
+  }
+});
+
+// ---- Close preview ----
+largeClosePreviewBtn?.addEventListener("click", () => {
+  largePreviewCard?.classList.add("hidden");
+});
+
+// ---- Save button â€” mirrors the small-script pattern (code stored in the row, no Storage upload) ----
+largeSaveBtn?.addEventListener("click", async () => {
+  const code = largeScriptCodeInput.value;
+  const name = largeScriptNameInput.value.trim();
+  if (!code) return;
+  if (!name) {
+    showLargeMessage("Please enter a script name.", "error");
+    return;
+  }
+
+  const level = largeLevelSelect ? largeLevelSelect.value : "medium";
+  const requireKey = !!(largeRequireKeyCheck && largeRequireKeyCheck.checked);
+
+  largeSaveBtn.disabled = true;
+  const originalLabel = largeSaveBtn.textContent;
+  largeSaveBtn.textContent = "Obfuscating & saving...";
+  hideLargeMessage();
+
+  try {
+    const result = await obfuscateLarge(code, level);
+    const finalCode = result.code;
+
+    // Retry on ID collision (up to 5 attempts) â€” same pattern as small path
+    let scriptId = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const id = generateId(8);
+      const { error } = await sb.from("scripts").insert({
+        id,
+        user_id: currentUser.id,
+        name: name || null,
+        code: finalCode,
+        key_required: requireKey,
+      });
+      if (!error) { scriptId = id; break; }
+      if (error.code !== "23505") throw new Error("DB insert failed: " + error.message);
+    }
+    if (!scriptId) throw new Error("Could not generate a unique ID. Try again.");
+
+    largeLastSavedScriptId = scriptId;
+
+    // Build loadstring (same helpers as small path)
+    let loadstr;
+    if (requireKey) {
+      const key = generateLicenseKey();
+      const { error: keyErr } = await sb.from("user_keys").insert({
+        key, script_id: scriptId, owner_id: currentUser.id,
+      });
+      if (keyErr) throw new Error("Key insert failed: " + keyErr.message);
+      loadstr = buildProtectedLoadstring(scriptId, key);
+    } else {
+      loadstr = buildLoadstring(scriptId);
+    }
+
+    largeLoadstringOutput.textContent = loadstr;
+    largeResultCard.classList.remove("hidden");
+    showLargeMessage("Saved large script \"" + name + "\" (" +
+                     finalCode.length.toLocaleString() + " chars).", "success");
+  } catch (err) {
+    showLargeMessage(err.message, "error");
+  } finally {
+    largeSaveBtn.disabled = false;
+    largeSaveBtn.textContent = originalLabel;
+  }
+});
+
+// ---- Copy loadstring ----
+largeCopyBtn?.addEventListener("click", async () => {
+  const text = largeLoadstringOutput.textContent;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    const orig = largeCopyBtn.textContent;
+    largeCopyBtn.textContent = "Copied!";
+    setTimeout(() => { largeCopyBtn.textContent = orig; }, 1500);
+  } catch (e) {
+    showLargeMessage("Copy failed: " + e.message, "error");
+  }
+});
+
+// Initial UI state
+updateLargeUI();
