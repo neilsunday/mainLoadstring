@@ -597,7 +597,7 @@
       </div>
 
       <!-- ============================================================
-           LARGE SCRIPT SECTION Ã¢â‚¬â€ separate pipeline for 300KB+ scripts
+           LARGE SCRIPT SECTION ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â separate pipeline for 300KB+ scripts
            Uses a safer conservative obfuscation profile (no full AST rewrite)
            so extreme scripts survive without cascading parse failures.
       ============================================================ -->
@@ -608,12 +608,12 @@
           </span>
           <div class="title-block">
             <h2>Large Script Obfuscator</h2>
-            <span class="sub">For scripts 300KB and above Ã¢â‚¬â€ uses a conservative pipeline to avoid parse issues</span>
+            <span class="sub">For scripts 300KB and above ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â uses a conservative pipeline to avoid parse issues</span>
           </div>
         </div>
 
         <div style="padding: 12px 14px; margin-bottom: 20px; border-radius: 10px; background: rgba(255, 165, 60, 0.06); border: 1px solid rgba(255, 165, 60, 0.18); font-size: 12px; line-height: 1.55; color: rgba(255, 210, 128, 0.9);">
-          <strong style="color: #ffd280;">Different pipeline.</strong> This section is isolated from the standard obfuscator above. It applies string encryption, numeric obfuscation, and basic wrapping only Ã¢â‚¬â€ skipping the AST-rewrite stages that cause failures on complex Luau scripts (thousands of functions, deep reflection, extreme complexity). Use this for anything above ~300KB or if the standard MAXIMUM tier keeps rolling back layers on your script.
+          <strong style="color: #ffd280;">Different pipeline.</strong> This section is isolated from the standard obfuscator above. It applies string encryption, numeric obfuscation, and basic wrapping only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skipping the AST-rewrite stages that cause failures on complex Luau scripts (thousands of functions, deep reflection, extreme complexity). Use this for anything above ~300KB or if the standard MAXIMUM tier keeps rolling back layers on your script.
         </div>
 
         <div class="field">
@@ -626,7 +626,7 @@
             <span>Lua Code (Large)</span>
             <span id="largeCharCount" class="hint">0 characters</span>
           </label>
-          <textarea id="largeScriptCode" placeholder="Paste your large Lua script here Ã¢â‚¬â€ this pipeline handles 300KB up to 10MB" spellcheck="false" style="min-height: 200px;"></textarea>
+          <textarea id="largeScriptCode" placeholder="Paste your large Lua script here ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â this pipeline handles 300KB up to 10MB" spellcheck="false" style="min-height: 200px;"></textarea>
         </div>
 
         <div class="upload-row" style="margin-top: 14px">
@@ -644,6 +644,7 @@
             <option value="basic">Basic</option>
             <option value="medium" selected>Medium</option>
             <option value="conservative-max">Conservative</option>
+            <option value="nightmare">Maximum</option>
           </select>
           <small>Full MAXIMUM tier is intentionally unavailable here it uses AST rewriting that breaks on extreme scripts.</small>
         </div>
@@ -652,7 +653,7 @@
           <input type="checkbox" id="largeRequireKey" />
           <label for="largeRequireKey">
             <div class="t-title">Require access key</div>
-            <div class="t-desc">Save the script behind a key check Ã¢â‚¬â€ same key system as the standard section.</div>
+            <div class="t-desc">Save the script behind a key check ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â same key system as the standard section.</div>
           </label>
         </div>
 
@@ -747,6 +748,7 @@
             <div>Anti-tamper<strong id="largeStatAntiTamper">-</strong></div>
             <div>Opaque predicates<strong id="largeStatOpaque">-</strong></div>
             <div>Flatten sequences<strong id="largeStatCFF">-</strong></div>
+            <div>Strings fragmented<strong id="largeStatFragmented">-</strong></div>
           </div>
         </div>
 
