@@ -95,6 +95,7 @@ function makeReport(level) {
       commentsStripped: 0,
       minifyBytesSaved: 0,
       decoderInjected: false,
+      antiTamperApplied: false,
     },
     stagesSucceeded: [],
     stagesSkipped: [],
@@ -793,8 +794,80 @@ function stageDecoderInjection(code, ctx) {
 }
 
 function stageAntiTamperWrap(code, ctx) {
-  // TODO step 6: wrap payload in checksum-verified loader
-  return { code, ok: true, meta: {} };
+  // Step 6: wrap the entire payload in a checksum-verified loader.
+  //
+  // The obfuscated code becomes a Lua string literal. A small loader
+  // computes a Fletcher-16 checksum at runtime and compares it against
+  // embedded expected values. Any modification of the payload string
+  // (even a single byte) triggers an error before execution.
+  //
+  // Escaping: we use decimal escapes for control characters and quotes
+  // so the payload string is safe regardless of what bytes it contains.
+  // This is bulletproof â€” no chance of quote/backslash confusion.
+
+  // Compute Fletcher-16 checksum of the payload bytes.
+  function fletcher16(str) {
+    let a = 0, b = 0;
+    for (let i = 0; i < str.length; i++) {
+      a = (a + str.charCodeAt(i)) % 65535;
+      b = (b + a) % 65535;
+    }
+    return { a, b };
+  }
+
+  // Escape a JS string into a Lua string literal. Uses double quotes and
+  // decimal \ddd escapes for non-printable/quote/backslash characters.
+  function escapeLuaString(str) {
+    const out = [];
+    out.push('"');
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      // Printable ASCII except quote and backslash
+      if (c >= 0x20 && c <= 0x7E && c !== 0x22 && c !== 0x5C) {
+        out.push(String.fromCharCode(c));
+      } else {
+        // Decimal escape â€” always 3 digits when the next char is a digit,
+        // otherwise minimal digits. Safest: always 3 digits.
+        out.push("\\" + c.toString().padStart(3, "0"));
+      }
+    }
+    out.push('"');
+    return out.join("");
+  }
+
+  const checksum = fletcher16(code);
+  const payloadLiteral = escapeLuaString(code);
+
+  const loader =
+    "local _P=" + payloadLiteral + ";" +
+    "local function _V(s) " +
+      "local a,b=0,0 " +
+      "for i=1,#s do " +
+        "a=(a+string.byte(s,i))%65535 " +
+        "b=(b+a)%65535 " +
+      "end " +
+      "return a,b " +
+    "end;" +
+    "local _a,_b=_V(_P);" +
+    "if _a~=" + checksum.a + " or _b~=" + checksum.b + " then " +
+      "error(\"[tamper] payload integrity check failed\") " +
+    "end;" +
+    "local _f=loadstring or load;" +
+    "local _fn,_err=_f(_P);" +
+    "if not _fn then error(\"[loader] \"..tostring(_err)) end;" +
+    "_fn()";
+
+  return {
+    code: loader,
+    ok: true,
+    meta: {
+      antiTamperApplied: true,
+      checksumA: checksum.a,
+      checksumB: checksum.b,
+      loaderBytes: loader.length - code.length,
+      payloadBytes: code.length,
+    },
+  };
 }
 
 const STAGE_FUNCTIONS = {
@@ -863,6 +936,9 @@ function runPipeline(rawCode, level, options, report) {
           }
           if (typeof result.meta.decoderInjected === "boolean") {
             report.stats.decoderInjected = result.meta.decoderInjected;
+          }
+          if (typeof result.meta.antiTamperApplied === "boolean") {
+            report.stats.antiTamperApplied = result.meta.antiTamperApplied;
           }
         }
       } else {
