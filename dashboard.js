@@ -1225,7 +1225,7 @@ largeClosePreviewBtn?.addEventListener("click", () => {
   largePreviewCard?.classList.add("hidden");
 });
 
-// ---- Save button (obfuscate + persist to Supabase, same schema as small path) ----
+// ---- Save button â€” mirrors the small-script pattern (code stored in the row, no Storage upload) ----
 largeSaveBtn?.addEventListener("click", async () => {
   const code = largeScriptCodeInput.value;
   const name = largeScriptNameInput.value.trim();
@@ -1245,30 +1245,27 @@ largeSaveBtn?.addEventListener("click", async () => {
 
   try {
     const result = await obfuscateLarge(code, level);
-    const scriptId = generateId(8);
+    const finalCode = result.code;
 
-    // Same Supabase pattern as the small-script Save button uses.
-    // The 'scripts' table + storage upload contract is unchanged.
-    const { error: insertErr } = await sb.from("scripts").insert({
-      id: scriptId,
-      user_id: currentUser.id,
-      name: name,
-      key_required: requireKey,
-    });
-    if (insertErr) throw new Error("DB insert failed: " + insertErr.message);
-
-    // Upload obfuscated code to Supabase Storage (bucket 'scripts', path <id>)
-    const { error: uploadErr } = await sb.storage
-      .from("scripts")
-      .upload(scriptId, new Blob([result.code], { type: "text/plain" }), {
-        contentType: "text/plain",
-        upsert: true,
+    // Retry on ID collision (up to 5 attempts) â€” same pattern as small path
+    let scriptId = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const id = generateId(8);
+      const { error } = await sb.from("scripts").insert({
+        id,
+        user_id: currentUser.id,
+        name: name || null,
+        code: finalCode,
+        key_required: requireKey,
       });
-    if (uploadErr) throw new Error("Upload failed: " + uploadErr.message);
+      if (!error) { scriptId = id; break; }
+      if (error.code !== "23505") throw new Error("DB insert failed: " + error.message);
+    }
+    if (!scriptId) throw new Error("Could not generate a unique ID. Try again.");
 
     largeLastSavedScriptId = scriptId;
 
-    // Build the loadstring the same way the small path does.
+    // Build loadstring (same helpers as small path)
     let loadstr;
     if (requireKey) {
       const key = generateLicenseKey();
@@ -1283,7 +1280,8 @@ largeSaveBtn?.addEventListener("click", async () => {
 
     largeLoadstringOutput.textContent = loadstr;
     largeResultCard.classList.remove("hidden");
-    showLargeMessage("Saved large script \"" + name + "\".", "success");
+    showLargeMessage("Saved large script \"" + name + "\" (" +
+                     finalCode.length.toLocaleString() + " chars).", "success");
   } catch (err) {
     showLargeMessage(err.message, "error");
   } finally {
