@@ -89,6 +89,7 @@ function makeReport(level) {
       sizeRatio: 1,
       elapsedMs: 0,
       stringsEncrypted: 0,
+      stringsSkipped: 0,
       numericsObfuscated: 0,
       commentsStripped: 0,
       minifyBytesSaved: 0,
@@ -272,8 +273,262 @@ function stageMinify(code, ctx) {
 }
 
 function stageStringEncryption(code, ctx) {
-  // TODO step 3: byte-scan string literals -> _D({bytes}) calls
-  return { code, ok: true, meta: { stringsEncrypted: 0 } };
+  // Step 3: byte-scan string literals, encrypt each with XOR+shift, emit
+  // as _D({byte-table}) call. Decoder function is injected in step 5.
+  //
+  // Whitelist strategy â€” conservative. We skip:
+  //   * Short strings (< 4 chars) â€” decoder call is longer than the string
+  //   * Roblox service/method names â€” reflection breaks if renamed
+  //   * URI patterns (rbxassetid://, http://, https://)
+  //   * Short PascalCase (likely class names)
+  //   * Long-bracket [[..]] and backtick `..` strings (complex, skipped)
+  //
+  // Encryption is deterministic per-run: key + shift + mask4 seeded from
+  // ctx.rngKey (set once per pipeline invocation). The decoder function
+  // name is fixed as _D so step 5 knows what to inject.
+
+  // Derive per-run encryption params from ctx.rngKey (32 hex chars = 16 bytes)
+  const seedBytes = [];
+  for (let i = 0; i < ctx.rngKey.length; i += 2) {
+    seedBytes.push(parseInt(ctx.rngKey.substring(i, i + 2), 16));
+  }
+  const key0 = seedBytes[0] || 137;
+  const key1 = seedBytes[1] || 211;
+  const key2 = seedBytes[2] || 47;
+  const key3 = seedBytes[3] || 199;
+  const shift = ((seedBytes[4] || 13) % 15) + 3;  // 3..17
+
+  // Persist keys on ctx so step 5 (decoder injection) can regenerate the
+  // matching _D function.
+  ctx.stringEncKeys = { key0, key1, key2, key3, shift };
+
+  // ---- Reserved strings that must never be encrypted (reflection surface) ----
+  const RESERVED = new Set([
+    // Roblox services
+    "Players","ReplicatedStorage","ReplicatedFirst","ServerStorage","ServerScriptService",
+    "Workspace","Lighting","StarterGui","StarterPack","StarterPlayer","StarterPlayerScripts",
+    "StarterCharacterScripts","SoundService","Chat","TextChatService","Teams","Debris",
+    "TweenService","RunService","UserInputService","CoreGui","GuiService","ContextActionService",
+    "HttpService","DataStoreService","MessagingService","MemoryStoreService","PathfindingService",
+    "PhysicsService","CollectionService","MarketplaceService","TeleportService","PolicyService",
+    "LocalizationService","BadgeService","GamePassService","GroupService","FriendsService",
+    "SocialService","AnalyticsService","AssetService","InsertService","ContentProvider",
+    "TextService","VoiceChatService","Stats","LogService","VirtualUser","VirtualInputManager",
+    "HapticService","VRService","NotificationService","AdService","RbxAnalyticsService",
+    // Common method names called by name string
+    "GetService","FindFirstChild","FindFirstChildOfClass","FindFirstChildWhichIsA",
+    "FindFirstAncestor","FindFirstAncestorOfClass","FindFirstAncestorWhichIsA",
+    "WaitForChild","GetChildren","GetDescendants","IsA","IsDescendantOf","Destroy","Clone",
+    "GetPropertyChangedSignal","GetAttribute","SetAttribute","GetAttributes",
+    "FireServer","FireClient","FireAllClients","InvokeServer","InvokeClient","Fire",
+    "Connect","Disconnect","Wait","Once","ConnectParallel",
+    "OnClientEvent","OnServerEvent","OnClientInvoke","OnServerInvoke","OnInvoke",
+    "HttpGet","HttpGetAsync","HttpPost","HttpPostAsync",
+    "JSONEncode","JSONDecode","PostAsync","RequestAsync","GetAsync","SetAsync",
+    "UpdateAsync","RemoveAsync",
+    // Character parts
+    "Humanoid","HumanoidRootPart","Head","Torso","UpperTorso","LowerTorso",
+    "LeftArm","RightArm","LeftLeg","RightLeg","Character","Backpack",
+    "PlayerGui","PlayerScripts","Camera","Terrain","Animator",
+    // Type names
+    "boolean","number","string","table","function","userdata","thread","nil",
+  ]);
+
+  function shouldEncrypt(value) {
+    if (typeof value !== "string") return false;
+    if (value.length < 4) return false;
+    if (value.length > 8000) return false;
+    if (RESERVED.has(value)) return false;
+    // Roblox asset URIs
+    if (/^rbxass?et/i.test(value)) return false;
+    if (/^rbxthumb/i.test(value)) return false;
+    // HTTP URLs
+    if (/^https?:\/\//.test(value)) return false;
+    // Metamethods (__index, __newindex, etc.)
+    if (/^__[a-z]/.test(value) && value.length <= 20) return false;
+    // Short PascalCase (class names)
+    if (/^[A-Z][a-z]/.test(value) && value.length < 8) return false;
+    // Short ALL_CAPS (enums)
+    if (/^[A-Z0-9_]+$/.test(value) && value.length < 8) return false;
+    // Package versioning like "sleitnick_net@0.1.0"
+    if (/^[A-Za-z_][A-Za-z0-9_]*@[0-9]/.test(value)) return false;
+    // Class-name suffixes commonly reflected
+    if (/(Service|Controller|Handler|Manager|Remote|Event|Signal|Module)$/.test(value)
+        && value.length < 40) return false;
+    return true;
+  }
+
+  // Encrypt a JS string to a Lua byte-table literal.
+  function encryptToTable(value) {
+    const bytes = [];
+    const mask = [key0, key1, key2, key3];
+    for (let i = 0; i < value.length; i++) {
+      const c = value.charCodeAt(i) & 0xff;
+      const k = (mask[i & 3] + ((i + shift) % 11)) & 0xff;
+      const enc = ((c ^ k) - shift) & 0xff;
+      bytes.push(enc);
+    }
+    return "_D({" + bytes.join(",") + "})";
+  }
+
+  // Unescape a Lua single/double-quoted string literal to its runtime value.
+  // We need this to know what to encrypt.
+  function unescapeLuaString(raw) {
+    // raw includes outer quotes
+    const inner = raw.slice(1, -1);
+    let result = "";
+    let i = 0;
+    while (i < inner.length) {
+      const c = inner[i];
+      if (c === "\\" && i + 1 < inner.length) {
+        const next = inner[i + 1];
+        // Common escapes
+        if (next === "n") { result += "\n"; i += 2; continue; }
+        if (next === "t") { result += "\t"; i += 2; continue; }
+        if (next === "r") { result += "\r"; i += 2; continue; }
+        if (next === "a") { result += "\x07"; i += 2; continue; }
+        if (next === "b") { result += "\b"; i += 2; continue; }
+        if (next === "f") { result += "\f"; i += 2; continue; }
+        if (next === "v") { result += "\x0b"; i += 2; continue; }
+        if (next === "\\" || next === "\"" || next === "'") { result += next; i += 2; continue; }
+        // \ddd (decimal escape, up to 3 digits)
+        if (/[0-9]/.test(next)) {
+          let j = i + 1;
+          let digits = "";
+          while (j < inner.length && digits.length < 3 && /[0-9]/.test(inner[j])) {
+            digits += inner[j];
+            j++;
+          }
+          const code = parseInt(digits, 10);
+          if (code <= 255) {
+            result += String.fromCharCode(code);
+            i = j;
+            continue;
+          }
+        }
+        // \xHH hex escape
+        if (next === "x" && i + 3 < inner.length) {
+          const hex = inner.substring(i + 2, i + 4);
+          if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+            result += String.fromCharCode(parseInt(hex, 16));
+            i += 4;
+            continue;
+          }
+        }
+        // Unknown escape â€” keep as-is
+        result += c + next;
+        i += 2;
+        continue;
+      }
+      result += c;
+      i++;
+    }
+    return result;
+  }
+
+  // Now the byte scan: same shape as step 2's minify but instead of emitting
+  // strings verbatim, we run each through shouldEncrypt + encryptToTable.
+  const raw = code;
+  const n = raw.length;
+  const out = [];
+  let i = 0;
+  let stringsEncrypted = 0;
+  let stringsSkipped = 0;
+
+  while (i < n) {
+    const c = raw[i];
+    const c2 = raw[i + 1];
+
+    // Long-bracket string [[..]] or [=[..]=] â€” skip encryption, emit verbatim
+    if (c === "[") {
+      let j = i + 1;
+      let level = 0;
+      while (j < n && raw[j] === "=") { level++; j++; }
+      if (j < n && raw[j] === "[") {
+        const closer = "]" + "=".repeat(level) + "]";
+        const endIdx = raw.indexOf(closer, j + 1);
+        if (endIdx > 0) {
+          out.push(raw.substring(i, endIdx + closer.length));
+          i = endIdx + closer.length;
+          continue;
+        }
+      }
+    }
+
+    // Comments already stripped in step 2, but be defensive: skip if seen
+    if (c === "-" && c2 === "-") {
+      let j = i + 2;
+      if (j < n && raw[j] === "[") {
+        let level = 0;
+        let k = j + 1;
+        while (k < n && raw[k] === "=") { level++; k++; }
+        if (k < n && raw[k] === "[") {
+          const closer = "]" + "=".repeat(level) + "]";
+          const endIdx = raw.indexOf(closer, k + 1);
+          if (endIdx > 0) { i = endIdx + closer.length; continue; }
+          i = n; continue;
+        }
+      }
+      const nl = raw.indexOf("\n", i);
+      i = nl < 0 ? n : nl;
+      continue;
+    }
+
+    // Quoted string "..." or '...' â€” CANDIDATE FOR ENCRYPTION
+    if (c === '"' || c === "'") {
+      const quote = c;
+      const start = i;
+      i++;
+      while (i < n) {
+        const ch = raw[i];
+        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
+        if (ch === quote) { i++; break; }
+        if (ch === "\n") break;
+        i++;
+      }
+      const literalRaw = raw.substring(start, i);
+      const value = unescapeLuaString(literalRaw);
+
+      if (shouldEncrypt(value)) {
+        out.push(encryptToTable(value));
+        stringsEncrypted++;
+      } else {
+        out.push(literalRaw);
+        stringsSkipped++;
+      }
+      continue;
+    }
+
+    // Backtick string â€” skip encryption (interpolation is complex)
+    if (c === "`") {
+      const start = i;
+      i++;
+      let braceDepth = 0;
+      while (i < n) {
+        const ch = raw[i];
+        if (ch === "\\" && i + 1 < n) { i += 2; continue; }
+        if (ch === "{") braceDepth++;
+        else if (ch === "}") braceDepth--;
+        else if (ch === "`" && braceDepth === 0) { i++; break; }
+        i++;
+      }
+      out.push(raw.substring(start, i));
+      continue;
+    }
+
+    // Regular code character
+    out.push(c);
+    i++;
+  }
+
+  return {
+    code: out.join(""),
+    ok: true,
+    meta: {
+      stringsEncrypted,
+      stringsSkipped,
+    },
+  };
 }
 
 function stageNumericEncoding(code, ctx) {
@@ -339,6 +594,9 @@ function runPipeline(rawCode, level, options, report) {
         if (result.meta) {
           if (typeof result.meta.stringsEncrypted === "number") {
             report.stats.stringsEncrypted += result.meta.stringsEncrypted;
+          }
+          if (typeof result.meta.stringsSkipped === "number") {
+            report.stats.stringsSkipped = (report.stats.stringsSkipped || 0) + result.meta.stringsSkipped;
           }
           if (typeof result.meta.numericsObfuscated === "number") {
             report.stats.numericsObfuscated += result.meta.numericsObfuscated;
